@@ -15,6 +15,18 @@
 
 项目中已有的 `gmssl.sm9` 提供真实 SM9 签名、验签、加密和解密能力。当前默认启用 `--accumulator-mode dynamic`：`sm9rrsfl/accumulator.py` 按《基于国密算法 SM9 的可追踪环签名方案》实现双线性动态累加器，使用 `V=[∏(v_i+s)]P1` 和签名者见证 `W_i=[∏_{j≠i}(v_j+s)]P1` 表示公共环；`sm9rrsfl/crypto.py` 输出常数大小的环签名 `σ=(h,R,S,T)`，数据包中不再携带完整环成员列表，因此签名数据大小不会随环成员数量线性增长。为保持本项目原有审计流程，代码仍保留 SM9 加密撤销陷门，确认恶意后可直接追溯客户端身份。
 
+## 目录结构
+
+当前代码按“核心方案、训练实验、密码开销实验、文档与测试”拆分：
+
+- `sm9rrsfl/crypto.py`、`sm9rrsfl/accumulator.py`：SM9-RRS 数据包、签名/验签、动态累加器和撤销陷门。
+- `sm9rrsfl/fl.py`、`sm9rrsfl/experiments.py`：联邦训练主流程和 MNIST/CIFAR-10 对比实验入口。
+- `sm9rrsfl/benchmarks/`：独立微基准实验入口，不混入 CNN 训练时间；目前包含签名与验签开销测试。
+- `gmssl/`：项目内置国密 SM2/SM3/SM4/SM9 实现。
+- `tests/`：单元测试与流程自检。
+- `docs/`：论文补充说明和机制设计材料。
+- `outputs/`：实验输出目录，默认由启动命令自动创建。
+
 ## 环境说明
 
 建议使用 Python 3.10 及以上版本。首次下载项目后，可按以下方式创建虚拟环境并安装依赖：
@@ -53,6 +65,86 @@ python -m sm9rrsfl.experiments \
 ```
 
 真实 SM9 模式也可以运行；大规模重复实验建议先使用 `--crypto-mode simulated`，确认参数后再切换到 `--crypto-mode sm9`。
+
+## 签名与验签开销实验
+
+该实验用于回答“客户端数量变化时，本方案签名与验签耗时是多少”。实验入口是 `sm9rrsfl/benchmarks/crypto_overhead.py`，不会训练模型，只测密码层。
+
+实验设计：
+
+- 对每个客户端数量 `N` 分别创建 `N` 个客户端身份，并初始化 `SM9RRSContext`。
+- 单独记录 `setup_ms`，包含 SM9 主密钥/客户端私钥提取、动态累加器和见证材料生成。
+- 默认先对所有客户端各签名一次，记录为 `sign_cache_ms`，用于预热动态累加器签名中可复用的身份相关材料；如需把首次签名冷启动开销计入逐次签名，可加 `--no-precompute-sign-cache`。
+- 每次迭代构造同等大小的模型更新摘要，单独计时签名算法，得到 `sign_*_ms`。
+- 使用对应签名包调用公开验签流程，单独计时并校验结果，得到 `verify_*_ms`。
+- 输出 `summary.csv`、`samples.csv`、`summary.json`、`visualizations.html` 和 `plots/*.svg`，其中 `summary.csv` 按客户端数量给出 mean/median/p95/std，`samples.csv` 保留每次迭代的原始样本，可视化页面展示单次签名/验签均值对比、签名耗时、验签耗时、上下文初始化和签名缓存预热开销。
+
+快速自检可以先跑 simulated 模式：
+
+```bash
+python -m sm9rrsfl.benchmarks.crypto_overhead \
+  --crypto-mode simulated \
+  --accumulator-mode dynamic \
+  --client-counts 20 50 100 \
+  --iterations 30 \
+  --warmup 3 \
+  --update-size 4096 \
+  --output-dir outputs/crypto_overhead_simulated
+```
+
+论文最终开销建议跑真实 SM9 模式：
+
+```bash
+python -m sm9rrsfl.benchmarks.crypto_overhead \
+  --crypto-mode sm9 \
+  --accumulator-mode dynamic \
+  --client-counts 20 50 100 \
+  --iterations 30 \
+  --warmup 3 \
+  --update-size 4096 \
+  --output-dir outputs/crypto_overhead_sm9
+```
+
+这条命令各参数含义如下：
+
+- `python -m sm9rrsfl.benchmarks.crypto_overhead`：以模块方式运行签名/验签开销实验脚本。
+- `--crypto-mode sm9`：使用真实 SM9 密码运算；若改为 `simulated`，则只用于快速流程自检。
+- `--accumulator-mode dynamic`：使用本方案的动态累加器模式，即常数大小环签名结构。
+- `--client-counts 20 50 100`：分别测试客户端数量为 `20`、`50`、`100` 时的开销。
+- `--iterations 30`：每种客户端数量下正式记录 `30` 次密码操作样本，用于计算平均值、P95 等；这里不是联邦学习的 `30` 轮训练。
+- `--warmup 3`：正式计时前先运行 `3` 次预热，预热样本不计入最终统计。
+- `--update-size 4096`：构造长度为 `4096` 的模型更新向量，用于模拟客户端上传的一次更新。
+- `--output-dir outputs/crypto_overhead_sm9`：指定 CSV、JSON、SVG 和 HTML 可视化的输出目录。
+
+结果口径说明：
+
+- `sign_mean_ms` / `sign_p95_ms` 表示单个客户端对一次更新执行一次签名的耗时统计。
+- `verify_mean_ms` / `verify_p95_ms` 表示验证方对一个客户端的一份签名包执行一次验签的耗时统计。
+- `setup_ms` 单独统计上下文初始化开销，包括 SM9 参数/主密钥生成、客户端私钥提取、动态累加器和见证材料生成；它不计入 `sign_mean_ms` 或 `verify_mean_ms`。
+- `sign_cache_ms` 单独统计签名缓存预热开销；它也不计入 `sign_mean_ms` 或 `verify_mean_ms`。
+- `P95` 是 95 分位数：将多次耗时从小到大排序后，约 95% 的样本不超过该值，用于观察尾部开销。
+- 上述单次签名/验签开销不是所有客户端总时间。若要估算一轮联邦学习中所有客户端均上传一次更新的串行密码开销，可近似使用 `单次开销 × 客户端数量`；若要估算 `30` 轮，则再乘以 `30`。
+- 当 `--client-counts 100 --iterations 30` 时，只会正式记录 `30` 次单次签名/验签样本，并按客户端顺序轮换采样；如果希望 100 客户端场景中每个客户端至少进入一次正式统计，可以设置 `--iterations 100` 或更大。
+
+如果要对比旧版抽样环模式，可以运行：
+
+```bash
+python -m sm9rrsfl.benchmarks.crypto_overhead \
+  --crypto-mode sm9 \
+  --accumulator-mode none \
+  --ring-size 5 \
+  --client-counts 20 50 100 \
+  --iterations 30 \
+  --warmup 3 \
+  --update-size 4096 \
+  --output-dir outputs/crypto_overhead_legacy_ring5
+```
+
+如果只想保存 CSV/JSON，不生成 SVG 和 HTML，可以额外加入：
+
+```bash
+--no-visualizations
+```
 
 ## 主实验说明
 

@@ -3,6 +3,7 @@
 __all__ = [
     "aggregation",
     "attacks",
+    "benchmarks",
     "crypto",
     "datasets",
     "ding13_detector",
