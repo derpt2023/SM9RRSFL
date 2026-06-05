@@ -17,11 +17,12 @@ from .visualization import generate_visualizations
 
 
 DEFAULT_RATIOS = (0.00, 0.10, 0.20, 0.40, 0.45, 0.60, 0.80)
+DEFAULT_OUTPUT_ROOT = Path("outputs")
 
 
 def main() -> None:
     args = parse_args()
-    output_dir = Path(args.output_dir)
+    output_dir = resolve_output_dir(args)
     if args.visualize_only:
         results = read_results(output_dir / "summary.csv", output_dir / "rounds.csv")
         visualization_path = generate_visualizations(results, output_dir)
@@ -113,7 +114,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", choices=["mnist", "synthetic"], default="mnist")
     parser.add_argument("--data-dir", default="data/mnist")
     parser.add_argument("--download", action="store_true")
-    parser.add_argument("--output-dir", default="outputs/mnist")
+    parser.add_argument(
+        "--output-dir",
+        help=(
+            "Override the default output directory. Without this, SM9 MNIST runs "
+            "write to outputs/mnist and simulated MNIST runs write to "
+            "outputs/mnist_simulated."
+        ),
+    )
     parser.add_argument(
         "--methods",
         nargs="+",
@@ -155,6 +163,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visualize-only", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
+
+
+def resolve_output_dir(args: argparse.Namespace) -> Path:
+    """Return the user supplied output directory or the mode-specific default."""
+
+    if args.output_dir:
+        return Path(args.output_dir)
+    return default_output_dir(args.dataset, args.crypto_mode)
+
+
+def default_output_dir(dataset: str, crypto_mode: str) -> Path:
+    """Choose a default output directory that separates simulated runs."""
+
+    directory_name = dataset
+    if crypto_mode == "simulated":
+        directory_name = f"{directory_name}_simulated"
+    return DEFAULT_OUTPUT_ROOT / directory_name
 
 
 def run_measured_experiment(dataset, config: ExperimentConfig) -> ExperimentResult:

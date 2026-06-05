@@ -74,6 +74,8 @@ python -m sm9rrsfl.experiments \
 
 如果希望先快速复现模型收敛趋势和可视化，可以把上面的 `--crypto-mode sm9` 改成 `--crypto-mode simulated`。真实 SM9 模式会显著更慢，适合用于最终密码开销实验；模拟模式适合先检查准确率、抗投毒趋势和图表生成。
 
+默认情况下，真实 SM9 主实验会写入 `outputs/mnist/`；模拟模式会自动写入 `outputs/mnist_simulated/`，其中也会生成独立的 `visualizations.html` 和 `plots/` 目录，不会覆盖主实验结果。如果显式传入 `--output-dir`，则以手动指定的目录为准。
+
 运行完成后，脚本会自动生成以下可视化：
 
 - 无恶意节点时，三个方案随训练轮次增加的模型收敛/准确率对比。
@@ -99,6 +101,14 @@ python -m sm9rrsfl.experiments \
 ```bash
 python -m sm9rrsfl.experiments \
   --output-dir outputs/mnist \
+  --visualize-only
+```
+
+如果要重新生成模拟模式的图表，可以运行：
+
+```bash
+python -m sm9rrsfl.experiments \
+  --crypto-mode simulated \
   --visualize-only
 ```
 
@@ -137,10 +147,11 @@ python -m sm9rrsfl.experiments \
 - `--suspicion-remove-after 3`：连续疑似达到该次数后再撤销身份并剔除。
 - `--no-visualizations`：只输出 CSV/JSON，不生成 HTML/SVG 图表。
 - `--visualize-only`：不重新训练，只读取输出目录中的 `summary.csv` 和 `rounds.csv` 重新生成图表。
+- `--output-dir outputs/custom`：手动指定输出目录；未指定时，`sm9` 默认写入 `outputs/mnist/`，`simulated` 默认写入 `outputs/mnist_simulated/`。
 
 ## 输出文件
 
-默认输出目录为 `outputs/mnist/`：
+默认输出目录按密码模式区分：`--crypto-mode sm9` 写入 `outputs/mnist/`，`--crypto-mode simulated` 写入 `outputs/mnist_simulated/`。每个输出目录都会包含：
 
 - `summary.csv`：每个方法和恶意比例的一行摘要。
 - `rounds.csv`：逐轮准确率、误差、接收/拒绝更新数、黑名单数量、TP/FP 等。
