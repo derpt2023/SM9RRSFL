@@ -114,7 +114,7 @@ def generate_visualizations(results: list[ExperimentResult], output_dir: str | P
         _write_text(
             runtime_path,
             _grouped_bar_chart(
-                title=f"{title_prefix}三个方案的时间开销对比",
+                title=f"{title_prefix}各方案的时间开销对比",
                 values=_metric_by_ratio_and_method(scenario_results, "runtime_seconds"),
                 x_label="恶意节点比例",
                 y_label="运行时间（秒）",
@@ -126,7 +126,7 @@ def generate_visualizations(results: list[ExperimentResult], output_dir: str | P
         _write_text(
             memory_path,
             _grouped_bar_chart(
-                title=f"{title_prefix}三个方案的内存开销对比",
+                title=f"{title_prefix}各方案的内存开销对比",
                 values=_metric_by_ratio_and_method(scenario_results, "peak_memory_mb"),
                 x_label="恶意节点比例",
                 y_label="峰值内存（MB）",

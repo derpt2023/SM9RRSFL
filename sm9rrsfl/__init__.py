@@ -4,6 +4,7 @@ __all__ = [
     "aggregation",
     "attacks",
     "crypto",
+    "datasets",
     "ding13_detector",
     "fl",
     "mnist",

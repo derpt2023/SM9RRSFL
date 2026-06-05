@@ -8,7 +8,7 @@ from sm9rrsfl.mnist import make_synthetic_mnist_like, partition_clients
 class MnistPartitionTest(unittest.TestCase):
     def test_synthetic_dataset_shape(self):
         dataset = make_synthetic_mnist_like(train_samples=100, test_samples=20, seed=1)
-        self.assertEqual(dataset.x_train.shape, (100, 784))
+        self.assertEqual(dataset.x_train.shape, (100, 1, 28, 28))
         self.assertEqual(dataset.y_test.shape, (20,))
 
     def test_dirichlet_partition_covers_all_samples(self):

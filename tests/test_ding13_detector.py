@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from sm9rrsfl.ding13_detector import Ding13TrajectoryDetector
-from sm9rrsfl.model import NUM_CLASSES, parameter_size
+from sm9rrsfl.model import DEFAULT_SPEC, parameter_size
 
 
 class Ding13DetectorTest(unittest.TestCase):
@@ -22,8 +22,10 @@ class Ding13DetectorTest(unittest.TestCase):
 
         def update_for(client_idx, scale):
             update = np.zeros(parameter_size(), dtype=np.float32)
-            offset = client_idx % NUM_CLASSES
-            update[offset::NUM_CLASSES] = scale
+            matrix_offset = DEFAULT_SPEC.svd_matrix_offset
+            rows, cols = DEFAULT_SPEC.svd_matrix_shape
+            matrix = update[matrix_offset : matrix_offset + rows * cols].reshape(rows, cols)
+            matrix[:, client_idx % cols] = scale
             return update
 
         detector.evaluate_round(

@@ -4,12 +4,12 @@
 
 ## 已实现内容
 
-- MNIST IDX gzip 数据加载与可选下载。
-- 基于 NumPy 的联邦 Softmax 回归训练，支持单个客户端数量或 `20/50/100` 等多客户端数量对比、本地训练轮次、批大小、学习率、IID 独立同分布/Dirichlet 非 IID 划分和误差阈值早停。
+- MNIST IDX gzip 与 CIFAR-10 python batches 数据加载与可选下载。
+- 基于 NumPy 的轻量卷积神经网络（CNN）联邦训练，支持单个客户端数量或 `20/50/100` 等多客户端数量对比、本地训练轮次、批大小、学习率、IID 独立同分布/Dirichlet 非 IID 划分和误差阈值早停。
 - 默认实验比例：`0%`、`10%`、`20%`、`40%`、`45%`、`60%`、`80%`，其中 `0%` 用于无恶意节点收敛对比。
 - SM9-RRS-FL 流程：基于 SM9 群运算的可追踪环签名、论文同款动态累加器、SM9 加密撤销陷门、可链接标签、纵向 SVD 投毒检测、审计撤销、黑名单剔除。
 - 疑似恶意节点处理采用文献 [13] 同款动态降权：单次异常先降低聚合权重，后续正常则恢复权重，连续异常达到阈值后再触发撤销/剔除。
-- Krum 对照实验，使用相同数据划分、恶意比例和攻击方式。
+- Krum 与 FedAvg baseline，对照实验使用相同数据划分、恶意比例和攻击方式。
 - 文献 [13] 对照实验：复现其“奇异值轨迹差分 + Isolation Forest + 动态权重惩罚/恢复 + 连续异常剔除”的在线投毒检测流程。
 - 输出 `summary.csv`、`rounds.csv`、`summary.json`，并自动生成 HTML/SVG 可视化图表，便于后续绘图和论文表格整理。
 
@@ -17,7 +17,7 @@
 
 ## 环境说明
 
-建议使用 Python 3.9 及以上版本。首次下载项目后，可按以下方式创建虚拟环境并安装依赖：
+建议使用 Python 3.10 及以上版本。首次下载项目后，可按以下方式创建虚拟环境并安装依赖：
 
 ```bash
 git clone git@github.com:derpt2023/SM9RRSFL.git
@@ -39,7 +39,7 @@ python -m unittest discover -s tests
 
 ## 快速自检
 
-不下载 MNIST，使用合成 MNIST 形状数据做 smoke run：
+不下载真实数据集，使用合成 MNIST 形状数据做 smoke run：
 
 ```bash
 python -m sm9rrsfl.experiments \
@@ -49,20 +49,73 @@ python -m sm9rrsfl.experiments \
   --rounds 7 \
   --train-samples 800 \
   --test-samples 200 \
-  --methods sm9rrs krum ding13
+  --methods sm9rrs krum ding13 fedavg
 ```
 
 真实 SM9 模式也可以运行；大规模重复实验建议先使用 `--crypto-mode simulated`，确认参数后再切换到 `--crypto-mode sm9`。
 
-## MNIST 主实验
+## 主实验说明
 
-运行本方案、Krum、文献 [13] 三组对照：
+主实验使用同一个轻量 CNN 全局模型接口，并分别在 MNIST 和 CIFAR-10 上运行。本项目不会在一个命令中同时跑两个数据集：每次启动只选择一个 `--dataset`，默认输出目录也按数据集隔离，避免 CIFAR-10 影响 MNIST 的复现实验速度。
+
+两组主实验均对比本方案、Krum、文献 [13] 和 FedAvg，并保留原有实验变量：恶意节点比例、IID/Dirichlet 数据分布、Dirichlet 参数、客户端数量、训练轮次和目标误差阈值。
+
+## simulated 模式快速实验
+
+如果只是想先确认 CNN 训练流程、四组方法对比、IID/Dirichlet 划分和可视化是否能正常跑通，可以先使用 `--crypto-mode simulated` 做小规模快速实验。下面两条命令分别运行 MNIST 和 CIFAR-10，不会互相影响，也不会覆盖正式主实验输出。
+
+MNIST 快速实验：
 
 ```bash
 python -m sm9rrsfl.experiments \
+  --dataset mnist \
   --download \
   --data-dir data/mnist \
-  --methods sm9rrs krum ding13 \
+  --methods sm9rrs krum ding13 fedavg \
+  --ratios 0.00 0.20 0.40 \
+  --partitions iid dirichlet \
+  --dirichlet-alpha 0.5 \
+  --num-clients 10 \
+  --rounds 5 \
+  --train-samples 2000 \
+  --test-samples 500 \
+  --target-error 0.12 \
+  --crypto-mode simulated \
+  --output-dir outputs/quick_mnist_simulated
+```
+
+CIFAR-10 快速实验：
+
+```bash
+python -m sm9rrsfl.experiments \
+  --dataset cifar10 \
+  --download \
+  --data-dir data/cifar10 \
+  --methods sm9rrs krum ding13 fedavg \
+  --ratios 0.00 0.20 0.40 \
+  --partitions iid dirichlet \
+  --dirichlet-alpha 0.5 \
+  --num-clients 10 \
+  --rounds 5 \
+  --train-samples 3000 \
+  --test-samples 500 \
+  --target-error 0.12 \
+  --crypto-mode simulated \
+  --output-dir outputs/quick_cifar10_simulated
+```
+
+快速实验只用于预跑和排查问题；正式论文结果仍建议使用下面的主实验命令，并在最终密码开销实验中切换为 `--crypto-mode sm9`。
+
+## MNIST 主实验
+
+运行本方案、Krum、文献 [13] 和 FedAvg 四组对照：
+
+```bash
+python -m sm9rrsfl.experiments \
+  --dataset mnist \
+  --download \
+  --data-dir data/mnist \
+  --methods sm9rrs krum ding13 fedavg \
   --ratios 0.00 0.10 0.20 0.40 0.45 0.60 0.80 \
   --partitions iid dirichlet \
   --dirichlet-alpha 0.5 \
@@ -72,25 +125,48 @@ python -m sm9rrsfl.experiments \
   --crypto-mode sm9
 ```
 
+真实 SM9 MNIST 主实验默认写入 `outputs/mnist/`；模拟模式默认写入 `outputs/mnist_simulated/`。
+
+## CIFAR-10 主实验
+
+CIFAR-10 使用相同四组方法和相同实验变量，但单独启动：
+
+```bash
+python -m sm9rrsfl.experiments \
+  --dataset cifar10 \
+  --download \
+  --data-dir data/cifar10 \
+  --methods sm9rrs krum ding13 fedavg \
+  --ratios 0.00 0.10 0.20 0.40 0.45 0.60 0.80 \
+  --partitions iid dirichlet \
+  --dirichlet-alpha 0.5 \
+  --client-counts 20 50 100 \
+  --rounds 30 \
+  --target-error 0.12 \
+  --crypto-mode sm9
+```
+
+真实 SM9 CIFAR-10 主实验默认写入 `outputs/cifar10/`；模拟模式默认写入 `outputs/cifar10_simulated/`。
+
 如果希望先快速复现模型收敛趋势和可视化，可以把上面的 `--crypto-mode sm9` 改成 `--crypto-mode simulated`。真实 SM9 模式会显著更慢，适合用于最终密码开销实验；模拟模式适合先检查准确率、抗投毒趋势和图表生成。
 
-默认情况下，真实 SM9 主实验会写入 `outputs/mnist/`；模拟模式会自动写入 `outputs/mnist_simulated/`，其中也会生成独立的 `visualizations.html` 和 `plots/` 目录，不会覆盖主实验结果。如果显式传入 `--output-dir`，则以手动指定的目录为准。
+如果显式传入 `--output-dir`，则以手动指定的目录为准。
 
 运行完成后，脚本会自动生成以下可视化：
 
-- 无恶意节点时，三个方案随训练轮次增加的模型收敛/准确率对比。
-- 不同恶意节点比例下，三个方案随训练轮次增加的模型收敛/准确率对比。
-- 三个方案在不同恶意节点比例下的运行时间开销对比。
-- 三个方案在不同恶意节点比例下的进程峰值 RSS 内存开销对比。
-- 在客户端数量为 `20`、`50`、`100` 时，三个方案的最终准确率、运行时间和峰值内存横向对比。
+- 无恶意节点时，各方案随训练轮次增加的模型收敛/准确率对比。
+- 不同恶意节点比例下，各方案随训练轮次增加的模型收敛/准确率对比。
+- 各方案在不同恶意节点比例下的运行时间开销对比。
+- 各方案在不同恶意节点比例下的进程峰值 RSS 内存开销对比。
+- 在客户端数量为 `20`、`50`、`100` 时，各方案的最终准确率、运行时间和峰值内存横向对比。
 
 当命令中包含 `--partitions iid dirichlet` 时，脚本会分别为 IID 独立同分布和 Dirichlet 非 IID 两种数据场景生成独立图表。图表文件名前缀分别为 `iid_` 与 `dirichlet_alpha_..._`，总览页 `visualizations.html` 会按场景分块展示。
 
 当命令中包含 `--client-counts 20 50 100` 时，脚本会对每个数据划分场景分别运行 `20`、`50`、`100` 个客户端的实验。原有收敛曲线会按客户端数拆分，例如 `iid_clients_020_accuracy_ratio_045.svg`；同时会额外生成 `iid_client_count_accuracy_ratio_045.svg`、`iid_client_count_runtime_ratio_045.svg`、`iid_client_count_memory_ratio_045.svg` 这类客户端数量横向对比图。若只运行单个数据划分场景，文件名前缀会省略为 `client_count_...`。若不传 `--client-counts`，则保持旧行为，只运行 `--num-clients` 指定的单个客户端数量。
 
-如果某个方法提前达到误差阈值，曲线会在真实停止轮次后用较淡的虚线平台段延伸到最大轮次，表示该方法已经停止聚合、最终准确率保持不变。这样既保留“误差小于阈值时停止聚合”的实验语义，也能让三组方案在同一横轴上比较。
+如果某个方法提前达到误差阈值，曲线会在真实停止轮次后用较淡的虚线平台段延伸到最大轮次，表示该方法已经停止聚合、最终准确率保持不变。这样既保留“误差小于阈值时停止聚合”的实验语义，也能让各方案在同一横轴上比较。
 
-如果你希望三组方案都强制跑满固定轮次，便于观察完整收敛曲线，可以加入：
+如果你希望各方案都强制跑满固定轮次，便于观察完整收敛曲线，可以加入：
 
 ```bash
 --no-early-stop
@@ -100,14 +176,25 @@ python -m sm9rrsfl.experiments \
 
 ```bash
 python -m sm9rrsfl.experiments \
+  --dataset mnist \
   --output-dir outputs/mnist \
   --visualize-only
 ```
 
-如果要重新生成模拟模式的图表，可以运行：
+如果要重新生成 CIFAR-10 的图表，可以运行：
 
 ```bash
 python -m sm9rrsfl.experiments \
+  --dataset cifar10 \
+  --output-dir outputs/cifar10 \
+  --visualize-only
+```
+
+如果要重新生成模拟模式的图表，需要指定对应数据集或输出目录，例如：
+
+```bash
+python -m sm9rrsfl.experiments \
+  --dataset mnist \
   --crypto-mode simulated \
   --visualize-only
 ```
@@ -116,6 +203,7 @@ python -m sm9rrsfl.experiments \
 
 ```bash
 python -m sm9rrsfl.experiments \
+  --dataset mnist \
   --download \
   --data-dir data/mnist \
   --methods ding13 \
@@ -129,7 +217,9 @@ python -m sm9rrsfl.experiments \
 
 ## 常用参数
 
-- `--methods sm9rrs krum ding13`：选择实验方法。
+- `--dataset mnist|cifar10|synthetic`：选择单个实验数据集；MNIST 和 CIFAR-10 请分开启动。
+- `--data-dir data/mnist|data/cifar10`：数据集目录；未指定时会按 `--dataset` 自动选择默认目录。
+- `--methods sm9rrs krum ding13 fedavg`：选择实验方法。
 - `--ratios 0.00 0.10 0.20 0.40 0.45 0.60 0.80`：设置恶意节点比例，建议保留 `0.00` 用于生成无恶意节点基线图。
 - `--num-clients 20`：设置单个客户端数量；当没有传 `--client-counts` 时生效。
 - `--client-counts 20 50 100`：一次运行多个客户端数量，并生成客户端数量横向对比图；该参数优先于 `--num-clients`。
@@ -147,11 +237,12 @@ python -m sm9rrsfl.experiments \
 - `--suspicion-remove-after 3`：连续疑似达到该次数后再撤销身份并剔除。
 - `--no-visualizations`：只输出 CSV/JSON，不生成 HTML/SVG 图表。
 - `--visualize-only`：不重新训练，只读取输出目录中的 `summary.csv` 和 `rounds.csv` 重新生成图表。
-- `--output-dir outputs/custom`：手动指定输出目录；未指定时，`sm9` 默认写入 `outputs/mnist/`，`simulated` 默认写入 `outputs/mnist_simulated/`。
+- `--lr 0.05`：CNN 本地训练学习率。
+- `--output-dir outputs/custom`：手动指定输出目录；未指定时，`sm9` 默认写入 `outputs/<dataset>/`，`simulated` 默认写入 `outputs/<dataset>_simulated/`。
 
 ## 输出文件
 
-默认输出目录按密码模式区分：`--crypto-mode sm9` 写入 `outputs/mnist/`，`--crypto-mode simulated` 写入 `outputs/mnist_simulated/`。每个输出目录都会包含：
+默认输出目录按数据集和密码模式区分：MNIST 的 `--crypto-mode sm9` 写入 `outputs/mnist/`，CIFAR-10 的 `--crypto-mode sm9` 写入 `outputs/cifar10/`；模拟模式分别写入 `outputs/mnist_simulated/` 和 `outputs/cifar10_simulated/`。每个输出目录都会包含：
 
 - `summary.csv`：每个方法和恶意比例的一行摘要。
 - `rounds.csv`：逐轮准确率、误差、接收/拒绝更新数、黑名单数量、TP/FP 等。

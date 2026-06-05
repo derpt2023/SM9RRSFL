@@ -7,7 +7,7 @@ from math import ceil, log2
 
 import numpy as np
 
-from .model import INPUT_DIM, NUM_CLASSES
+from .model import DEFAULT_SPEC, NUM_CLASSES
 
 
 @dataclass(frozen=True)
@@ -33,8 +33,10 @@ class Ding13TrajectoryDetector:
         sample_size: int = 256,
         max_depth: int = 10,
         seed: int = 0,
-        input_dim: int = INPUT_DIM,
+        input_dim: int | None = None,
         num_classes: int = NUM_CLASSES,
+        matrix_offset: int | None = None,
+        matrix_shape: tuple[int, int] | None = None,
     ) -> None:
         if not client_ids:
             raise ValueError("client_ids must not be empty")
@@ -48,8 +50,12 @@ class Ding13TrajectoryDetector:
         self.sample_size = sample_size
         self.max_depth = max_depth
         self.seed = seed
-        self.input_dim = input_dim
-        self.num_classes = num_classes
+        if input_dim is not None:
+            self.matrix_offset = 0
+            self.matrix_shape = (input_dim, num_classes)
+        else:
+            self.matrix_offset = DEFAULT_SPEC.svd_matrix_offset if matrix_offset is None else matrix_offset
+            self.matrix_shape = DEFAULT_SPEC.svd_matrix_shape if matrix_shape is None else matrix_shape
         self.weights = {identity: 1.0 / len(client_ids) for identity in client_ids}
         self.previous_singulars: dict[str, np.ndarray] = {}
         self.consecutive_outliers = {identity: 0 for identity in client_ids}
@@ -132,10 +138,12 @@ class Ding13TrajectoryDetector:
             self.weights[identity] = 0.0
 
     def _singular_values(self, update: np.ndarray) -> np.ndarray:
-        weight_count = self.input_dim * self.num_classes
-        matrix = np.asarray(update[:weight_count], dtype=np.float32).reshape(
-            self.input_dim, self.num_classes
-        )
+        rows, cols = self.matrix_shape
+        matrix_size = rows * cols
+        end = self.matrix_offset + matrix_size
+        if update.shape[0] < end:
+            raise ValueError(f"update length {update.shape[0]} is too short for SVD matrix ending at {end}")
+        matrix = np.asarray(update[self.matrix_offset:end], dtype=np.float32).reshape(rows, cols)
         gram = matrix.T @ matrix
         return np.linalg.svd(gram, compute_uv=False).astype(np.float32)
 

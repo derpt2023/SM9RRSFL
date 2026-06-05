@@ -15,6 +15,13 @@ class ExperimentOutputDirTest(unittest.TestCase):
             Path("outputs/mnist_simulated"),
         )
 
+    def test_cifar10_default_uses_dataset_specific_directory(self):
+        self.assertEqual(default_output_dir("cifar10", "sm9"), Path("outputs/cifar10"))
+        self.assertEqual(
+            default_output_dir("cifar10", "simulated"),
+            Path("outputs/cifar10_simulated"),
+        )
+
     def test_explicit_output_directory_overrides_mode_default(self):
         args = argparse.Namespace(
             dataset="mnist",

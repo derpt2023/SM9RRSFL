@@ -9,8 +9,8 @@ from .aggregation import fedavg, krum, weighted_fedavg
 from .attacks import poison_update
 from .crypto import SM9RRSContext
 from .ding13_detector import Ding13TrajectoryDetector
-from .mnist import ImageDataset, partition_clients
-from .model import accuracy, init_params, local_train_delta
+from .datasets import ImageDataset, partition_clients
+from .model import accuracy, init_params, local_train_delta, model_spec_for_dataset
 from .svd_detector import LongitudinalSVDDetector
 from .weighting import SuspicionWeightManager
 
@@ -24,7 +24,7 @@ class ExperimentConfig:
     target_error: float = 0.12
     local_epochs: int = 1
     batch_size: int = 32
-    lr: float = 0.3
+    lr: float = 0.05
     partition: str = "iid"
     dirichlet_alpha: float = 0.5
     attack: str = "alternating"
@@ -103,12 +103,13 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
     malicious_set = set(malicious_clients)
     attack_start = config.attack_start_round or (config.detector_window + 2)
 
-    params = init_params(seed=config.seed)
+    model_spec = model_spec_for_dataset(dataset)
+    params = init_params(seed=config.seed, spec=model_spec)
     records = [
         _make_record(
             config,
             round_id=0,
-            acc=accuracy(params, dataset.x_test, dataset.y_test),
+            acc=accuracy(params, dataset.x_test, dataset.y_test, spec=model_spec),
             accepted=0,
             rejected=0,
             blacklisted=0,
@@ -134,6 +135,8 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
         detector = LongitudinalSVDDetector(
             window_size=config.detector_window,
             z_threshold=config.z_threshold,
+            matrix_offset=model_spec.svd_matrix_offset,
+            matrix_shape=model_spec.svd_matrix_shape,
         )
         sm9_weight_manager = SuspicionWeightManager(
             client_ids,
@@ -146,6 +149,8 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             client_ids,
             contamination=config.malicious_ratio,
             seed=config.seed,
+            matrix_offset=model_spec.svd_matrix_offset,
+            matrix_shape=model_spec.svd_matrix_shape,
         )
 
     blacklisted: set[str] = set()
@@ -170,6 +175,7 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 epochs=config.local_epochs,
                 batch_size=config.batch_size,
                 seed=config.seed + round_id * 1009 + client_idx,
+                spec=model_spec,
             )
             attack_active = identity in malicious_set and round_id >= attack_start
             if attack_active:
@@ -182,7 +188,12 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
 
             if config.method == "sm9rrs":
                 assert crypto is not None and detector is not None
-                packet = crypto.create_packet(identity, delta, round_id=round_id)
+                packet = crypto.create_packet(
+                    identity,
+                    delta,
+                    round_id=round_id,
+                    task_id=dataset.name,
+                )
                 if not crypto.verify_packet(packet, delta):
                     rejected += 1
                     continue
@@ -237,7 +248,7 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 aggregate = fedavg(updates)
             params = (params + aggregate).astype(np.float32)
 
-        acc = accuracy(params, dataset.x_test, dataset.y_test)
+        acc = accuracy(params, dataset.x_test, dataset.y_test, spec=model_spec)
         records.append(
             _make_record(
                 config,

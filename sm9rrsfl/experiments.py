@@ -1,4 +1,4 @@
-"""Command line runner for MNIST poisoning experiments."""
+"""Command line runner for image poisoning experiments."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import resource
 import sys
 from time import perf_counter
 
+from .datasets import load_image_dataset
 from .fl import ExperimentConfig, ExperimentResult, RoundRecord, run_experiment
-from .mnist import load_mnist, make_synthetic_mnist_like
 from .visualization import generate_visualizations
 
 
@@ -29,20 +29,13 @@ def main() -> None:
         print(f"wrote {visualization_path}")
         return
 
-    dataset = (
-        make_synthetic_mnist_like(
-            train_samples=args.train_samples or 1000,
-            test_samples=args.test_samples or 300,
-            seed=args.seed,
-        )
-        if args.dataset == "synthetic"
-        else load_mnist(
-            args.data_dir,
-            download=args.download,
-            train_limit=args.train_samples,
-            test_limit=args.test_samples,
-            seed=args.seed,
-        )
+    dataset = load_image_dataset(
+        args.dataset,
+        args.data_dir,
+        download=args.download,
+        train_limit=args.train_samples,
+        test_limit=args.test_samples,
+        seed=args.seed,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -111,22 +104,24 @@ def main() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", choices=["mnist", "synthetic"], default="mnist")
-    parser.add_argument("--data-dir", default="data/mnist")
+    parser.add_argument("--dataset", choices=["mnist", "cifar10", "synthetic"], default="mnist")
+    parser.add_argument(
+        "--data-dir",
+        help="Dataset directory. Defaults to data/mnist or data/cifar10 based on --dataset.",
+    )
     parser.add_argument("--download", action="store_true")
     parser.add_argument(
         "--output-dir",
         help=(
-            "Override the default output directory. Without this, SM9 MNIST runs "
-            "write to outputs/mnist and simulated MNIST runs write to "
-            "outputs/mnist_simulated."
+            "Override the default output directory. Without this, SM9 runs write "
+            "to outputs/<dataset> and simulated runs write to outputs/<dataset>_simulated."
         ),
     )
     parser.add_argument(
         "--methods",
         nargs="+",
         choices=["sm9rrs", "krum", "ding13", "fedavg"],
-        default=["sm9rrs", "krum", "ding13"],
+        default=["sm9rrs", "krum", "ding13", "fedavg"],
     )
     parser.add_argument("--ratios", nargs="+", type=float, default=list(DEFAULT_RATIOS))
     parser.add_argument("--num-clients", type=int, default=20)
@@ -140,7 +135,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dirichlet-alpha", type=float, default=0.5)
     parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=0.3)
+    parser.add_argument("--lr", type=float, default=0.05)
     parser.add_argument("--attack", choices=["none", "sign_flip", "gaussian", "alternating"], default="alternating")
     parser.add_argument("--attack-scale", type=float, default=5.0)
     parser.add_argument(

@@ -8,7 +8,7 @@ from typing import Deque
 
 import numpy as np
 
-from .model import INPUT_DIM, NUM_CLASSES
+from .model import DEFAULT_SPEC, NUM_CLASSES
 
 
 @dataclass(frozen=True)
@@ -41,16 +41,22 @@ class LongitudinalSVDDetector:
         *,
         window_size: int = 3,
         z_threshold: float = 3.0,
-        input_dim: int = INPUT_DIM,
+        input_dim: int | None = None,
         num_classes: int = NUM_CLASSES,
+        matrix_offset: int | None = None,
+        matrix_shape: tuple[int, int] | None = None,
         eps: float = 1e-8,
     ) -> None:
         if window_size < 1:
             raise ValueError("window_size must be at least 1")
         self.window_size = window_size
         self.z_threshold = z_threshold
-        self.input_dim = input_dim
-        self.num_classes = num_classes
+        if input_dim is not None:
+            self.matrix_offset = 0
+            self.matrix_shape = (input_dim, num_classes)
+        else:
+            self.matrix_offset = DEFAULT_SPEC.svd_matrix_offset if matrix_offset is None else matrix_offset
+            self.matrix_shape = DEFAULT_SPEC.svd_matrix_shape if matrix_shape is None else matrix_shape
         self.eps = eps
         self._states: dict[str, _TagState] = {}
 
@@ -103,10 +109,12 @@ class LongitudinalSVDDetector:
         )
 
     def _extract(self, update: np.ndarray) -> _Feature:
-        weight_count = self.input_dim * self.num_classes
-        matrix = np.asarray(update[:weight_count], dtype=np.float32).reshape(
-            self.input_dim, self.num_classes
-        )
+        rows, cols = self.matrix_shape
+        matrix_size = rows * cols
+        end = self.matrix_offset + matrix_size
+        if update.shape[0] < end:
+            raise ValueError(f"update length {update.shape[0]} is too short for SVD matrix ending at {end}")
+        matrix = np.asarray(update[self.matrix_offset:end], dtype=np.float32).reshape(rows, cols)
         u, singular_values, _ = np.linalg.svd(matrix, full_matrices=False)
         return _Feature(sigma=float(singular_values[0]), u0=u[:, 0].astype(np.float32))
 
