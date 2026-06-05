@@ -17,20 +17,32 @@
 
 ## 环境说明
 
-推荐使用 Codex 自带 Python 运行时，因为其中已经包含 `numpy`：
+建议使用 Python 3.9 及以上版本。首次下载项目后，可按以下方式创建虚拟环境并安装依赖：
 
 ```bash
-/Users/derpt/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m unittest discover -s tests
+git clone git@github.com:derpt2023/SM9RRSFL.git
+cd SM9RRSFL
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-如果使用自己的 Python 环境，需要至少安装 `numpy`。本实现没有依赖 PyTorch、torchvision 或 scikit-learn；文献 [13] 的 Isolation Forest 已用纯 NumPy 实现。
+本实现没有依赖 PyTorch、torchvision 或 scikit-learn；文献 [13] 的 Isolation Forest 已用纯 NumPy 实现。项目内已经包含实验所需的 `gmssl` SM2/SM3/SM4/SM9 代码。
+
+安装完成后建议先运行测试：
+
+```bash
+python -m unittest discover -s tests
+```
 
 ## 快速自检
 
 不下载 MNIST，使用合成 MNIST 形状数据做 smoke run：
 
 ```bash
-/Users/derpt/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m sm9rrsfl.experiments \
+python -m sm9rrsfl.experiments \
   --dataset synthetic \
   --crypto-mode simulated \
   --num-clients 8 \
@@ -47,7 +59,7 @@
 运行本方案、Krum、文献 [13] 三组对照：
 
 ```bash
-/Users/derpt/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m sm9rrsfl.experiments \
+python -m sm9rrsfl.experiments \
   --download \
   --data-dir data/mnist \
   --methods sm9rrs krum ding13 \
@@ -59,6 +71,8 @@
   --target-error 0.12 \
   --crypto-mode sm9
 ```
+
+如果希望先快速复现模型收敛趋势和可视化，可以把上面的 `--crypto-mode sm9` 改成 `--crypto-mode simulated`。真实 SM9 模式会显著更慢，适合用于最终密码开销实验；模拟模式适合先检查准确率、抗投毒趋势和图表生成。
 
 运行完成后，脚本会自动生成以下可视化：
 
@@ -83,7 +97,7 @@
 如果已经跑完实验，只想根据现有 CSV 重新生成图表，不想重新训练，可以运行：
 
 ```bash
-/Users/derpt/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m sm9rrsfl.experiments \
+python -m sm9rrsfl.experiments \
   --output-dir outputs/mnist \
   --visualize-only
 ```
@@ -91,7 +105,7 @@
 如果要更贴近文献 [13] 的公开实验比例，可以额外运行：
 
 ```bash
-/Users/derpt/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m sm9rrsfl.experiments \
+python -m sm9rrsfl.experiments \
   --download \
   --data-dir data/mnist \
   --methods ding13 \
