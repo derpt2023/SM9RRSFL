@@ -24,6 +24,8 @@ MNIST_FILES = {
 CIFAR10_URL = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
 CIFAR10_ARCHIVE = "cifar-10-python.tar.gz"
 CIFAR10_DIR = "cifar-10-batches-py"
+CIFAR10_CHANNEL_MEAN = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32).reshape(1, 3, 1, 1)
+CIFAR10_CHANNEL_STD = np.array([0.2470, 0.2435, 0.2616], dtype=np.float32).reshape(1, 3, 1, 1)
 
 
 @dataclass(frozen=True)
@@ -189,6 +191,8 @@ def load_cifar10(
     x_train = np.concatenate([batch[0] for batch in train_batches], axis=0)
     y_train = np.concatenate([batch[1] for batch in train_batches], axis=0)
     x_test, y_test = _read_cifar10_batch(test_path)
+    x_train = _normalize_cifar10(x_train)
+    x_test = _normalize_cifar10(x_test)
 
     x_train, y_train = _limit_samples(x_train, y_train, train_limit, seed)
     x_test, y_test = _limit_samples(x_test, y_test, test_limit, seed + 1)
@@ -329,6 +333,10 @@ def _read_cifar10_batch(path: Path) -> tuple[np.ndarray, np.ndarray]:
     images = data.reshape(-1, 3, 32, 32).astype(np.float32) / 255.0
     labels = np.asarray(batch["labels"], dtype=np.int64)
     return images, labels
+
+
+def _normalize_cifar10(images: np.ndarray) -> np.ndarray:
+    return ((images.astype(np.float32) - CIFAR10_CHANNEL_MEAN) / CIFAR10_CHANNEL_STD).astype(np.float32)
 
 
 def _safe_extract(handle: tarfile.TarFile, destination: Path) -> None:
