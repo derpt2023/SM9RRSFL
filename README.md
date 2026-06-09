@@ -5,11 +5,11 @@
 ## 已实现内容
 
 - MNIST IDX gzip 与 CIFAR-10 python batches 数据加载与可选下载。
-- 基于 NumPy 的轻量卷积神经网络（CNN）联邦训练，支持单个客户端数量或 `20/50/100` 等多客户端数量对比、本地训练轮次、批大小、学习率、IID 独立同分布/Dirichlet 非 IID 划分和误差阈值早停。
+- 默认基于 NumPy 的卷积神经网络（CNN）联邦训练，并提供可选 PyTorch 后端用于 GPU 加速：MNIST 使用轻量 compact CNN，CIFAR-10 使用两层卷积块 CNN 与按通道标准化输入；支持单个客户端数量或 `20/50/100` 等多客户端数量对比、本地训练轮次、批大小、学习率、IID 独立同分布/Dirichlet 非 IID 划分和误差阈值早停。
 - 默认实验比例：`0%`、`10%`、`20%`、`40%`、`45%`、`60%`、`80%`，其中 `0%` 用于无恶意节点收敛对比。
 - SM9-RRS-FL 流程：基于 SM9 群运算的可追踪环签名、论文同款动态累加器、SM9 加密撤销陷门、可链接标签、纵向 SVD 投毒检测、审计撤销、黑名单剔除。
 - 疑似恶意节点处理采用文献 [13] 同款动态降权：单次异常先降低聚合权重，后续正常则恢复权重，连续异常达到阈值后再触发撤销/剔除。
-- Krum 与 FedAvg baseline，对照实验使用相同数据划分、恶意比例和攻击方式。
+- Krum 与 FedAvg baseline，对照实验使用相同数据划分、恶意比例和攻击方式；FedAvg/加权聚合按客户端本地样本数加权，Krum 保持原始单更新选择语义。
 - 文献 [13] 对照实验：复现其“奇异值轨迹差分 + Isolation Forest + 动态权重惩罚/恢复 + 连续异常剔除”的在线投毒检测流程。
 - 输出 `summary.csv`、`rounds.csv`、`summary.json`，并自动生成 HTML/SVG 可视化图表，便于后续绘图和论文表格整理。
 
@@ -41,7 +41,24 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-本实现没有依赖 PyTorch、torchvision 或 scikit-learn；文献 [13] 的 Isolation Forest 已用纯 NumPy 实现。项目内已经包含实验所需的 `gmssl` SM2/SM3/SM4/SM9 代码。
+基础运行不强制依赖 PyTorch、torchvision 或 scikit-learn；文献 [13] 的 Isolation Forest 已用纯 NumPy 实现。项目内已经包含实验所需的 `gmssl` SM2/SM3/SM4/SM9 代码。
+
+如果希望在 Mac 或 Windows 上使用 GPU 加速 CNN 本地训练，需要额外安装 PyTorch：
+
+- macOS Apple Silicon：安装官方 PyTorch 后，可用 `--compute-backend torch --device mps` 走 Metal/MPS。
+- Windows/Linux NVIDIA：按 PyTorch 官网安装与你显卡驱动匹配的 CUDA 版 PyTorch 后，可用 `--compute-backend torch --device cuda`。
+- 如果不确定设备是否可用，可以使用 `--compute-backend auto --device auto`；代码会优先选择 CUDA，其次选择 MPS，否则回落到 NumPy。
+
+示例检查命令：
+
+```bash
+python - <<'PY'
+import torch
+print("torch", torch.__version__)
+print("cuda", torch.cuda.is_available())
+print("mps", hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+PY
+```
 
 安装完成后建议先运行测试：
 
@@ -148,9 +165,16 @@ python -m sm9rrsfl.benchmarks.crypto_overhead \
 
 ## 主实验说明
 
-主实验使用同一个轻量 CNN 全局模型接口，并分别在 MNIST 和 CIFAR-10 上运行。本项目不会在一个命令中同时跑两个数据集：每次启动只选择一个 `--dataset`，默认输出目录也按数据集隔离，避免 CIFAR-10 影响 MNIST 的复现实验速度。
+主实验使用统一的模型接口，并分别在 MNIST 和 CIFAR-10 上运行。MNIST 仍使用轻量 compact CNN；CIFAR-10 会自动切换到两层卷积块 CNN，并对 CIFAR-10 图像执行通道标准化。本项目不会在一个命令中同时跑两个数据集：每次启动只选择一个 `--dataset`，默认输出目录也按数据集隔离，避免 CIFAR-10 影响 MNIST 的复现实验速度。
 
 两组主实验均对比本方案、Krum、文献 [13] 和 FedAvg，并保留原有实验变量：恶意节点比例、IID/Dirichlet 数据分布、Dirichlet 参数、客户端数量、训练轮次和目标误差阈值。
+
+联邦聚合口径：
+
+- FedAvg 使用各客户端本地样本数作为聚合权重；在 Dirichlet 非 IID 划分下，样本更多的客户端对全局更新贡献更大。
+- SM9-RRS-FL 和文献 [13] 的动态权重会再乘以本地样本数，兼顾防御权重和统计样本量。
+- Krum 保持原始算法语义：每轮选择一个更新，不在 `0%` 恶意节点时自动退化为 FedAvg。
+- SM9-RRS-FL 在 `0%` 恶意节点诊断场景中不触发 SVD 剔除；CIFAR-10 有恶意节点时会使用更长检测窗口和更保守阈值，以降低良性客户端误剔除。
 
 ## simulated 模式快速实验
 
@@ -214,10 +238,27 @@ python -m sm9rrsfl.experiments \
   --client-counts 20 50 100 \
   --rounds 30 \
   --target-error 0.12 \
-  --crypto-mode sm9
+  --crypto-mode sm9 \
+  --compute-backend auto \
+  --device auto
 ```
 
 真实 SM9 MNIST 主实验默认写入 `outputs/mnist/`；模拟模式默认写入 `outputs/mnist_simulated/`。
+
+## CIFAR-10 干净基线
+
+在跑投毒和防御对比前，建议先确认 CIFAR-10 的干净训练能正常收敛。该入口会自动设置 `--dataset cifar10`、`--methods fedavg`、`--ratios 0.00`、`--attack none`、`--partitions iid`，并使用完整 CIFAR-10 训练集/测试集。未显式传入训练参数时，还会把 `--rounds` 设为 `100`、`--local-epochs` 设为 `2`、`--batch-size` 设为 `64`、`--lr` 设为 `0.01`。
+
+```bash
+python -m sm9rrsfl.experiments \
+  --cifar10-clean-baseline \
+  --download \
+  --data-dir data/cifar10 \
+  --compute-backend auto \
+  --device auto
+```
+
+默认输出目录为 `outputs/cifar10_clean_baseline/`。如果只是做快速烟测，可以显式追加 `--rounds 2 --train-samples 400 --test-samples 100 --output-dir outputs/cifar10_clean_smoke`。
 
 ## CIFAR-10 主实验
 
@@ -233,12 +274,35 @@ python -m sm9rrsfl.experiments \
   --partitions iid dirichlet \
   --dirichlet-alpha 0.5 \
   --client-counts 20 50 100 \
-  --rounds 30 \
+  --rounds 100 \
+  --local-epochs 2 \
+  --batch-size 64 \
+  --lr 0.01 \
   --target-error 0.12 \
-  --crypto-mode sm9
+  --crypto-mode sm9 \
+  --compute-backend auto \
+  --device auto
 ```
 
 真实 SM9 CIFAR-10 主实验默认写入 `outputs/cifar10/`；模拟模式默认写入 `outputs/cifar10_simulated/`。
+
+在本机 Mac 上启用 PyTorch MPS 后端，可以在命令末尾额外加入：
+
+```bash
+--compute-backend torch --device mps
+```
+
+在 Windows 或 Linux 的 NVIDIA CUDA 环境中，可以改为：
+
+```bash
+--compute-backend torch --device cuda
+```
+
+如果希望自动选择可用 GPU，并在不可用时回落到原 NumPy 实现，可以使用：
+
+```bash
+--compute-backend auto --device auto
+```
 
 如果希望先快速复现模型收敛趋势和可视化，可以把上面的 `--crypto-mode sm9` 改成 `--crypto-mode simulated`。真实 SM9 模式会显著更慢，适合用于最终密码开销实验；模拟模式适合先检查准确率、抗投毒趋势和图表生成。
 
@@ -310,9 +374,11 @@ python -m sm9rrsfl.experiments \
 ## 常用参数
 
 - `--dataset mnist|cifar10|synthetic`：选择单个实验数据集；MNIST 和 CIFAR-10 请分开启动。
+- `--cifar10-clean-baseline`：运行完整 CIFAR-10 干净 FedAvg 基线，默认输出到 `outputs/cifar10_clean_baseline/`。
 - `--data-dir data/mnist|data/cifar10`：数据集目录；未指定时会按 `--dataset` 自动选择默认目录。
 - `--methods sm9rrs krum ding13 fedavg`：选择实验方法。
 - `--ratios 0.00 0.10 0.20 0.40 0.45 0.60 0.80`：设置恶意节点比例，建议保留 `0.00` 用于生成无恶意节点基线图。
+- `--train-samples 10000` / `--test-samples 2000`：限制真实数据集样本量；不传时使用完整真实数据集。快速实验建议显式传入较小样本数。
 - `--num-clients 20`：设置单个客户端数量；当没有传 `--client-counts` 时生效。
 - `--client-counts 20 50 100`：一次运行多个客户端数量，并生成客户端数量横向对比图；该参数优先于 `--num-clients`。
 - `--attack sign_flip|gaussian|alternating|none`：设置投毒方式，默认 `alternating`。
@@ -321,6 +387,8 @@ python -m sm9rrsfl.experiments \
 - `--partitions iid dirichlet`：一次运行多个数据划分场景，并分别生成可视化；该参数优先于 `--partition`。
 - `--dirichlet-alpha 0.5`：非 IID 强度，值越小各客户端标签分布越偏。
 - `--crypto-mode sm9|simulated`：真实 SM9 或快速模拟密码层。
+- `--compute-backend numpy|auto|torch`：CNN 本地训练/评估后端；默认 `numpy` 保持原实现，`torch` 强制使用 PyTorch，`auto` 在可用时使用 PyTorch GPU，否则回落到 NumPy。
+- `--device auto|cpu|cuda|mps`：PyTorch 设备；Mac Apple Silicon 使用 `mps`，Windows/Linux NVIDIA 使用 `cuda`，`auto` 优先 CUDA、其次 MPS。
 - `--accumulator-mode dynamic|none`：默认 `dynamic`，使用动态累加器和常数大小环签名；`none` 为旧版实验抽象，会在签名包中携带抽样环成员列表。
 - `--ring-size 5`：旧版 `--accumulator-mode none` 下的抽样环大小；动态累加器模式下公共环默认为当前实验的全部客户端，签名包只记录累加器摘要和公共环大小。
 - `--no-early-stop`：不使用误差阈值早停，所有方法都跑满 `--rounds`。
@@ -329,12 +397,12 @@ python -m sm9rrsfl.experiments \
 - `--suspicion-remove-after 3`：连续疑似达到该次数后再撤销身份并剔除。
 - `--no-visualizations`：只输出 CSV/JSON，不生成 HTML/SVG 图表。
 - `--visualize-only`：不重新训练，只读取输出目录中的 `summary.csv` 和 `rounds.csv` 重新生成图表。
-- `--lr 0.05`：CNN 本地训练学习率。
-- `--output-dir outputs/custom`：手动指定输出目录；未指定时，`sm9` 默认写入 `outputs/<dataset>/`，`simulated` 默认写入 `outputs/<dataset>_simulated/`。
+- `--lr 0.05`：CNN 本地训练学习率；`--cifar10-clean-baseline` 未显式传入学习率时使用 `0.01`。
+- `--output-dir outputs/custom`：手动指定输出目录；未指定时，`sm9` 默认写入 `outputs/<dataset>/`，`simulated` 默认写入 `outputs/<dataset>_simulated/`，`--cifar10-clean-baseline` 默认写入 `outputs/cifar10_clean_baseline/`。
 
 ## 输出文件
 
-默认输出目录按数据集和密码模式区分：MNIST 的 `--crypto-mode sm9` 写入 `outputs/mnist/`，CIFAR-10 的 `--crypto-mode sm9` 写入 `outputs/cifar10/`；模拟模式分别写入 `outputs/mnist_simulated/` 和 `outputs/cifar10_simulated/`。每个输出目录都会包含：
+默认输出目录按数据集和密码模式区分：MNIST 的 `--crypto-mode sm9` 写入 `outputs/mnist/`，CIFAR-10 的 `--crypto-mode sm9` 写入 `outputs/cifar10/`；模拟模式分别写入 `outputs/mnist_simulated/` 和 `outputs/cifar10_simulated/`；CIFAR-10 干净基线写入 `outputs/cifar10_clean_baseline/`。每个输出目录都会包含：
 
 - `summary.csv`：每个方法和恶意比例的一行摘要。
 - `rounds.csv`：逐轮准确率、误差、接收/拒绝更新数、黑名单数量、TP/FP 等。
@@ -360,7 +428,7 @@ python -m sm9rrsfl.experiments \
 
 时间开销使用单个配置运行的墙钟时间；内存开销使用当前 Python 进程的峰值 RSS。由于同一脚本会顺序运行多组配置，RSS 是粗粒度指标；如果需要更严格的内存隔离，可以分别运行单个 `--methods` 和单个 `--ratios` 配置后对比。
 
-注意：Krum 在实现上需要满足 `n - f - 2 >= 1`，其中 `n` 为当前参与客户端数，`f` 为恶意客户端数。默认 `20/50/100` 客户端数量下，`80%` 恶意节点仍可运行；如果把客户端数改得很小，`60%` 或 `80%` 可能会使 Krum 无法计算。
+注意：Krum 在实现上需要满足 `n - f - 2 >= 1`，其中 `n` 为当前参与客户端数，`f` 为恶意客户端数。默认 `20/50/100` 客户端数量下，`80%` 恶意节点仍可运行；如果把客户端数改得很小，`60%` 或 `80%` 可能会使 Krum 无法计算。即使在 `0%` 恶意节点下，Krum 也保持“每轮选择一个更新”的原始语义，不自动替换为 FedAvg。
 
 ## 文献 [13] 复现说明
 

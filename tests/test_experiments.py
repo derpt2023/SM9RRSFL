@@ -2,7 +2,7 @@ import argparse
 import unittest
 from pathlib import Path
 
-from sm9rrsfl.experiments import default_output_dir, resolve_output_dir
+from sm9rrsfl.experiments import default_output_dir, parse_args, resolve_output_dir
 
 
 class ExperimentOutputDirTest(unittest.TestCase):
@@ -30,6 +30,31 @@ class ExperimentOutputDirTest(unittest.TestCase):
         )
 
         self.assertEqual(resolve_output_dir(args), Path("outputs/custom"))
+
+    def test_cifar10_clean_baseline_preset(self):
+        args = parse_args(["--cifar10-clean-baseline", "--rounds", "5"])
+
+        self.assertEqual(args.dataset, "cifar10")
+        self.assertEqual(args.methods, ["fedavg"])
+        self.assertEqual(args.ratios, [0.0])
+        self.assertEqual(args.attack, "none")
+        self.assertEqual(args.partitions, ["iid"])
+        self.assertIsNone(args.train_samples)
+        self.assertIsNone(args.test_samples)
+        self.assertEqual(args.rounds, 5)
+        self.assertEqual(resolve_output_dir(args), Path("outputs/cifar10_clean_baseline"))
+
+    def test_compute_backend_defaults_to_numpy(self):
+        args = parse_args([])
+
+        self.assertEqual(args.compute_backend, "numpy")
+        self.assertEqual(args.device, "auto")
+
+    def test_gpu_backend_arguments_are_parsed(self):
+        args = parse_args(["--compute-backend", "torch", "--device", "mps"])
+
+        self.assertEqual(args.compute_backend, "torch")
+        self.assertEqual(args.device, "mps")
 
 
 if __name__ == "__main__":

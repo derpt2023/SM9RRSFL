@@ -13,6 +13,7 @@ from time import perf_counter
 
 from .datasets import load_image_dataset
 from .fl import ExperimentConfig, ExperimentResult, RoundRecord, run_experiment
+from .model import describe_compute_backend
 from .visualization import generate_visualizations
 
 
@@ -41,6 +42,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     results: list[ExperimentResult] = []
     started = perf_counter()
+    print(f"compute_backend={describe_compute_backend(args.compute_backend, args.device)}")
 
     partitions = args.partitions or [args.partition]
     client_counts = args.client_counts or [args.num_clients]
@@ -57,6 +59,8 @@ def main() -> None:
                         local_epochs=args.local_epochs,
                         batch_size=args.batch_size,
                         lr=args.lr,
+                        compute_backend=args.compute_backend,
+                        device=args.device,
                         partition=partition,
                         dirichlet_alpha=args.dirichlet_alpha,
                         attack=args.attack,
@@ -102,9 +106,17 @@ def main() -> None:
     print(f"elapsed_seconds={elapsed:.2f}")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=["mnist", "cifar10", "synthetic"], default="mnist")
+    parser.add_argument(
+        "--cifar10-clean-baseline",
+        action="store_true",
+        help=(
+            "Run a full-data clean CIFAR-10 FedAvg baseline: dataset=cifar10, "
+            "methods=fedavg, ratios=0, attack=none, partition=iid."
+        ),
+    )
     parser.add_argument(
         "--data-dir",
         help="Dataset directory. Defaults to data/mnist or data/cifar10 based on --dataset.",
@@ -128,14 +140,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--client-counts", "--num-clients-list", nargs="+", type=int)
     parser.add_argument("--rounds", type=int, default=30)
     parser.add_argument("--target-error", type=float, default=0.12)
-    parser.add_argument("--train-samples", type=int, default=10000)
-    parser.add_argument("--test-samples", type=int, default=2000)
+    parser.add_argument(
+        "--train-samples",
+        type=int,
+        default=None,
+        help="Limit training samples. Omit to use the full real dataset.",
+    )
+    parser.add_argument(
+        "--test-samples",
+        type=int,
+        default=None,
+        help="Limit test samples. Omit to use the full real dataset.",
+    )
     parser.add_argument("--partition", choices=["iid", "dirichlet"], default="iid")
     parser.add_argument("--partitions", nargs="+", choices=["iid", "dirichlet"])
     parser.add_argument("--dirichlet-alpha", type=float, default=0.5)
     parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=0.05)
+    parser.add_argument(
+        "--compute-backend",
+        choices=["numpy", "auto", "torch"],
+        default="numpy",
+        help=(
+            "Local CNN compute backend. numpy preserves the original implementation; "
+            "torch enables optional PyTorch CPU/GPU execution; auto uses torch only "
+            "when the requested device is available."
+        ),
+    )
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda", "mps"],
+        default="auto",
+        help="PyTorch device for --compute-backend torch/auto: auto, cpu, cuda, or mps.",
+    )
     parser.add_argument("--attack", choices=["none", "sign_flip", "gaussian", "alternating"], default="alternating")
     parser.add_argument("--attack-scale", type=float, default=5.0)
     parser.add_argument(
@@ -157,7 +195,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-visualizations", action="store_true")
     parser.add_argument("--visualize-only", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    return parser.parse_args()
+    raw_args = sys.argv[1:] if argv is None else argv
+    return apply_presets(parser.parse_args(argv), raw_args)
+
+
+def apply_presets(args: argparse.Namespace, raw_args: list[str]) -> argparse.Namespace:
+    if not args.cifar10_clean_baseline:
+        return args
+
+    args.dataset = "cifar10"
+    args.methods = ["fedavg"]
+    args.ratios = [0.0]
+    args.attack = "none"
+    args.partition = "iid"
+    args.partitions = ["iid"]
+    if not _has_any_option(raw_args, "--train-samples"):
+        args.train_samples = None
+    if not _has_any_option(raw_args, "--test-samples"):
+        args.test_samples = None
+    if not _has_any_option(raw_args, "--rounds"):
+        args.rounds = 100
+    if not _has_any_option(raw_args, "--local-epochs"):
+        args.local_epochs = 2
+    if not _has_any_option(raw_args, "--batch-size"):
+        args.batch_size = 64
+    if not _has_any_option(raw_args, "--lr"):
+        args.lr = 0.01
+    if not _has_any_option(raw_args, "--num-clients", "--client-counts", "--num-clients-list"):
+        args.num_clients = 20
+        args.client_counts = [20]
+    return args
+
+
+def _has_any_option(raw_args: list[str], *names: str) -> bool:
+    return any(arg == name or arg.startswith(f"{name}=") for arg in raw_args for name in names)
 
 
 def resolve_output_dir(args: argparse.Namespace) -> Path:
@@ -165,6 +236,8 @@ def resolve_output_dir(args: argparse.Namespace) -> Path:
 
     if args.output_dir:
         return Path(args.output_dir)
+    if getattr(args, "cifar10_clean_baseline", False):
+        return DEFAULT_OUTPUT_ROOT / "cifar10_clean_baseline"
     return default_output_dir(args.dataset, args.crypto_mode)
 
 
@@ -271,6 +344,8 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             local_epochs=int(row["local_epochs"]),
             batch_size=int(row["batch_size"]),
             lr=float(row["lr"]),
+            compute_backend=row.get("compute_backend") or "numpy",
+            device=row.get("device") or "auto",
             partition=partition,
             dirichlet_alpha=alpha,
             attack=row["attack"],

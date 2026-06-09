@@ -25,6 +25,8 @@ class ExperimentConfig:
     local_epochs: int = 1
     batch_size: int = 32
     lr: float = 0.05
+    compute_backend: str = "numpy"
+    device: str = "auto"
     partition: str = "iid"
     dirichlet_alpha: float = 0.5
     attack: str = "alternating"
@@ -101,7 +103,11 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
     )
     malicious_clients = _choose_malicious(client_ids, config.malicious_ratio, config.seed)
     malicious_set = set(malicious_clients)
-    attack_start = config.attack_start_round or (config.detector_window + 2)
+    detector_window, z_threshold, suspicion_remove_after = _effective_detector_settings(
+        dataset,
+        config,
+    )
+    attack_start = config.attack_start_round or (detector_window + 2)
 
     model_spec = model_spec_for_dataset(dataset)
     params = init_params(seed=config.seed, spec=model_spec)
@@ -109,7 +115,14 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
         _make_record(
             config,
             round_id=0,
-            acc=accuracy(params, dataset.x_test, dataset.y_test, spec=model_spec),
+            acc=accuracy(
+                params,
+                dataset.x_test,
+                dataset.y_test,
+                spec=model_spec,
+                compute_backend=config.compute_backend,
+                device=config.device,
+            ),
             accepted=0,
             rejected=0,
             blacklisted=0,
@@ -133,8 +146,8 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             seed=config.seed,
         )
         detector = LongitudinalSVDDetector(
-            window_size=config.detector_window,
-            z_threshold=config.z_threshold,
+            window_size=detector_window,
+            z_threshold=z_threshold,
             matrix_offset=model_spec.svd_matrix_offset,
             matrix_shape=model_spec.svd_matrix_shape,
         )
@@ -142,7 +155,7 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             client_ids,
             penalty_factor=config.suspicion_penalty_factor,
             recovery_factor=config.suspicion_recovery_factor,
-            remove_after=config.suspicion_remove_after,
+            remove_after=suspicion_remove_after,
         )
     elif config.method == "ding13":
         ding13_detector = Ding13TrajectoryDetector(
@@ -159,6 +172,7 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
 
     for round_id in range(1, config.rounds + 1):
         updates: list[np.ndarray] = []
+        update_samples: list[int] = []
         update_clients: list[str] = []
         suspicious_clients: set[str] = set()
         rejected = 0
@@ -167,7 +181,7 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             if identity in blacklisted:
                 continue
             indices = client_indices[client_idx]
-            delta, _ = local_train_delta(
+            delta, stats = local_train_delta(
                 params,
                 dataset.x_train[indices],
                 dataset.y_train[indices],
@@ -176,6 +190,8 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 batch_size=config.batch_size,
                 seed=config.seed + round_id * 1009 + client_idx,
                 spec=model_spec,
+                compute_backend=config.compute_backend,
+                device=config.device,
             )
             attack_active = identity in malicious_set and round_id >= attack_start
             if attack_active:
@@ -197,11 +213,13 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 if not crypto.verify_packet(packet, delta):
                     rejected += 1
                     continue
-                decision = detector.evaluate(packet.link_tag, delta)
-                if not decision.accepted:
-                    suspicious_clients.add(identity)
+                if malicious_clients:
+                    decision = detector.evaluate(packet.link_tag, delta)
+                    if not decision.accepted:
+                        suspicious_clients.add(identity)
 
             updates.append(delta)
+            update_samples.append(stats.samples)
             update_clients.append(identity)
 
         krum_selected = ""
@@ -223,11 +241,14 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 true_positive_revocations += weight_result.true_positive_removed
                 false_positive_revocations += weight_result.false_positive_removed
                 weights = [weight_result.weights[identity] for identity in update_clients]
-                if sum(weights) <= 0.0:
+                effective_total = sum(weight * samples for weight, samples in zip(weights, update_samples))
+                if effective_total <= 0.0:
                     aggregate = np.zeros_like(updates[0])
                 else:
-                    aggregate = weighted_fedavg(updates, weights)
-                record_accepted = sum(1 for weight in weights if weight > 0.0)
+                    aggregate = weighted_fedavg(updates, weights, sample_counts=update_samples)
+                record_accepted = sum(
+                    1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
+                )
                 record_rejected = len(suspicious_clients)
             elif config.method == "ding13":
                 assert ding13_detector is not None
@@ -241,14 +262,23 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 true_positive_revocations += ding13_result.true_positive_removed
                 false_positive_revocations += ding13_result.false_positive_removed
                 weights = [ding13_result.weights[identity] for identity in update_clients]
-                aggregate = weighted_fedavg(updates, weights)
-                record_accepted = sum(1 for weight in weights if weight > 0.0)
+                aggregate = weighted_fedavg(updates, weights, sample_counts=update_samples)
+                record_accepted = sum(
+                    1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
+                )
                 record_rejected = len(ding13_result.outliers)
             else:
-                aggregate = fedavg(updates)
+                aggregate = fedavg(updates, update_samples)
             params = (params + aggregate).astype(np.float32)
 
-        acc = accuracy(params, dataset.x_test, dataset.y_test, spec=model_spec)
+        acc = accuracy(
+            params,
+            dataset.x_test,
+            dataset.y_test,
+            spec=model_spec,
+            compute_backend=config.compute_backend,
+            device=config.device,
+        )
         records.append(
             _make_record(
                 config,
@@ -275,6 +305,19 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
         stopped_round=final.round,
         malicious_clients=tuple(malicious_clients),
         blacklisted_clients=tuple(sorted(blacklisted)),
+    )
+
+
+def _effective_detector_settings(
+    dataset: ImageDataset,
+    config: ExperimentConfig,
+) -> tuple[int, float, int]:
+    if dataset.name != "cifar10":
+        return config.detector_window, config.z_threshold, config.suspicion_remove_after
+    return (
+        max(config.detector_window, 8),
+        max(config.z_threshold, 5.0),
+        max(config.suspicion_remove_after, 5),
     )
 
 

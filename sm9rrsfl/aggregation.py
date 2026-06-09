@@ -15,19 +15,30 @@ class KrumResult:
     neighbor_count: int
 
 
-def fedavg(updates: list[np.ndarray] | np.ndarray) -> np.ndarray:
+def fedavg(
+    updates: list[np.ndarray] | np.ndarray,
+    sample_counts: list[int] | np.ndarray | None = None,
+) -> np.ndarray:
     stacked = _stack_updates(updates)
+    if sample_counts is not None:
+        return weighted_fedavg(stacked, sample_counts)
     return np.mean(stacked, axis=0).astype(np.float32)
 
 
 def weighted_fedavg(
     updates: list[np.ndarray] | np.ndarray,
     weights: list[float] | np.ndarray,
+    sample_counts: list[int] | np.ndarray | None = None,
 ) -> np.ndarray:
     stacked = _stack_updates(updates)
     weight_array = np.asarray(weights, dtype=np.float64)
     if weight_array.shape != (stacked.shape[0],):
         raise ValueError("weights must have shape [num_updates]")
+    if sample_counts is not None:
+        sample_array = np.asarray(sample_counts, dtype=np.float64)
+        if sample_array.shape != (stacked.shape[0],):
+            raise ValueError("sample_counts must have shape [num_updates]")
+        weight_array = weight_array * np.maximum(sample_array, 0.0)
     total = float(np.sum(weight_array))
     if total <= 0.0:
         return fedavg(stacked)
