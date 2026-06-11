@@ -44,11 +44,58 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(args.rounds, 5)
         self.assertEqual(resolve_output_dir(args), Path("outputs/cifar10_clean_baseline"))
 
+    def test_cifar10_clean_baseline_uses_cifar_training_defaults(self):
+        args = parse_args(["--cifar10-clean-baseline"])
+
+        self.assertEqual(args.rounds, 300)
+        self.assertEqual(args.local_epochs, 5)
+        self.assertEqual(args.batch_size, 50)
+        self.assertEqual(args.lr, 0.05)
+        self.assertEqual(args.lr_decay, 0.99)
+
     def test_compute_backend_defaults_to_numpy(self):
         args = parse_args([])
 
         self.assertEqual(args.compute_backend, "numpy")
         self.assertEqual(args.device, "auto")
+        self.assertEqual(args.rounds, 30)
+        self.assertEqual(args.local_epochs, 1)
+        self.assertEqual(args.batch_size, 32)
+        self.assertEqual(args.lr, 0.05)
+        self.assertEqual(args.lr_decay, 1.0)
+
+    def test_cifar10_uses_paper_training_defaults(self):
+        args = parse_args(["--dataset", "cifar10"])
+
+        self.assertEqual(args.rounds, 300)
+        self.assertEqual(args.local_epochs, 5)
+        self.assertEqual(args.batch_size, 50)
+        self.assertEqual(args.lr, 0.05)
+        self.assertEqual(args.lr_decay, 0.99)
+
+    def test_explicit_training_arguments_override_dataset_defaults(self):
+        args = parse_args(
+            [
+                "--dataset",
+                "cifar10",
+                "--rounds",
+                "7",
+                "--local-epochs",
+                "2",
+                "--batch-size",
+                "16",
+                "--lr",
+                "0.02",
+                "--lr-decay",
+                "0.95",
+            ]
+        )
+
+        self.assertEqual(args.rounds, 7)
+        self.assertEqual(args.local_epochs, 2)
+        self.assertEqual(args.batch_size, 16)
+        self.assertEqual(args.lr, 0.02)
+        self.assertEqual(args.lr_decay, 0.95)
 
     def test_gpu_backend_arguments_are_parsed(self):
         args = parse_args(["--compute-backend", "torch", "--device", "mps"])

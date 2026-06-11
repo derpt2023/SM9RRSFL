@@ -24,7 +24,8 @@ class ModelSpec:
     num_classes: int = NUM_CLASSES
     architecture: str = "compact"
     conv_filters: int = 8
-    cifar_conv_filters: tuple[int, int] = (16, 32)
+    cifar_conv_filters: tuple[int, int] = (64, 64)
+    cifar_hidden_dims: tuple[int, int] = (384, 192)
     kernel_size: int = 3
     conv_stride: int = 2
     pool_size: int = 2
@@ -96,10 +97,14 @@ class ModelSpec:
 
     @property
     def dense_weight_size(self) -> int:
+        if self.architecture == "cifar10":
+            return self.feature_dim * self.cifar_hidden_dims[0]
         return self.feature_dim * self.num_classes
 
     @property
     def dense_bias_offset(self) -> int:
+        if self.architecture == "cifar10":
+            return self.cifar_logits_bias_offset
         return self.dense_weight_offset + self.dense_weight_size
 
     @property
@@ -107,11 +112,43 @@ class ModelSpec:
         return self.dense_bias_offset + self.num_classes
 
     @property
+    def cifar_dense1_bias_offset(self) -> int:
+        return self.dense_weight_offset + self.dense_weight_size
+
+    @property
+    def cifar_dense2_weight_offset(self) -> int:
+        return self.cifar_dense1_bias_offset + self.cifar_hidden_dims[0]
+
+    @property
+    def cifar_dense2_weight_size(self) -> int:
+        return self.cifar_hidden_dims[0] * self.cifar_hidden_dims[1]
+
+    @property
+    def cifar_dense2_bias_offset(self) -> int:
+        return self.cifar_dense2_weight_offset + self.cifar_dense2_weight_size
+
+    @property
+    def cifar_logits_weight_offset(self) -> int:
+        return self.cifar_dense2_bias_offset + self.cifar_hidden_dims[1]
+
+    @property
+    def cifar_logits_weight_size(self) -> int:
+        return self.cifar_hidden_dims[1] * self.num_classes
+
+    @property
+    def cifar_logits_bias_offset(self) -> int:
+        return self.cifar_logits_weight_offset + self.cifar_logits_weight_size
+
+    @property
     def svd_matrix_offset(self) -> int:
+        if self.architecture == "cifar10":
+            return self.cifar_logits_weight_offset
         return self.dense_weight_offset
 
     @property
     def svd_matrix_shape(self) -> tuple[int, int]:
+        if self.architecture == "cifar10":
+            return self.cifar_hidden_dims[1], self.num_classes
         return self.feature_dim, self.num_classes
 
 
@@ -135,6 +172,10 @@ class _CIFARForwardCache:
     conv2: np.ndarray
     pooled2: np.ndarray
     flat: np.ndarray
+    hidden1_pre: np.ndarray
+    hidden1: np.ndarray
+    hidden2_pre: np.ndarray
+    hidden2: np.ndarray
     probs: np.ndarray
 
 
@@ -144,8 +185,12 @@ class _CIFARParams:
     conv1_b: np.ndarray
     conv2_w: np.ndarray
     conv2_b: np.ndarray
-    dense_w: np.ndarray
-    dense_b: np.ndarray
+    dense1_w: np.ndarray
+    dense1_b: np.ndarray
+    dense2_w: np.ndarray
+    dense2_b: np.ndarray
+    logits_w: np.ndarray
+    logits_b: np.ndarray
 
 
 def model_spec_for_dataset(dataset: object) -> ModelSpec:
@@ -153,11 +198,14 @@ def model_spec_for_dataset(dataset: object) -> ModelSpec:
     num_classes = getattr(dataset, "num_classes", NUM_CLASSES)
     name = str(getattr(dataset, "name", "")).lower()
     architecture = "cifar10" if name == "cifar10" else "compact"
-    return ModelSpec(
-        input_shape=tuple(input_shape),
-        num_classes=int(num_classes),
-        architecture=architecture,
-    )
+    if architecture == "cifar10":
+        return ModelSpec(
+            input_shape=tuple(input_shape),
+            num_classes=int(num_classes),
+            architecture=architecture,
+            kernel_size=5,
+        )
+    return ModelSpec(input_shape=tuple(input_shape), num_classes=int(num_classes))
 
 
 def parameter_size(
@@ -186,9 +234,12 @@ def init_params(
     kernel = model_spec.kernel_size
     if model_spec.architecture == "cifar10":
         filters1, filters2 = model_spec.cifar_conv_filters
+        hidden1, hidden2 = model_spec.cifar_hidden_dims
         conv1_scale = np.sqrt(2.0 / (channels * kernel * kernel))
         conv2_scale = np.sqrt(2.0 / (filters1 * kernel * kernel))
-        dense_scale = np.sqrt(2.0 / model_spec.feature_dim)
+        dense1_scale = np.sqrt(2.0 / model_spec.feature_dim)
+        dense2_scale = np.sqrt(2.0 / hidden1)
+        logits_scale = np.sqrt(2.0 / hidden2)
         conv1_w = rng.normal(
             0.0,
             conv1_scale,
@@ -201,13 +252,36 @@ def init_params(
             size=(filters2, filters1, kernel, kernel),
         ).astype(np.float32)
         conv2_b = np.zeros(filters2, dtype=np.float32)
-        dense_w = rng.normal(
+        dense1_w = rng.normal(
             0.0,
-            dense_scale,
-            size=(model_spec.feature_dim, model_spec.num_classes),
+            dense1_scale,
+            size=(model_spec.feature_dim, hidden1),
         ).astype(np.float32)
-        dense_b = np.zeros(model_spec.num_classes, dtype=np.float32)
-        return params_to_vector(conv1_w, conv1_b, conv2_w, conv2_b, dense_w, dense_b)
+        dense1_b = np.zeros(hidden1, dtype=np.float32)
+        dense2_w = rng.normal(
+            0.0,
+            dense2_scale,
+            size=(hidden1, hidden2),
+        ).astype(np.float32)
+        dense2_b = np.zeros(hidden2, dtype=np.float32)
+        logits_w = rng.normal(
+            0.0,
+            logits_scale,
+            size=(hidden2, model_spec.num_classes),
+        ).astype(np.float32)
+        logits_b = np.zeros(model_spec.num_classes, dtype=np.float32)
+        return params_to_vector(
+            conv1_w,
+            conv1_b,
+            conv2_w,
+            conv2_b,
+            dense1_w,
+            dense1_b,
+            dense2_w,
+            dense2_b,
+            logits_w,
+            logits_b,
+        )
 
     conv_scale = np.sqrt(2.0 / (channels * kernel * kernel))
     dense_scale = np.sqrt(2.0 / model_spec.feature_dim)
@@ -239,7 +313,7 @@ def vector_to_params(
     model_spec = spec or DEFAULT_SPEC
     if model_spec.architecture == "cifar10":
         params = _vector_to_cifar_params(vector, spec=model_spec)
-        return params.conv1_w, params.conv1_b, params.dense_w, params.dense_b
+        return params.conv1_w, params.conv1_b, params.logits_w, params.logits_b
     if vector.shape[0] != model_spec.parameter_size:
         raise ValueError(
             f"expected parameter vector of length {model_spec.parameter_size}, "
@@ -272,15 +346,35 @@ def _vector_to_cifar_params(vector: np.ndarray, *, spec: ModelSpec) -> _CIFARPar
     conv1_b_end = spec.conv2_weight_offset
     conv2_end = spec.conv2_bias_offset
     conv2_b_end = spec.dense_weight_offset
-    dense_end = spec.dense_bias_offset
+    dense1_end = spec.cifar_dense1_bias_offset
+    dense1_b_end = spec.cifar_dense2_weight_offset
+    dense2_end = spec.cifar_dense2_bias_offset
+    dense2_b_end = spec.cifar_logits_weight_offset
+    logits_end = spec.cifar_logits_bias_offset
 
     conv1_w = vector[:conv1_end].reshape(filters1, channels, kernel, kernel)
     conv1_b = vector[conv1_end:conv1_b_end]
     conv2_w = vector[conv1_b_end:conv2_end].reshape(filters2, filters1, kernel, kernel)
     conv2_b = vector[conv2_end:conv2_b_end]
-    dense_w = vector[conv2_b_end:dense_end].reshape(spec.feature_dim, spec.num_classes)
-    dense_b = vector[dense_end:]
-    return _CIFARParams(conv1_w, conv1_b, conv2_w, conv2_b, dense_w, dense_b)
+    hidden1, hidden2 = spec.cifar_hidden_dims
+    dense1_w = vector[conv2_b_end:dense1_end].reshape(spec.feature_dim, hidden1)
+    dense1_b = vector[dense1_end:dense1_b_end]
+    dense2_w = vector[dense1_b_end:dense2_end].reshape(hidden1, hidden2)
+    dense2_b = vector[dense2_end:dense2_b_end]
+    logits_w = vector[dense2_b_end:logits_end].reshape(hidden2, spec.num_classes)
+    logits_b = vector[logits_end:]
+    return _CIFARParams(
+        conv1_w,
+        conv1_b,
+        conv2_w,
+        conv2_b,
+        dense1_w,
+        dense1_b,
+        dense2_w,
+        dense2_b,
+        logits_w,
+        logits_b,
+    )
 
 
 def predict(
@@ -477,21 +571,40 @@ def _local_train_delta_cifar(
             assert cache is not None
             losses.append(_cross_entropy(cache.probs, yb))
             grads = _backward_cifar(cache, yb, params, spec)
-            grad_conv1_w, grad_conv1_b, grad_conv2_w, grad_conv2_b, grad_dense_w, grad_dense_b = grads
+            (
+                grad_conv1_w,
+                grad_conv1_b,
+                grad_conv2_w,
+                grad_conv2_b,
+                grad_dense1_w,
+                grad_dense1_b,
+                grad_dense2_w,
+                grad_dense2_b,
+                grad_logits_w,
+                grad_logits_b,
+            ) = grads
             params.conv1_w -= lr * grad_conv1_w.astype(np.float32)
             params.conv1_b -= lr * grad_conv1_b.astype(np.float32)
             params.conv2_w -= lr * grad_conv2_w.astype(np.float32)
             params.conv2_b -= lr * grad_conv2_b.astype(np.float32)
-            params.dense_w -= lr * grad_dense_w.astype(np.float32)
-            params.dense_b -= lr * grad_dense_b.astype(np.float32)
+            params.dense1_w -= lr * grad_dense1_w.astype(np.float32)
+            params.dense1_b -= lr * grad_dense1_b.astype(np.float32)
+            params.dense2_w -= lr * grad_dense2_w.astype(np.float32)
+            params.dense2_b -= lr * grad_dense2_b.astype(np.float32)
+            params.logits_w -= lr * grad_logits_w.astype(np.float32)
+            params.logits_b -= lr * grad_logits_b.astype(np.float32)
 
     updated = params_to_vector(
         params.conv1_w,
         params.conv1_b,
         params.conv2_w,
         params.conv2_b,
-        params.dense_w,
-        params.dense_b,
+        params.dense1_w,
+        params.dense1_b,
+        params.dense2_w,
+        params.dense2_b,
+        params.logits_w,
+        params.logits_b,
     )
     delta = (updated - global_vector).astype(np.float32)
     return delta, TrainStats(loss=float(np.mean(losses)), samples=len(labels))
@@ -558,7 +671,11 @@ def _forward_cifar_from_params(
     relu2 = np.maximum(conv2, 0.0).astype(np.float32)
     pooled2 = _avg_pool2d_forward(relu2, spec.pool_size)
     flat = pooled2.reshape(pooled2.shape[0], -1)
-    logits = flat @ params.dense_w + params.dense_b
+    hidden1_pre = flat @ params.dense1_w + params.dense1_b
+    hidden1 = np.maximum(hidden1_pre, 0.0).astype(np.float32)
+    hidden2_pre = hidden1 @ params.dense2_w + params.dense2_b
+    hidden2 = np.maximum(hidden2_pre, 0.0).astype(np.float32)
+    logits = hidden2 @ params.logits_w + params.logits_b
     if not cache:
         return logits.astype(np.float32), None
     probs = _softmax(logits)
@@ -569,6 +686,10 @@ def _forward_cifar_from_params(
         conv2=conv2,
         pooled2=pooled2,
         flat=flat,
+        hidden1_pre=hidden1_pre,
+        hidden1=hidden1,
+        hidden2_pre=hidden2_pre,
+        hidden2=hidden2,
         probs=probs,
     )
 
@@ -611,16 +732,37 @@ def _backward_cifar(
     labels: np.ndarray,
     params: _CIFARParams,
     spec: ModelSpec,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     batch_size = len(labels)
     grad_logits = cache.probs.copy()
     grad_logits[np.arange(batch_size), labels] -= 1.0
     grad_logits /= batch_size
 
-    grad_dense_w = cache.flat.T @ grad_logits
-    grad_dense_b = np.sum(grad_logits, axis=0)
+    grad_logits_w = cache.hidden2.T @ grad_logits
+    grad_logits_b = np.sum(grad_logits, axis=0)
 
-    grad_flat = grad_logits @ params.dense_w.T
+    grad_hidden2 = grad_logits @ params.logits_w.T
+    grad_hidden2_pre = grad_hidden2 * (cache.hidden2_pre > 0.0)
+    grad_dense2_w = cache.hidden1.T @ grad_hidden2_pre
+    grad_dense2_b = np.sum(grad_hidden2_pre, axis=0)
+
+    grad_hidden1 = grad_hidden2_pre @ params.dense2_w.T
+    grad_hidden1_pre = grad_hidden1 * (cache.hidden1_pre > 0.0)
+    grad_dense1_w = cache.flat.T @ grad_hidden1_pre
+    grad_dense1_b = np.sum(grad_hidden1_pre, axis=0)
+
+    grad_flat = grad_hidden1_pre @ params.dense1_w.T
     grad_pool2 = grad_flat.reshape(cache.pooled2.shape)
     grad_relu2 = _avg_pool2d_backward(grad_pool2, cache.conv2.shape, spec.pool_size)
     grad_conv2 = grad_relu2 * (cache.conv2 > 0.0)
@@ -647,8 +789,12 @@ def _backward_cifar(
         grad_conv1_b.astype(np.float32),
         grad_conv2_w.astype(np.float32),
         grad_conv2_b.astype(np.float32),
-        grad_dense_w.astype(np.float32),
-        grad_dense_b.astype(np.float32),
+        grad_dense1_w.astype(np.float32),
+        grad_dense1_b.astype(np.float32),
+        grad_dense2_w.astype(np.float32),
+        grad_dense2_b.astype(np.float32),
+        grad_logits_w.astype(np.float32),
+        grad_logits_b.astype(np.float32),
     )
 
 

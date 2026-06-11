@@ -194,8 +194,12 @@ def _torch_params_from_vector(
             params.conv1_b,
             params.conv2_w,
             params.conv2_b,
-            params.dense_w,
-            params.dense_b,
+            params.dense1_w,
+            params.dense1_b,
+            params.dense2_w,
+            params.dense2_b,
+            params.logits_w,
+            params.logits_b,
         )
     else:
         arrays = vector_to_params(local, spec=spec)
@@ -214,13 +218,26 @@ def _torch_vector_from_params(params: list[object] | tuple[object, ...]) -> np.n
 
 def _torch_forward(torch, params: list[object] | tuple[object, ...], x, spec: ModelSpec):
     if spec.architecture == "cifar10":
-        conv1_w, conv1_b, conv2_w, conv2_b, dense_w, dense_b = params
+        (
+            conv1_w,
+            conv1_b,
+            conv2_w,
+            conv2_b,
+            dense1_w,
+            dense1_b,
+            dense2_w,
+            dense2_b,
+            logits_w,
+            logits_b,
+        ) = params
         conv1 = torch.nn.functional.conv2d(x, conv1_w, conv1_b, stride=1, padding=spec.padding)
         pooled1 = torch.nn.functional.avg_pool2d(torch.relu(conv1), kernel_size=spec.pool_size)
         conv2 = torch.nn.functional.conv2d(pooled1, conv2_w, conv2_b, stride=1, padding=spec.padding)
         pooled2 = torch.nn.functional.avg_pool2d(torch.relu(conv2), kernel_size=spec.pool_size)
         flat = torch.flatten(pooled2, start_dim=1)
-        return flat.matmul(dense_w) + dense_b
+        hidden1 = torch.relu(flat.matmul(dense1_w) + dense1_b)
+        hidden2 = torch.relu(hidden1.matmul(dense2_w) + dense2_b)
+        return hidden2.matmul(logits_w) + logits_b
 
     conv_w, conv_b, dense_w, dense_b = params
     conv = torch.nn.functional.conv2d(

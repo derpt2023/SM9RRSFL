@@ -27,6 +27,10 @@ class CIFARModelTest(unittest.TestCase):
         )
         spec = model_spec_for_dataset(dataset)
         self.assertEqual(spec.architecture, "cifar10")
+        self.assertEqual(spec.kernel_size, 5)
+        self.assertEqual(spec.cifar_conv_filters, (64, 64))
+        self.assertEqual(spec.cifar_hidden_dims, (384, 192))
+        self.assertGreater(spec.parameter_size, 1_000_000)
         self.assertGreater(spec.parameter_size, DEFAULT_SPEC.parameter_size)
 
         params = init_params(seed=3, spec=spec)

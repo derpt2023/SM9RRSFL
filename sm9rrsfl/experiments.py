@@ -19,6 +19,29 @@ from .visualization import generate_visualizations
 
 DEFAULT_RATIOS = (0.00, 0.10, 0.20, 0.40, 0.45, 0.60, 0.80)
 DEFAULT_OUTPUT_ROOT = Path("outputs")
+DATASET_TRAINING_PRESETS = {
+    "mnist": {
+        "rounds": 30,
+        "local_epochs": 1,
+        "batch_size": 32,
+        "lr": 0.05,
+        "lr_decay": 1.0,
+    },
+    "synthetic": {
+        "rounds": 30,
+        "local_epochs": 1,
+        "batch_size": 32,
+        "lr": 0.05,
+        "lr_decay": 1.0,
+    },
+    "cifar10": {
+        "rounds": 300,
+        "local_epochs": 5,
+        "batch_size": 50,
+        "lr": 0.05,
+        "lr_decay": 0.99,
+    },
+}
 
 
 def main() -> None:
@@ -59,6 +82,7 @@ def main() -> None:
                         local_epochs=args.local_epochs,
                         batch_size=args.batch_size,
                         lr=args.lr,
+                        lr_decay=args.lr_decay,
                         compute_backend=args.compute_backend,
                         device=args.device,
                         partition=partition,
@@ -159,6 +183,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=0.05)
     parser.add_argument(
+        "--lr-decay",
+        type=float,
+        default=1.0,
+        help="Per-round learning-rate multiplier. 1.0 keeps a constant learning rate.",
+    )
+    parser.add_argument(
         "--compute-backend",
         choices=["numpy", "auto", "torch"],
         default="numpy",
@@ -200,6 +230,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def apply_presets(args: argparse.Namespace, raw_args: list[str]) -> argparse.Namespace:
+    _apply_dataset_training_preset(args, raw_args)
     if not args.cifar10_clean_baseline:
         return args
 
@@ -209,22 +240,31 @@ def apply_presets(args: argparse.Namespace, raw_args: list[str]) -> argparse.Nam
     args.attack = "none"
     args.partition = "iid"
     args.partitions = ["iid"]
+    _apply_dataset_training_preset(args, raw_args)
     if not _has_any_option(raw_args, "--train-samples"):
         args.train_samples = None
     if not _has_any_option(raw_args, "--test-samples"):
         args.test_samples = None
-    if not _has_any_option(raw_args, "--rounds"):
-        args.rounds = 100
-    if not _has_any_option(raw_args, "--local-epochs"):
-        args.local_epochs = 2
-    if not _has_any_option(raw_args, "--batch-size"):
-        args.batch_size = 64
-    if not _has_any_option(raw_args, "--lr"):
-        args.lr = 0.01
     if not _has_any_option(raw_args, "--num-clients", "--client-counts", "--num-clients-list"):
         args.num_clients = 20
         args.client_counts = [20]
     return args
+
+
+def _apply_dataset_training_preset(args: argparse.Namespace, raw_args: list[str]) -> None:
+    preset = DATASET_TRAINING_PRESETS.get(args.dataset)
+    if preset is None:
+        return
+    option_names = {
+        "rounds": ("--rounds",),
+        "local_epochs": ("--local-epochs",),
+        "batch_size": ("--batch-size",),
+        "lr": ("--lr",),
+        "lr_decay": ("--lr-decay",),
+    }
+    for field, names in option_names.items():
+        if not _has_any_option(raw_args, *names):
+            setattr(args, field, preset[field])
 
 
 def _has_any_option(raw_args: list[str], *names: str) -> bool:
@@ -344,6 +384,7 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             local_epochs=int(row["local_epochs"]),
             batch_size=int(row["batch_size"]),
             lr=float(row["lr"]),
+            lr_decay=float(row.get("lr_decay") or 1.0),
             compute_backend=row.get("compute_backend") or "numpy",
             device=row.get("device") or "auto",
             partition=partition,

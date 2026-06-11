@@ -5,7 +5,7 @@
 ## 已实现内容
 
 - MNIST IDX gzip 与 CIFAR-10 python batches 数据加载与可选下载。
-- 默认基于 NumPy 的卷积神经网络（CNN）联邦训练，并提供可选 PyTorch 后端用于 GPU 加速：MNIST 使用轻量 compact CNN，CIFAR-10 使用两层卷积块 CNN 与按通道标准化输入；支持单个客户端数量或 `20/50/100` 等多客户端数量对比、本地训练轮次、批大小、学习率、IID 独立同分布/Dirichlet 非 IID 划分和误差阈值早停。
+- 默认基于 NumPy 的卷积神经网络（CNN）联邦训练，并提供可选 PyTorch 后端用于 GPU 加速：MNIST 使用轻量 compact CNN，CIFAR-10 使用参考 FedAvg/CIFAR-10 经验配置的 `Conv-Conv-FC-FC-Logits` CNN 与按通道标准化输入；支持单个客户端数量或 `20/50/100` 等多客户端数量对比、本地训练轮次、批大小、学习率、学习率衰减、IID 独立同分布/Dirichlet 非 IID 划分和误差阈值早停。
 - 默认实验比例：`0%`、`10%`、`20%`、`40%`、`45%`、`60%`、`80%`，其中 `0%` 用于无恶意节点收敛对比。
 - SM9-RRS-FL 流程：基于 SM9 群运算的可追踪环签名、论文同款动态累加器、SM9 加密撤销陷门、可链接标签、纵向 SVD 投毒检测、审计撤销、黑名单剔除。
 - 疑似恶意节点处理采用文献 [13] 同款动态降权：单次异常先降低聚合权重，后续正常则恢复权重，连续异常达到阈值后再触发撤销/剔除。
@@ -165,9 +165,20 @@ python -m sm9rrsfl.benchmarks.crypto_overhead \
 
 ## 主实验说明
 
-主实验使用统一的模型接口，并分别在 MNIST 和 CIFAR-10 上运行。MNIST 仍使用轻量 compact CNN；CIFAR-10 会自动切换到两层卷积块 CNN，并对 CIFAR-10 图像执行通道标准化。本项目不会在一个命令中同时跑两个数据集：每次启动只选择一个 `--dataset`，默认输出目录也按数据集隔离，避免 CIFAR-10 影响 MNIST 的复现实验速度。
+主实验使用统一的模型接口，并分别在 MNIST 和 CIFAR-10 上运行。MNIST 仍使用轻量 compact CNN；CIFAR-10 会自动切换到更适合该数据集的 `Conv-Conv-FC-FC-Logits` CNN，并对 CIFAR-10 图像执行通道标准化。本项目不会在一个命令中同时跑两个数据集：每次启动只选择一个 `--dataset`，默认输出目录也按数据集隔离，避免 CIFAR-10 影响 MNIST 的复现实验速度。
 
 两组主实验均对比本方案、Krum、文献 [13] 和 FedAvg，并保留原有实验变量：恶意节点比例、IID/Dirichlet 数据分布、Dirichlet 参数、客户端数量、训练轮次和目标误差阈值。
+
+论文实验配置原则：先用 `0%` 恶意节点的 FedAvg/干净训练确认数据集和 CNN 能正常收敛，然后固定同一套模型结构、`E`、`B`、`lr`、`lr_decay` 和 `rounds`，再比较 SM9-RRS-FL、FedAvg、Krum 和文献 [13] 在攻击场景下的鲁棒性。不要为某个防御方法单独调整 CNN 或训练超参。
+
+### 数据集模型与训练协议
+
+| 数据集 | CNN 结构 | 参数量 | `rounds` | `E` / `--local-epochs` | `B` / `--batch-size` | `lr` | `lr_decay` |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MNIST | `Conv(8, 3x3, stride=2) -> AvgPool(2x2) -> FC(392, 10)` | 4,010 | 30 | 1 | 32 | 0.05 | 1.00 |
+| CIFAR-10 | `Conv(64, 5x5) -> AvgPool(2x2) -> Conv(64, 5x5) -> AvgPool(2x2) -> FC(4096, 384) -> FC(384, 192) -> FC(192, 10)` | 1,756,426 | 300 | 5 | 50 | 0.05 | 0.99 |
+
+`lr_decay` 是每轮通信后的学习率乘子；CIFAR-10 第 `t` 轮实际学习率为 `0.05 * 0.99^(t-1)`。MNIST 训练较容易，保持常数学习率即可。CIFAR-10 的 `E=5, B=50, lr_decay=0.99` 参考 FedAvg 在 CIFAR-10 上增加本地计算、使用学习率衰减的经验；`rounds=300` 用作正式鲁棒性对比的默认预算，若要追求更高 clean FedAvg 收敛上限，可单独增加干净基线轮数。
 
 联邦聚合口径：
 
@@ -237,6 +248,10 @@ python -m sm9rrsfl.experiments \
   --dirichlet-alpha 0.5 \
   --client-counts 20 50 100 \
   --rounds 30 \
+  --local-epochs 1 \
+  --batch-size 32 \
+  --lr 0.05 \
+  --lr-decay 1.0 \
   --target-error 0.12 \
   --crypto-mode sm9 \
   --compute-backend auto \
@@ -247,7 +262,7 @@ python -m sm9rrsfl.experiments \
 
 ## CIFAR-10 干净基线
 
-在跑投毒和防御对比前，建议先确认 CIFAR-10 的干净训练能正常收敛。该入口会自动设置 `--dataset cifar10`、`--methods fedavg`、`--ratios 0.00`、`--attack none`、`--partitions iid`，并使用完整 CIFAR-10 训练集/测试集。未显式传入训练参数时，还会把 `--rounds` 设为 `100`、`--local-epochs` 设为 `2`、`--batch-size` 设为 `64`、`--lr` 设为 `0.01`。
+在跑投毒和防御对比前，建议先确认 CIFAR-10 的干净训练能正常收敛。该入口会自动设置 `--dataset cifar10`、`--methods fedavg`、`--ratios 0.00`、`--attack none`、`--partitions iid`，并使用完整 CIFAR-10 训练集/测试集。未显式传入训练参数时，会使用上表中的 CIFAR-10 论文实验协议：`--rounds 300`、`--local-epochs 5`、`--batch-size 50`、`--lr 0.05`、`--lr-decay 0.99`。
 
 ```bash
 python -m sm9rrsfl.experiments \
@@ -274,10 +289,11 @@ python -m sm9rrsfl.experiments \
   --partitions iid dirichlet \
   --dirichlet-alpha 0.5 \
   --client-counts 20 50 100 \
-  --rounds 50 \
-  --local-epochs 2 \
-  --batch-size 64 \
-  --lr 0.01 \
+  --rounds 300 \
+  --local-epochs 5 \
+  --batch-size 50 \
+  --lr 0.05 \
+  --lr-decay 0.99 \
   --target-error 0.12 \
   --crypto-mode sm9 \
   --compute-backend auto \
@@ -381,6 +397,9 @@ python -m sm9rrsfl.experiments \
 - `--train-samples 10000` / `--test-samples 2000`：限制真实数据集样本量；不传时使用完整真实数据集。快速实验建议显式传入较小样本数。
 - `--num-clients 20`：设置单个客户端数量；当没有传 `--client-counts` 时生效。
 - `--client-counts 20 50 100`：一次运行多个客户端数量，并生成客户端数量横向对比图；该参数优先于 `--num-clients`。
+- `--rounds 30|300`：通信轮数；MNIST 默认 `30`，CIFAR-10 默认 `300`。
+- `--local-epochs 1|5`：每轮通信中客户端本地训练的 epoch 数，即 FedAvg 论文中的 `E`；MNIST 默认 `1`，CIFAR-10 默认 `5`。
+- `--batch-size 32|50`：客户端本地 mini-batch size，即 FedAvg 论文中的 `B`；MNIST 默认 `32`，CIFAR-10 默认 `50`。
 - `--attack sign_flip|gaussian|alternating|none`：设置投毒方式，默认 `alternating`；其中 `alternating` 为交替投毒攻击，会把完整攻击目标拆成多个触发器特征子集，由不同恶意客户端在不同轮次只注入其中一个小扰动分片。
 - `--attack-scale 5.0`：设置投毒强度；在 `alternating` 中表示被选中触发器分片的局部扰动约为本地更新 RMS 的百分比，默认 `5.0` 即单次只注入约 `5%` 的小扰动。
 - `--attack-start-round 0`：默认值 `0` 表示在检测器完成基线窗口后开始攻击。
@@ -398,7 +417,8 @@ python -m sm9rrsfl.experiments \
 - `--suspicion-remove-after 3`：连续疑似达到该次数后再撤销身份并剔除。
 - `--no-visualizations`：只输出 CSV/JSON，不生成 HTML/SVG 图表。
 - `--visualize-only`：不重新训练，只读取输出目录中的 `summary.csv` 和 `rounds.csv` 重新生成图表。
-- `--lr 0.05`：CNN 本地训练学习率；`--cifar10-clean-baseline` 未显式传入学习率时使用 `0.01`。
+- `--lr 0.05`：CNN 本地训练初始学习率；MNIST 和 CIFAR-10 默认均为 `0.05`。
+- `--lr-decay 1.0|0.99`：每轮通信后的学习率衰减乘子；MNIST 默认 `1.0`，CIFAR-10 默认 `0.99`。
 - `--output-dir outputs/custom`：手动指定输出目录；未指定时，`sm9` 默认写入 `outputs/<dataset>/`，`simulated` 默认写入 `outputs/<dataset>_simulated/`，`--cifar10-clean-baseline` 默认写入 `outputs/cifar10_clean_baseline/`。
 
 ## 输出文件

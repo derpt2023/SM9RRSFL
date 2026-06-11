@@ -25,6 +25,7 @@ class ExperimentConfig:
     local_epochs: int = 1
     batch_size: int = 32
     lr: float = 0.05
+    lr_decay: float = 1.0
     compute_backend: str = "numpy"
     device: str = "auto"
     partition: str = "iid"
@@ -185,7 +186,7 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 params,
                 dataset.x_train[indices],
                 dataset.y_train[indices],
-                lr=config.lr,
+                lr=config.lr * (config.lr_decay ** (round_id - 1)),
                 epochs=config.local_epochs,
                 batch_size=config.batch_size,
                 seed=config.seed + round_id * 1009 + client_idx,
