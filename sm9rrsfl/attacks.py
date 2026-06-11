@@ -5,6 +5,10 @@ from __future__ import annotations
 import numpy as np
 
 
+_ALTERNATING_TRIGGER_SHARDS = 8
+_ALTERNATING_TRIGGER_SEED = 104729
+
+
 def poison_update(
     update: np.ndarray,
     *,
@@ -26,10 +30,31 @@ def poison_update(
         std = max(std, 1e-3)
         return rng.normal(0.0, scale * std, size=update.shape).astype(np.float32)
     if attack == "alternating":
-        sign = -1.0 if seed % 2 == 0 else 1.0
-        poisoned = update.astype(np.float32, copy=True)
-        half = poisoned.size // 2
-        poisoned[:half] *= sign * scale
-        poisoned[half:] *= -sign * scale
-        return poisoned
+        return _alternating_trigger_poison(update, scale=scale, seed=seed)
     raise ValueError("attack must be one of: none, sign_flip, gaussian, alternating")
+
+
+def _alternating_trigger_poison(
+    update: np.ndarray,
+    *,
+    scale: float,
+    seed: int,
+) -> np.ndarray:
+    """Inject one small shard of a decomposed trigger into the update."""
+
+    poisoned = update.astype(np.float32, copy=True)
+    flat = poisoned.reshape(-1)
+    if flat.size == 0:
+        return poisoned
+
+    shard_count = min(_ALTERNATING_TRIGGER_SHARDS, flat.size)
+    shard_index = seed % shard_count
+    start = flat.size * shard_index // shard_count
+    end = flat.size * (shard_index + 1) // shard_count
+
+    rms = float(np.linalg.norm(flat) / max(1, flat.size) ** 0.5)
+    magnitude = max(rms, 1e-6) * (float(scale) / 100.0)
+    rng = np.random.default_rng(_ALTERNATING_TRIGGER_SEED + shard_index)
+    trigger = rng.choice((-1.0, 1.0), size=end - start).astype(np.float32)
+    flat[start:end] += trigger * magnitude
+    return poisoned

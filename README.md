@@ -274,7 +274,7 @@ python -m sm9rrsfl.experiments \
   --partitions iid dirichlet \
   --dirichlet-alpha 0.5 \
   --client-counts 20 50 100 \
-  --rounds 100 \
+  --rounds 50 \
   --local-epochs 2 \
   --batch-size 64 \
   --lr 0.01 \
@@ -381,7 +381,8 @@ python -m sm9rrsfl.experiments \
 - `--train-samples 10000` / `--test-samples 2000`：限制真实数据集样本量；不传时使用完整真实数据集。快速实验建议显式传入较小样本数。
 - `--num-clients 20`：设置单个客户端数量；当没有传 `--client-counts` 时生效。
 - `--client-counts 20 50 100`：一次运行多个客户端数量，并生成客户端数量横向对比图；该参数优先于 `--num-clients`。
-- `--attack sign_flip|gaussian|alternating|none`：设置投毒方式，默认 `alternating`。
+- `--attack sign_flip|gaussian|alternating|none`：设置投毒方式，默认 `alternating`；其中 `alternating` 为交替投毒攻击，会把完整攻击目标拆成多个触发器特征子集，由不同恶意客户端在不同轮次只注入其中一个小扰动分片。
+- `--attack-scale 5.0`：设置投毒强度；在 `alternating` 中表示被选中触发器分片的局部扰动约为本地更新 RMS 的百分比，默认 `5.0` 即单次只注入约 `5%` 的小扰动。
 - `--attack-start-round 0`：默认值 `0` 表示在检测器完成基线窗口后开始攻击。
 - `--partition iid|dirichlet`：设置数据划分方式。
 - `--partitions iid dirichlet`：一次运行多个数据划分场景，并分别生成可视化；该参数优先于 `--partition`。
