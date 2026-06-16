@@ -138,6 +138,177 @@ def torch_local_train_delta(
     return delta, TrainStats(loss=mean_loss, samples=len(labels_np))
 
 
+class TorchTrainingContext:
+    """Keep dataset tensors and client indices resident on the selected device."""
+
+    def __init__(
+        self,
+        dataset,
+        client_indices: list[np.ndarray],
+        *,
+        spec: ModelSpec | None = None,
+        device: str = "auto",
+    ) -> None:
+        torch = _torch_module()
+        self.torch = torch
+        self.device = _resolve_device(torch, device)
+        self.spec = spec or DEFAULT_SPEC
+        self.x_train = _torch_data(torch, dataset.x_train, self.spec, self.device)
+        self.y_train = torch.as_tensor(np.asarray(dataset.y_train, dtype=np.int64), dtype=torch.long, device=self.device)
+        self.x_test = _torch_data(torch, dataset.x_test, self.spec, self.device)
+        self.y_test = torch.as_tensor(np.asarray(dataset.y_test, dtype=np.int64), dtype=torch.long, device=self.device)
+        self.client_indices = [
+            torch.as_tensor(np.asarray(indices, dtype=np.int64), dtype=torch.long, device=self.device)
+            for indices in client_indices
+        ]
+
+    def accuracy(self, vector: np.ndarray, *, batch_size: int = 512) -> float:
+        if int(self.y_test.numel()) == 0:
+            return 0.0
+        params = _torch_params_from_vector(self.torch, vector, self.spec, self.device, requires_grad=False)
+        correct = 0
+        with self.torch.no_grad():
+            for start in range(0, int(self.y_test.numel()), batch_size):
+                end = start + batch_size
+                logits = _torch_forward(self.torch, params, self.x_test[start:end], self.spec)
+                correct += int((self.torch.argmax(logits, dim=1) == self.y_test[start:end]).sum().detach().cpu().item())
+        return correct / int(self.y_test.numel())
+
+    def local_train_delta(
+        self,
+        global_vector: np.ndarray,
+        *,
+        client_idx: int,
+        lr: float,
+        epochs: int,
+        batch_size: int,
+        seed: int,
+    ) -> tuple[np.ndarray, TrainStats]:
+        indices = self.client_indices[client_idx]
+        samples = int(indices.numel())
+        if samples == 0:
+            return np.zeros_like(global_vector), TrainStats(loss=0.0, samples=0)
+
+        params = list(_torch_params_from_vector(self.torch, global_vector, self.spec, self.device, requires_grad=True))
+        features = self.x_train.index_select(0, indices)
+        labels = self.y_train.index_select(0, indices)
+        rng = np.random.default_rng(seed)
+
+        loss_sum = None
+        loss_batches = 0
+        for _ in range(epochs):
+            order = rng.permutation(samples)
+            for start in range(0, samples, batch_size):
+                batch_idx = order[start : start + batch_size]
+                index = self.torch.as_tensor(batch_idx, dtype=self.torch.long, device=self.device)
+                logits = _torch_forward(self.torch, params, features.index_select(0, index), self.spec)
+                loss = self.torch.nn.functional.cross_entropy(logits, labels.index_select(0, index))
+                loss.backward()
+
+                with self.torch.no_grad():
+                    for param in params:
+                        if param.grad is not None:
+                            param -= lr * param.grad
+                            param.grad = None
+                detached = loss.detach()
+                loss_sum = detached if loss_sum is None else loss_sum + detached
+                loss_batches += 1
+
+        updated = _torch_vector_from_params(params)
+        delta = (updated - global_vector).astype(np.float32)
+        mean_loss = 0.0
+        if loss_sum is not None and loss_batches:
+            mean_loss = float((loss_sum / loss_batches).detach().cpu().item())
+        return delta, TrainStats(loss=mean_loss, samples=samples)
+
+
+def torch_weighted_average(
+    updates: list[np.ndarray] | np.ndarray,
+    weights: list[float] | np.ndarray,
+    sample_counts: list[int] | np.ndarray | None = None,
+    *,
+    device: str = "auto",
+) -> np.ndarray:
+    torch = _torch_module()
+    torch_device = _resolve_device(torch, device)
+    stacked_np = np.asarray(updates, dtype=np.float32)
+    if stacked_np.ndim != 2 or stacked_np.shape[0] == 0:
+        raise ValueError("updates must have shape [num_updates, num_parameters]")
+    weight_np = np.asarray(weights, dtype=np.float64)
+    if weight_np.shape != (stacked_np.shape[0],):
+        raise ValueError("weights must have shape [num_updates]")
+    if sample_counts is not None:
+        sample_np = np.asarray(sample_counts, dtype=np.float64)
+        if sample_np.shape != (stacked_np.shape[0],):
+            raise ValueError("sample_counts must have shape [num_updates]")
+        weight_np = weight_np * np.maximum(sample_np, 0.0)
+    total = float(np.sum(weight_np))
+    if total <= 0.0:
+        weight_np = np.full(stacked_np.shape[0], 1.0 / stacked_np.shape[0], dtype=np.float64)
+    else:
+        weight_np = weight_np / total
+    stacked = torch.as_tensor(stacked_np, dtype=torch.float32, device=torch_device)
+    weights_t = torch.as_tensor(weight_np.astype(np.float32), dtype=torch.float32, device=torch_device)
+    return weights_t.matmul(stacked).detach().cpu().numpy().astype(np.float32)
+
+
+def torch_krum_select(
+    updates: list[np.ndarray] | np.ndarray,
+    *,
+    byzantine_count: int,
+    device: str = "auto",
+) -> tuple[int, np.ndarray, int]:
+    if byzantine_count < 0:
+        raise ValueError("byzantine_count must be non-negative")
+    torch = _torch_module()
+    torch_device = _resolve_device(torch, device)
+    stacked_np = np.asarray(updates, dtype=np.float32)
+    if stacked_np.ndim != 2 or stacked_np.shape[0] == 0:
+        raise ValueError("updates must have shape [num_updates, num_parameters]")
+    n = stacked_np.shape[0]
+    if n < 3:
+        raise ValueError("Krum requires at least 3 updates")
+    neighbor_count = n - byzantine_count - 2
+    if neighbor_count < 1:
+        raise ValueError("Krum requires n - f - 2 >= 1; reduce malicious ratio or increase clients")
+
+    stacked = torch.as_tensor(stacked_np, dtype=torch.float32, device=torch_device)
+    distances = torch.cdist(stacked, stacked, p=2).square()
+    scores = []
+    for idx in range(n):
+        nearest = torch.topk(distances[idx], k=neighbor_count + 1, largest=False).values[1:]
+        scores.append(torch.sum(nearest))
+    score_tensor = torch.stack(scores)
+    selected = int(torch.argmin(score_tensor).detach().cpu().item())
+    return selected, score_tensor.detach().cpu().numpy().astype(np.float64), neighbor_count
+
+
+def torch_top_singular_feature(matrix: np.ndarray, *, device: str = "auto") -> tuple[float, np.ndarray]:
+    torch = _torch_module()
+    torch_device = _resolve_device(torch, device)
+    matrix_np = np.asarray(matrix, dtype=np.float32)
+    if getattr(torch_device, "type", None) == "mps":
+        u, singular_values, _ = np.linalg.svd(matrix_np, full_matrices=False)
+        return float(singular_values[0]), u[:, 0].astype(np.float32)
+    tensor = torch.as_tensor(matrix_np, dtype=torch.float32, device=torch_device)
+    u, singular_values, _ = torch.linalg.svd(tensor, full_matrices=False)
+    sigma = float(singular_values[0].detach().cpu().item())
+    u0 = u[:, 0].detach().cpu().numpy().astype(np.float32)
+    return sigma, u0
+
+
+def torch_singular_values_from_gram(matrix: np.ndarray, *, device: str = "auto") -> np.ndarray:
+    torch = _torch_module()
+    torch_device = _resolve_device(torch, device)
+    matrix_np = np.asarray(matrix, dtype=np.float32)
+    if getattr(torch_device, "type", None) == "mps":
+        gram = matrix_np.T @ matrix_np
+        return np.linalg.svd(gram, compute_uv=False).astype(np.float32)
+    tensor = torch.as_tensor(matrix_np, dtype=torch.float32, device=torch_device)
+    gram = tensor.T.matmul(tensor)
+    return torch.linalg.svdvals(gram).detach().cpu().numpy().astype(np.float32)
+
+
 def _normalize_backend(compute_backend: str) -> str:
     backend = (compute_backend or "numpy").strip().lower()
     if backend not in SUPPORTED_BACKENDS:

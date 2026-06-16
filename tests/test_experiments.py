@@ -1,8 +1,18 @@
 import argparse
+import io
+import os
 import unittest
 from pathlib import Path
 
-from sm9rrsfl.experiments import default_output_dir, parse_args, resolve_output_dir
+from sm9rrsfl.experiments import (
+    ProgressReporter,
+    _format_duration,
+    default_output_dir,
+    parse_args,
+    resolve_parallel_jobs,
+    resolve_output_dir,
+)
+from sm9rrsfl.fl import ExperimentConfig
 
 
 class ExperimentOutputDirTest(unittest.TestCase):
@@ -102,6 +112,44 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
         self.assertEqual(args.compute_backend, "torch")
         self.assertEqual(args.device, "mps")
+
+    def test_eval_interval_and_sm9_workers_are_parsed(self):
+        args = parse_args(["--eval-interval", "5", "--sm9-workers", "3"])
+
+        self.assertEqual(args.eval_interval, 5)
+        self.assertEqual(args.sm9_workers, 3)
+
+    def test_sm9_workers_auto_is_bounded_by_client_count(self):
+        args = parse_args(["--num-clients", "4", "--sm9-workers", "auto"])
+
+        self.assertGreaterEqual(args.sm9_workers, 1)
+        self.assertLessEqual(args.sm9_workers, min(4, os.cpu_count() or 1))
+
+    def test_parallel_jobs_integer_is_capped_by_config_count(self):
+        args = parse_args(["--jobs", "8"])
+
+        self.assertEqual(resolve_parallel_jobs(args.jobs, object(), [object(), object()], args), 2)
+
+    def test_progress_can_be_disabled(self):
+        args = parse_args(["--no-progress"])
+
+        self.assertTrue(args.no_progress)
+
+    def test_progress_reporter_prints_eta(self):
+        stream = io.StringIO()
+        progress = ProgressReporter(total=2, stream=stream)
+        progress.finish_config(ExperimentConfig(method="fedavg", malicious_ratio=0.0))
+        progress.close()
+
+        output = stream.getvalue()
+        self.assertIn("1/2", output)
+        self.assertIn("eta=", output)
+        self.assertIn("complete", output)
+
+    def test_format_duration(self):
+        self.assertEqual(_format_duration(5), "5s")
+        self.assertEqual(_format_duration(65), "1m05s")
+        self.assertEqual(_format_duration(3661), "1h01m01s")
 
 
 if __name__ == "__main__":

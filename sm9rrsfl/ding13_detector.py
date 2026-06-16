@@ -37,6 +37,8 @@ class Ding13TrajectoryDetector:
         num_classes: int = NUM_CLASSES,
         matrix_offset: int | None = None,
         matrix_shape: tuple[int, int] | None = None,
+        compute_backend: str = "numpy",
+        device: str = "auto",
     ) -> None:
         if not client_ids:
             raise ValueError("client_ids must not be empty")
@@ -56,6 +58,8 @@ class Ding13TrajectoryDetector:
         else:
             self.matrix_offset = DEFAULT_SPEC.svd_matrix_offset if matrix_offset is None else matrix_offset
             self.matrix_shape = DEFAULT_SPEC.svd_matrix_shape if matrix_shape is None else matrix_shape
+        self.compute_backend = compute_backend
+        self.device = device
         self.weights = {identity: 1.0 / len(client_ids) for identity in client_ids}
         self.previous_singulars: dict[str, np.ndarray] = {}
         self.consecutive_outliers = {identity: 0 for identity in client_ids}
@@ -144,6 +148,10 @@ class Ding13TrajectoryDetector:
         if update.shape[0] < end:
             raise ValueError(f"update length {update.shape[0]} is too short for SVD matrix ending at {end}")
         matrix = np.asarray(update[self.matrix_offset:end], dtype=np.float32).reshape(rows, cols)
+        if _should_use_torch(self.compute_backend, self.device):
+            from .torch_backend import torch_singular_values_from_gram
+
+            return torch_singular_values_from_gram(matrix, device=self.device)
         gram = matrix.T @ matrix
         return np.linalg.svd(gram, compute_uv=False).astype(np.float32)
 
@@ -242,3 +250,11 @@ def _average_path_length(size: int) -> float:
         return 1.0
     harmonic = np.log(size - 1) + 0.5772156649
     return float(2.0 * harmonic - 2.0 * (size - 1) / size)
+
+
+def _should_use_torch(compute_backend: str, device: str) -> bool:
+    try:
+        from .torch_backend import should_use_torch
+    except RuntimeError:
+        return False
+    return should_use_torch(compute_backend, device)

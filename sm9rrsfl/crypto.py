@@ -109,11 +109,13 @@ class SM9RRSContext:
         *,
         round_id: int,
         task_id: str = "mnist",
+        update_digest: str | None = None,
     ) -> RRSPacket:
         if identity not in self.client_ids:
             raise ValueError(f"unknown client identity: {identity}")
         ring = tuple() if self.accumulator_mode == "dynamic" else self._sample_ring(identity)
-        update_digest = digest_update(update)
+        if update_digest is None:
+            update_digest = digest_update(update)
         ring_accumulator, current_ring_digest, current_ring_size = self._ring_commitment(ring)
         link_tag = sm3_hex_text(f"link:{task_id}:{identity}")[:32]
         event_tag = sm3_hex_text(f"event:{task_id}:{round_id}:{update_digest}")[:32]
@@ -161,12 +163,20 @@ class SM9RRSContext:
             ),
         )
 
-    def verify_packet(self, packet: RRSPacket, update: np.ndarray) -> bool:
+    def verify_packet(
+        self,
+        packet: RRSPacket,
+        update: np.ndarray,
+        *,
+        update_digest: str | None = None,
+    ) -> bool:
         if packet.crypto_mode != self.crypto_mode:
             return False
         if packet.accumulator_mode != self.accumulator_mode:
             return False
-        if packet.update_digest != digest_update(update):
+        if update_digest is None:
+            update_digest = digest_update(update)
+        if packet.update_digest != update_digest:
             return False
         message = self._message_for(packet)
         if self.accumulator_mode == "dynamic":

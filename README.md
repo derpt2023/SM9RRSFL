@@ -297,10 +297,23 @@ python -m sm9rrsfl.experiments \
   --target-error 0.12 \
   --crypto-mode sm9 \
   --compute-backend auto \
-  --device auto
+  --device auto \
+  --jobs auto \
+  --eval-interval 5 \
+  --sm9-workers auto
 ```
 
 真实 SM9 CIFAR-10 主实验默认写入 `outputs/cifar10/`；模拟模式默认写入 `outputs/cifar10_simulated/`。
+
+上面的 `--jobs auto` 会根据系统物理内存和当前实验规模估算外层实验配置并发数，并在 PyTorch GPU/MPS/CUDA 后端下保守限制同一设备上的并发，避免 168 个配置同时抢占显存或内存。24GB Windows 和 36GB Mac 仍建议使用该限制；如果确认多 GPU 或更大内存可承受，可以显式改成 `--jobs 2`、`--jobs 4` 等固定值。
+
+外层并发默认优先使用进程池，让不同实验配置互相隔离；如果当前运行环境限制系统 semaphore 或进程池初始化，程序会提示 `process_pool_unavailable=...` 并自动回退到线程池继续执行。
+
+`--eval-interval 5` 表示每 5 轮评估一次测试集准确率，最后一轮始终评估。该参数只减少中间测试集前向计算，不改变训练、投毒、防御、聚合和最终评估逻辑；如果论文图表需要完整逐轮曲线，可改回 `--eval-interval 1`。
+
+`--sm9-workers auto` 会并行处理 SM9-RRS 每轮中相互独立的封包、签名和验签工作；SVD 轨迹检测仍按客户端顺序更新状态，因此不改变撤销、降权和异常判定语义。
+
+主实验运行时会显示配置级进度条和预计剩余时间，例如 `42/168 25.0% elapsed=... eta=...`。串行模式下会显示当前正在运行的配置；并发模式下会在每个配置完成后更新总进度。ETA 基于已经完成配置的平均耗时估算，前几个配置完成前会显示 `eta=estimating`。
 
 在本机 Mac 上启用 PyTorch MPS 后端，可以在命令末尾额外加入：
 
@@ -319,6 +332,8 @@ python -m sm9rrsfl.experiments \
 ```bash
 --compute-backend auto --device auto
 ```
+
+启用 PyTorch 后端时，程序会把数据集张量和客户端索引保留在所选设备上，并优先使用 torch 执行 FedAvg/加权 FedAvg、Krum 距离计算和 SVD 特征提取。由于当前 PyTorch MPS 不支持 `torch.linalg.svd`，MPS 环境下的 SVD 特征提取会显式回到 NumPy/CPU 执行，避免 PyTorch 运行时反复 fallback 和输出 warning。上述优化只改变计算后端和数据搬运方式，不改变客户端划分、攻击启动轮次、聚合公式、检测阈值或撤销规则。
 
 如果希望先快速复现模型收敛趋势和可视化，可以把上面的 `--crypto-mode sm9` 改成 `--crypto-mode simulated`。真实 SM9 模式会显著更慢，适合用于最终密码开销实验；模拟模式适合先检查准确率、抗投毒趋势和图表生成。
 
@@ -409,6 +424,10 @@ python -m sm9rrsfl.experiments \
 - `--crypto-mode sm9|simulated`：真实 SM9 或快速模拟密码层。
 - `--compute-backend numpy|auto|torch`：CNN 本地训练/评估后端；默认 `numpy` 保持原实现，`torch` 强制使用 PyTorch，`auto` 在可用时使用 PyTorch GPU，否则回落到 NumPy。
 - `--device auto|cpu|cuda|mps`：PyTorch 设备；Mac Apple Silicon 使用 `mps`，Windows/Linux NVIDIA 使用 `cuda`，`auto` 优先 CUDA、其次 MPS。
+- `--jobs 1|auto|N`：外层实验配置并发数。`auto` 会按系统物理内存和实验规模估算上限，并在单 GPU/MPS/CUDA 后端下保守限制并发；该参数只改变 168 个配置的调度顺序，不改变单个配置内部的实验变量。
+- `--eval-interval 1|5|10`：每隔多少轮评估一次测试集准确率；最终轮始终评估。`1` 会保留完整逐轮曲线，较大值可减少 CIFAR-10 正式实验中的测试集前向开销。
+- `--sm9-workers 1|auto|N`：SM9-RRS 每轮封包、签名和验签 worker 数；检测器状态仍按客户端顺序更新，不改变方案中的 SVD 轨迹判定、降权或撤销规则。
+- `--no-progress`：关闭终端进度条和 ETA 输出；训练、结果文件和可视化生成不受影响。
 - `--accumulator-mode dynamic|none`：默认 `dynamic`，使用动态累加器和常数大小环签名；`none` 为旧版实验抽象，会在签名包中携带抽样环成员列表。
 - `--ring-size 5`：旧版 `--accumulator-mode none` 下的抽样环大小；动态累加器模式下公共环默认为当前实验的全部客户端，签名包只记录累加器摘要和公共环大小。
 - `--no-early-stop`：不使用误差阈值早停，所有方法都跑满 `--rounds`。

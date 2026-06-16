@@ -45,6 +45,8 @@ class LongitudinalSVDDetector:
         num_classes: int = NUM_CLASSES,
         matrix_offset: int | None = None,
         matrix_shape: tuple[int, int] | None = None,
+        compute_backend: str = "numpy",
+        device: str = "auto",
         eps: float = 1e-8,
     ) -> None:
         if window_size < 1:
@@ -58,6 +60,8 @@ class LongitudinalSVDDetector:
             self.matrix_offset = DEFAULT_SPEC.svd_matrix_offset if matrix_offset is None else matrix_offset
             self.matrix_shape = DEFAULT_SPEC.svd_matrix_shape if matrix_shape is None else matrix_shape
         self.eps = eps
+        self.compute_backend = compute_backend
+        self.device = device
         self._states: dict[str, _TagState] = {}
 
     def evaluate(self, tag: str, update: np.ndarray) -> DetectionResult:
@@ -115,6 +119,11 @@ class LongitudinalSVDDetector:
         if update.shape[0] < end:
             raise ValueError(f"update length {update.shape[0]} is too short for SVD matrix ending at {end}")
         matrix = np.asarray(update[self.matrix_offset:end], dtype=np.float32).reshape(rows, cols)
+        if _should_use_torch(self.compute_backend, self.device):
+            from .torch_backend import torch_top_singular_feature
+
+            sigma, u0 = torch_top_singular_feature(matrix, device=self.device)
+            return _Feature(sigma=sigma, u0=u0)
         u, singular_values, _ = np.linalg.svd(matrix, full_matrices=False)
         return _Feature(sigma=float(singular_values[0]), u0=u[:, 0].astype(np.float32))
 
@@ -122,3 +131,11 @@ class LongitudinalSVDDetector:
 def _abs_cosine(a: np.ndarray, b: np.ndarray, eps: float) -> float:
     denom = max(float(np.linalg.norm(a) * np.linalg.norm(b)), eps)
     return abs(float(np.dot(a, b) / denom))
+
+
+def _should_use_torch(compute_backend: str, device: str) -> bool:
+    try:
+        from .torch_backend import should_use_torch
+    except RuntimeError:
+        return False
+    return should_use_torch(compute_backend, device)

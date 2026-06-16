@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import csv
 from dataclasses import asdict, replace
+import ctypes
 import json
+import os
 from pathlib import Path
 import resource
 import sys
@@ -19,6 +22,8 @@ from .visualization import generate_visualizations
 
 DEFAULT_RATIOS = (0.00, 0.10, 0.20, 0.40, 0.45, 0.60, 0.80)
 DEFAULT_OUTPUT_ROOT = Path("outputs")
+PROGRESS_BAR_WIDTH = 28
+_WORKER_DATASET = None
 DATASET_TRAINING_PRESETS = {
     "mnist": {
         "rounds": 30,
@@ -65,49 +70,36 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     results: list[ExperimentResult] = []
     started = perf_counter()
-    print(f"compute_backend={describe_compute_backend(args.compute_backend, args.device)}")
+    print(f"compute_backend={describe_compute_backend(args.compute_backend, args.device)}", flush=True)
 
-    partitions = args.partitions or [args.partition]
-    client_counts = args.client_counts or [args.num_clients]
-    for partition in partitions:
-        for num_clients in client_counts:
-            for ratio in args.ratios:
-                for method in args.methods:
-                    config = ExperimentConfig(
-                        method=method,
-                        malicious_ratio=ratio,
-                        num_clients=num_clients,
-                        rounds=args.rounds,
-                        target_error=args.target_error,
-                        local_epochs=args.local_epochs,
-                        batch_size=args.batch_size,
-                        lr=args.lr,
-                        lr_decay=args.lr_decay,
-                        compute_backend=args.compute_backend,
-                        device=args.device,
-                        partition=partition,
-                        dirichlet_alpha=args.dirichlet_alpha,
-                        attack=args.attack,
-                        attack_scale=args.attack_scale,
-                        attack_start_round=args.attack_start_round,
-                        detector_window=args.detector_window,
-                        z_threshold=args.z_threshold,
-                        ring_size=args.ring_size,
-                        crypto_mode=args.crypto_mode,
-                        accumulator_mode=args.accumulator_mode,
-                        strict_ring_verify=args.strict_ring_verify,
-                        early_stop=not args.no_early_stop,
-                        suspicion_penalty_factor=args.suspicion_penalty_factor,
-                        suspicion_recovery_factor=args.suspicion_recovery_factor,
-                        suspicion_remove_after=args.suspicion_remove_after,
-                        seed=args.seed,
-                    )
-                    print(
-                        "running "
-                        f"partition={partition} clients={num_clients} "
-                        f"method={method} ratio={ratio:.2f}"
-                    )
-                    results.append(run_measured_experiment(dataset, config))
+    configs = build_experiment_configs(args)
+    jobs = resolve_parallel_jobs(args.jobs, dataset, configs, args)
+    print(f"experiment_jobs={jobs}", flush=True)
+    progress = ProgressReporter(total=len(configs), enabled=not args.no_progress)
+    if jobs == 1:
+        for config in configs:
+            progress.start_config(config)
+            results.append(run_measured_experiment(dataset, config))
+            progress.finish_config(config)
+    else:
+        try:
+            with ProcessPoolExecutor(
+                max_workers=jobs,
+                initializer=_init_worker_dataset,
+                initargs=(dataset,),
+            ) as executor:
+                result_iter = executor.map(_run_config_in_worker, configs)
+                for config, result in zip(configs, result_iter):
+                    results.append(result)
+                    progress.finish_config(config)
+        except PermissionError as exc:
+            print(f"process_pool_unavailable={exc}; falling back to thread pool", flush=True)
+            with ThreadPoolExecutor(max_workers=jobs) as executor:
+                tasks = [(dataset, config) for config in configs]
+                for config, result in zip(configs, executor.map(_run_config_in_thread, tasks)):
+                    results.append(result)
+                    progress.finish_config(config)
+    progress.close()
 
     summary_path = output_dir / "summary.csv"
     rounds_path = output_dir / "rounds.csv"
@@ -204,6 +196,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="auto",
         help="PyTorch device for --compute-backend torch/auto: auto, cpu, cuda, or mps.",
     )
+    parser.add_argument(
+        "--jobs",
+        default="1",
+        help=(
+            "Number of experiment configurations to run in parallel. Use an integer "
+            "or 'auto' to estimate a memory-safe limit."
+        ),
+    )
     parser.add_argument("--attack", choices=["none", "sign_flip", "gaussian", "alternating"], default="alternating")
     parser.add_argument("--attack-scale", type=float, default=5.0)
     parser.add_argument(
@@ -219,14 +219,81 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--accumulator-mode", choices=["dynamic", "none"], default="dynamic")
     parser.add_argument("--strict-ring-verify", action="store_true")
     parser.add_argument("--no-early-stop", action="store_true")
+    parser.add_argument(
+        "--eval-interval",
+        type=int,
+        default=1,
+        help="Evaluate test accuracy every N rounds; the final round is always evaluated.",
+    )
+    parser.add_argument(
+        "--sm9-workers",
+        default="1",
+        help=(
+            "SM9-RRS per-round packet/signature worker count. Use an integer or 'auto'. "
+            "Only independent packet creation and verification are parallelized."
+        ),
+    )
     parser.add_argument("--suspicion-penalty-factor", type=float, default=0.5)
     parser.add_argument("--suspicion-recovery-factor", type=float, default=2.0)
     parser.add_argument("--suspicion-remove-after", type=int, default=3)
     parser.add_argument("--no-visualizations", action="store_true")
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress and ETA output.")
     parser.add_argument("--visualize-only", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     raw_args = sys.argv[1:] if argv is None else argv
-    return apply_presets(parser.parse_args(argv), raw_args)
+    args = apply_presets(parser.parse_args(argv), raw_args)
+    max_clients = max(args.client_counts or [args.num_clients])
+    try:
+        args.sm9_workers = resolve_sm9_workers(args.sm9_workers, max_clients)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.eval_interval < 1:
+        parser.error("--eval-interval must be at least 1")
+    return args
+
+
+def build_experiment_configs(args: argparse.Namespace) -> list[ExperimentConfig]:
+    configs: list[ExperimentConfig] = []
+    partitions = args.partitions or [args.partition]
+    client_counts = args.client_counts or [args.num_clients]
+    for partition in partitions:
+        for num_clients in client_counts:
+            for ratio in args.ratios:
+                for method in args.methods:
+                    configs.append(
+                        ExperimentConfig(
+                            method=method,
+                            malicious_ratio=ratio,
+                            num_clients=num_clients,
+                            rounds=args.rounds,
+                            target_error=args.target_error,
+                            local_epochs=args.local_epochs,
+                            batch_size=args.batch_size,
+                            lr=args.lr,
+                            lr_decay=args.lr_decay,
+                            compute_backend=args.compute_backend,
+                            device=args.device,
+                            partition=partition,
+                            dirichlet_alpha=args.dirichlet_alpha,
+                            attack=args.attack,
+                            attack_scale=args.attack_scale,
+                            attack_start_round=args.attack_start_round,
+                            detector_window=args.detector_window,
+                            z_threshold=args.z_threshold,
+                            ring_size=args.ring_size,
+                            crypto_mode=args.crypto_mode,
+                            accumulator_mode=args.accumulator_mode,
+                            strict_ring_verify=args.strict_ring_verify,
+                            early_stop=not args.no_early_stop,
+                            eval_interval=args.eval_interval,
+                            sm9_workers=args.sm9_workers,
+                            suspicion_penalty_factor=args.suspicion_penalty_factor,
+                            suspicion_recovery_factor=args.suspicion_recovery_factor,
+                            suspicion_remove_after=args.suspicion_remove_after,
+                            seed=args.seed,
+                        )
+                    )
+    return configs
 
 
 def apply_presets(args: argparse.Namespace, raw_args: list[str]) -> argparse.Namespace:
@@ -249,6 +316,197 @@ def apply_presets(args: argparse.Namespace, raw_args: list[str]) -> argparse.Nam
         args.num_clients = 20
         args.client_counts = [20]
     return args
+
+
+def resolve_sm9_workers(value: str | int, num_clients: int) -> int:
+    if isinstance(value, int):
+        workers = value
+    else:
+        text = value.strip().lower()
+        if text == "auto":
+            workers = min(max(1, os.cpu_count() or 1), max(1, num_clients))
+        else:
+            workers = int(text)
+    if workers < 1:
+        raise ValueError("--sm9-workers must be at least 1")
+    return workers
+
+
+def resolve_parallel_jobs(
+    value: str | int,
+    dataset,
+    configs: list[ExperimentConfig],
+    args: argparse.Namespace,
+) -> int:
+    if not configs:
+        return 1
+    if isinstance(value, int):
+        requested = value
+    else:
+        text = value.strip().lower()
+        if text != "auto":
+            requested = int(text)
+        else:
+            requested = _auto_parallel_jobs(dataset, configs, args)
+    if requested < 1:
+        raise ValueError("--jobs must be at least 1")
+    return min(requested, len(configs))
+
+
+def _auto_parallel_jobs(dataset, configs: list[ExperimentConfig], args: argparse.Namespace) -> int:
+    total_mb = _physical_memory_mb()
+    max_clients = max(config.num_clients for config in configs)
+    max_params = max(_parameter_size_for_dataset(dataset) for _ in configs)
+    dataset_mb = _dataset_memory_mb(dataset)
+    update_mb = max_clients * max_params * 4 / (1024 * 1024)
+    per_worker_mb = max(1024.0, dataset_mb * 0.35 + update_mb * 2.5 + 768.0)
+    memory_limited = max(1, int((total_mb * 0.75) // per_worker_mb))
+    cpu_limited = max(1, os.cpu_count() or 1)
+    jobs = min(memory_limited, cpu_limited, len(configs))
+    if args.compute_backend != "numpy":
+        jobs = min(jobs, 2)
+    return max(1, jobs)
+
+
+def _physical_memory_mb() -> float:
+    if sys.platform == "win32":
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return status.ullTotalPhys / (1024 * 1024)
+    if hasattr(os, "sysconf"):
+        try:
+            pages = os.sysconf("SC_PHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            return float(pages * page_size) / (1024 * 1024)
+        except (ValueError, OSError, AttributeError):
+            pass
+    return 16 * 1024.0
+
+
+def _dataset_memory_mb(dataset) -> float:
+    arrays = (dataset.x_train, dataset.y_train, dataset.x_test, dataset.y_test)
+    return sum(float(getattr(array, "nbytes", 0)) for array in arrays) / (1024 * 1024)
+
+
+def _parameter_size_for_dataset(dataset) -> int:
+    from .model import model_spec_for_dataset
+
+    return model_spec_for_dataset(dataset).parameter_size
+
+
+def _init_worker_dataset(dataset) -> None:
+    global _WORKER_DATASET
+    _WORKER_DATASET = dataset
+
+
+def _run_config_in_worker(config: ExperimentConfig) -> ExperimentResult:
+    if _WORKER_DATASET is None:
+        raise RuntimeError("worker dataset was not initialized")
+    return run_measured_experiment(_WORKER_DATASET, config)
+
+
+def _run_config_in_thread(task) -> ExperimentResult:
+    dataset, config = task
+    return run_measured_experiment(dataset, config)
+
+
+class ProgressReporter:
+    def __init__(self, *, total: int, enabled: bool = True, stream=None) -> None:
+        self.total = max(0, total)
+        self.enabled = enabled
+        self.stream = stream if stream is not None else sys.stderr
+        self.completed = 0
+        self.started = perf_counter()
+        self.last_message_length = 0
+        self.is_tty = bool(getattr(self.stream, "isatty", lambda: False)())
+        self.closed = False
+        if self.enabled and self.total:
+            self._write(self._progress_message(current="starting"))
+
+    def start_config(self, config: ExperimentConfig) -> None:
+        if not self.enabled:
+            print(_format_running_config(config))
+            return
+        self._write(self._progress_message(current=f"running {_format_config_key(config)}"))
+
+    def finish_config(self, config: ExperimentConfig) -> None:
+        self.completed += 1
+        if not self.enabled:
+            print(f"finished {_format_config_key(config)}")
+            return
+        self._write(self._progress_message(current=f"finished {_format_config_key(config)}"))
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if self.enabled and self.total:
+            self._write(self._progress_message(current="complete"), final=True)
+
+    def _progress_message(self, *, current: str) -> str:
+        elapsed = perf_counter() - self.started
+        ratio = 1.0 if self.total == 0 else min(1.0, self.completed / self.total)
+        filled = int(round(PROGRESS_BAR_WIDTH * ratio))
+        bar = "#" * filled + "-" * (PROGRESS_BAR_WIDTH - filled)
+        percent = ratio * 100.0
+        remaining = self.total - self.completed
+        if self.completed:
+            eta = elapsed / self.completed * remaining
+            eta_text = _format_duration(eta)
+        else:
+            eta_text = "estimating"
+        return (
+            f"[{bar}] {self.completed}/{self.total} {percent:5.1f}% "
+            f"elapsed={_format_duration(elapsed)} eta={eta_text} {current}"
+        )
+
+    def _write(self, message: str, *, final: bool = False) -> None:
+        if self.is_tty:
+            padding = " " * max(0, self.last_message_length - len(message))
+            self.stream.write(f"\r{message}{padding}")
+            if final:
+                self.stream.write("\n")
+            self.stream.flush()
+            self.last_message_length = len(message)
+        else:
+            self.stream.write(f"{message}\n")
+            self.stream.flush()
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m{secs:02d}s"
+    return f"{secs:d}s"
+
+
+def _format_running_config(config: ExperimentConfig) -> str:
+    return f"running {_format_config_key(config)}"
+
+
+def _format_config_key(config: ExperimentConfig) -> str:
+    return (
+        f"partition={config.partition} clients={config.num_clients} "
+        f"method={config.method} ratio={config.malicious_ratio:.2f}"
+    )
 
 
 def _apply_dataset_training_preset(args: argparse.Namespace, raw_args: list[str]) -> None:

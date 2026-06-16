@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import numpy as np
 
-from .aggregation import fedavg, krum, weighted_fedavg
+from .aggregation import fedavg, krum, torch_krum, torch_weighted_fedavg, weighted_fedavg
 from .attacks import poison_update
-from .crypto import SM9RRSContext
+from .crypto import SM9RRSContext, RRSPacket, digest_update
 from .ding13_detector import Ding13TrajectoryDetector
 from .datasets import ImageDataset, partition_clients
 from .model import accuracy, init_params, local_train_delta, model_spec_for_dataset
@@ -40,6 +41,8 @@ class ExperimentConfig:
     accumulator_mode: str = "dynamic"
     strict_ring_verify: bool = False
     early_stop: bool = True
+    eval_interval: int = 1
+    sm9_workers: int = 1
     suspicion_penalty_factor: float = 0.5
     suspicion_recovery_factor: float = 2.0
     suspicion_remove_after: int = 3
@@ -86,6 +89,31 @@ class ExperimentResult:
         }
 
 
+@dataclass(frozen=True)
+class _ClientUpdateCandidate:
+    identity: str
+    delta: np.ndarray
+    samples: int
+
+
+@dataclass(frozen=True)
+class _VerifiedSM9Candidate:
+    identity: str
+    delta: np.ndarray
+    samples: int
+    packet: RRSPacket
+    verified: bool
+
+
+@dataclass(frozen=True)
+class _SM9ProcessingResult:
+    updates: list[np.ndarray]
+    samples: list[int]
+    clients: list[str]
+    suspicious_clients: set[str]
+    rejected: int
+
+
 def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> ExperimentResult:
     """Run one federated experiment configuration."""
 
@@ -93,6 +121,10 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
         raise ValueError("method must be one of: sm9rrs, krum, ding13, fedavg")
     if not 0.0 <= config.malicious_ratio < 1.0:
         raise ValueError("malicious_ratio must be in [0, 1)")
+    if config.eval_interval < 1:
+        raise ValueError("eval_interval must be at least 1")
+    if config.sm9_workers < 1:
+        raise ValueError("sm9_workers must be at least 1")
 
     client_ids = [f"client-{idx}" for idx in range(config.num_clients)]
     client_indices = partition_clients(
@@ -111,19 +143,13 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
     attack_start = config.attack_start_round or (detector_window + 2)
 
     model_spec = model_spec_for_dataset(dataset)
+    torch_context = _maybe_torch_context(dataset, client_indices, model_spec, config)
     params = init_params(seed=config.seed, spec=model_spec)
     records = [
         _make_record(
             config,
             round_id=0,
-            acc=accuracy(
-                params,
-                dataset.x_test,
-                dataset.y_test,
-                spec=model_spec,
-                compute_backend=config.compute_backend,
-                device=config.device,
-            ),
+            acc=_evaluate_accuracy(params, dataset, model_spec, config, torch_context),
             accepted=0,
             rejected=0,
             blacklisted=0,
@@ -151,6 +177,8 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             z_threshold=z_threshold,
             matrix_offset=model_spec.svd_matrix_offset,
             matrix_shape=model_spec.svd_matrix_shape,
+            compute_backend=config.compute_backend,
+            device=config.device,
         )
         sm9_weight_manager = SuspicionWeightManager(
             client_ids,
@@ -165,6 +193,8 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             seed=config.seed,
             matrix_offset=model_spec.svd_matrix_offset,
             matrix_shape=model_spec.svd_matrix_shape,
+            compute_backend=config.compute_backend,
+            device=config.device,
         )
 
     blacklisted: set[str] = set()
@@ -175,6 +205,7 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
         updates: list[np.ndarray] = []
         update_samples: list[int] = []
         update_clients: list[str] = []
+        sm9_candidates: list[_ClientUpdateCandidate] = []
         suspicious_clients: set[str] = set()
         rejected = 0
 
@@ -182,17 +213,15 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             if identity in blacklisted:
                 continue
             indices = client_indices[client_idx]
-            delta, stats = local_train_delta(
+            delta, stats = _local_train_client_delta(
                 params,
-                dataset.x_train[indices],
-                dataset.y_train[indices],
-                lr=config.lr * (config.lr_decay ** (round_id - 1)),
-                epochs=config.local_epochs,
-                batch_size=config.batch_size,
-                seed=config.seed + round_id * 1009 + client_idx,
-                spec=model_spec,
-                compute_backend=config.compute_backend,
-                device=config.device,
+                dataset,
+                indices,
+                client_idx=client_idx,
+                round_id=round_id,
+                model_spec=model_spec,
+                config=config,
+                torch_context=torch_context,
             )
             attack_active = identity in malicious_set and round_id >= attack_start
             if attack_active:
@@ -204,31 +233,42 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 )
 
             if config.method == "sm9rrs":
-                assert crypto is not None and detector is not None
-                packet = crypto.create_packet(
-                    identity,
-                    delta,
-                    round_id=round_id,
-                    task_id=dataset.name,
+                sm9_candidates.append(
+                    _ClientUpdateCandidate(
+                        identity=identity,
+                        delta=delta,
+                        samples=stats.samples,
+                    )
                 )
-                if not crypto.verify_packet(packet, delta):
-                    rejected += 1
-                    continue
-                if malicious_clients:
-                    decision = detector.evaluate(packet.link_tag, delta)
-                    if not decision.accepted:
-                        suspicious_clients.add(identity)
+                continue
 
             updates.append(delta)
             update_samples.append(stats.samples)
             update_clients.append(identity)
+
+        if config.method == "sm9rrs" and sm9_candidates:
+            assert crypto is not None and detector is not None
+            sm9_result = _process_sm9_candidates(
+                sm9_candidates,
+                crypto=crypto,
+                detector=detector,
+                malicious_clients=malicious_clients,
+                round_id=round_id,
+                task_id=dataset.name,
+                workers=config.sm9_workers,
+            )
+            updates.extend(sm9_result.updates)
+            update_samples.extend(sm9_result.samples)
+            update_clients.extend(sm9_result.clients)
+            suspicious_clients.update(sm9_result.suspicious_clients)
+            rejected += sm9_result.rejected
 
         krum_selected = ""
         record_accepted = len(updates)
         record_rejected = rejected
         if updates:
             if config.method == "krum":
-                result = krum(updates, byzantine_count=len(malicious_clients))
+                result = _krum(updates, byzantine_count=len(malicious_clients), config=config)
                 aggregate = result.update
                 krum_selected = update_clients[result.selected_index]
             elif config.method == "sm9rrs":
@@ -246,7 +286,12 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 if effective_total <= 0.0:
                     aggregate = np.zeros_like(updates[0])
                 else:
-                    aggregate = weighted_fedavg(updates, weights, sample_counts=update_samples)
+                    aggregate = _weighted_fedavg(
+                        updates,
+                        weights,
+                        sample_counts=update_samples,
+                        config=config,
+                    )
                 record_accepted = sum(
                     1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
                 )
@@ -263,39 +308,39 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 true_positive_revocations += ding13_result.true_positive_removed
                 false_positive_revocations += ding13_result.false_positive_removed
                 weights = [ding13_result.weights[identity] for identity in update_clients]
-                aggregate = weighted_fedavg(updates, weights, sample_counts=update_samples)
+                aggregate = _weighted_fedavg(
+                    updates,
+                    weights,
+                    sample_counts=update_samples,
+                    config=config,
+                )
                 record_accepted = sum(
                     1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
                 )
                 record_rejected = len(ding13_result.outliers)
             else:
-                aggregate = fedavg(updates, update_samples)
+                aggregate = _fedavg(updates, update_samples, config=config)
             params = (params + aggregate).astype(np.float32)
 
-        acc = accuracy(
-            params,
-            dataset.x_test,
-            dataset.y_test,
-            spec=model_spec,
-            compute_backend=config.compute_backend,
-            device=config.device,
-        )
-        records.append(
-            _make_record(
-                config,
-                round_id=round_id,
-                acc=acc,
-                accepted=record_accepted,
-                rejected=record_rejected,
-                blacklisted=len(blacklisted),
-                tp=true_positive_revocations,
-                fp=false_positive_revocations,
-                krum_selected=krum_selected,
+        should_evaluate = round_id == config.rounds or round_id % config.eval_interval == 0
+        if should_evaluate:
+            acc = _evaluate_accuracy(params, dataset, model_spec, config, torch_context)
+            records.append(
+                _make_record(
+                    config,
+                    round_id=round_id,
+                    acc=acc,
+                    accepted=record_accepted,
+                    rejected=record_rejected,
+                    blacklisted=len(blacklisted),
+                    tp=true_positive_revocations,
+                    fp=false_positive_revocations,
+                    krum_selected=krum_selected,
+                )
             )
-        )
-        can_stop = not malicious_clients or round_id >= attack_start
-        if config.early_stop and can_stop and 1.0 - acc <= config.target_error:
-            break
+            can_stop = not malicious_clients or round_id >= attack_start
+            if config.early_stop and can_stop and 1.0 - acc <= config.target_error:
+                break
 
     final = records[-1]
     return ExperimentResult(
@@ -320,6 +365,197 @@ def _effective_detector_settings(
         max(config.z_threshold, 5.0),
         max(config.suspicion_remove_after, 5),
     )
+
+
+def _maybe_torch_context(
+    dataset: ImageDataset,
+    client_indices: list[np.ndarray],
+    model_spec,
+    config: ExperimentConfig,
+):
+    try:
+        from .torch_backend import should_use_torch, TorchTrainingContext
+    except RuntimeError:
+        return None
+    if not should_use_torch(config.compute_backend, config.device):
+        return None
+    return TorchTrainingContext(
+        dataset,
+        client_indices,
+        spec=model_spec,
+        device=config.device,
+    )
+
+
+def _process_sm9_candidates(
+    candidates: list[_ClientUpdateCandidate],
+    *,
+    crypto: SM9RRSContext,
+    detector: LongitudinalSVDDetector,
+    malicious_clients: tuple[str, ...],
+    round_id: int,
+    task_id: str,
+    workers: int,
+) -> _SM9ProcessingResult:
+    if workers > 1 and crypto.accumulator_mode == "dynamic":
+        with ThreadPoolExecutor(max_workers=min(workers, len(candidates))) as executor:
+            verified_candidates = list(
+                executor.map(
+                    lambda candidate: _create_verified_sm9_candidate(
+                        candidate,
+                        crypto=crypto,
+                        round_id=round_id,
+                        task_id=task_id,
+                    ),
+                    candidates,
+                )
+            )
+    else:
+        verified_candidates = [
+            _create_verified_sm9_candidate(
+                candidate,
+                crypto=crypto,
+                round_id=round_id,
+                task_id=task_id,
+            )
+            for candidate in candidates
+        ]
+
+    updates: list[np.ndarray] = []
+    samples: list[int] = []
+    clients: list[str] = []
+    suspicious_clients: set[str] = set()
+    rejected = 0
+    has_malicious_clients = bool(malicious_clients)
+    for candidate in verified_candidates:
+        if not candidate.verified:
+            rejected += 1
+            continue
+        if has_malicious_clients:
+            decision = detector.evaluate(candidate.packet.link_tag, candidate.delta)
+            if not decision.accepted:
+                suspicious_clients.add(candidate.identity)
+        updates.append(candidate.delta)
+        samples.append(candidate.samples)
+        clients.append(candidate.identity)
+    return _SM9ProcessingResult(
+        updates=updates,
+        samples=samples,
+        clients=clients,
+        suspicious_clients=suspicious_clients,
+        rejected=rejected,
+    )
+
+
+def _create_verified_sm9_candidate(
+    candidate: _ClientUpdateCandidate,
+    *,
+    crypto: SM9RRSContext,
+    round_id: int,
+    task_id: str,
+) -> _VerifiedSM9Candidate:
+    update_digest = digest_update(candidate.delta)
+    packet = crypto.create_packet(
+        candidate.identity,
+        candidate.delta,
+        round_id=round_id,
+        task_id=task_id,
+        update_digest=update_digest,
+    )
+    verified = crypto.verify_packet(packet, candidate.delta, update_digest=update_digest)
+    return _VerifiedSM9Candidate(
+        identity=candidate.identity,
+        delta=candidate.delta,
+        samples=candidate.samples,
+        packet=packet,
+        verified=verified,
+    )
+
+
+def _evaluate_accuracy(params, dataset, model_spec, config: ExperimentConfig, torch_context) -> float:
+    if torch_context is not None:
+        return torch_context.accuracy(params)
+    return accuracy(
+        params,
+        dataset.x_test,
+        dataset.y_test,
+        spec=model_spec,
+        compute_backend=config.compute_backend,
+        device=config.device,
+    )
+
+
+def _local_train_client_delta(
+    params: np.ndarray,
+    dataset: ImageDataset,
+    indices: np.ndarray,
+    *,
+    client_idx: int,
+    round_id: int,
+    model_spec,
+    config: ExperimentConfig,
+    torch_context,
+):
+    seed = config.seed + round_id * 1009 + client_idx
+    lr = config.lr * (config.lr_decay ** (round_id - 1))
+    if torch_context is not None:
+        return torch_context.local_train_delta(
+            params,
+            client_idx=client_idx,
+            lr=lr,
+            epochs=config.local_epochs,
+            batch_size=config.batch_size,
+            seed=seed,
+        )
+    return local_train_delta(
+        params,
+        dataset.x_train[indices],
+        dataset.y_train[indices],
+        lr=lr,
+        epochs=config.local_epochs,
+        batch_size=config.batch_size,
+        seed=seed,
+        spec=model_spec,
+        compute_backend=config.compute_backend,
+        device=config.device,
+    )
+
+
+def _fedavg(
+    updates: list[np.ndarray],
+    sample_counts: list[int],
+    *,
+    config: ExperimentConfig,
+) -> np.ndarray:
+    if _can_use_torch_ops(config):
+        return torch_weighted_fedavg(updates, sample_counts, device=config.device)
+    return fedavg(updates, sample_counts)
+
+
+def _weighted_fedavg(
+    updates: list[np.ndarray],
+    weights: list[float],
+    *,
+    sample_counts: list[int],
+    config: ExperimentConfig,
+) -> np.ndarray:
+    if _can_use_torch_ops(config):
+        return torch_weighted_fedavg(updates, weights, sample_counts=sample_counts, device=config.device)
+    return weighted_fedavg(updates, weights, sample_counts=sample_counts)
+
+
+def _krum(updates: list[np.ndarray], *, byzantine_count: int, config: ExperimentConfig):
+    if _can_use_torch_ops(config):
+        return torch_krum(updates, byzantine_count=byzantine_count, device=config.device)
+    return krum(updates, byzantine_count=byzantine_count)
+
+
+def _can_use_torch_ops(config: ExperimentConfig) -> bool:
+    try:
+        from .torch_backend import should_use_torch
+    except RuntimeError:
+        return False
+    return should_use_torch(config.compute_backend, config.device)
 
 
 def _choose_malicious(client_ids: list[str], ratio: float, seed: int) -> tuple[str, ...]:

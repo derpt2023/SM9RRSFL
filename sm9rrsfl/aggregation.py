@@ -75,6 +75,44 @@ def krum(updates: list[np.ndarray] | np.ndarray, byzantine_count: int) -> KrumRe
     )
 
 
+def torch_weighted_fedavg(
+    updates: list[np.ndarray] | np.ndarray,
+    weights: list[float] | np.ndarray,
+    sample_counts: list[int] | np.ndarray | None = None,
+    *,
+    device: str = "auto",
+) -> np.ndarray:
+    """Compute weighted FedAvg with torch when the experiment already uses it."""
+
+    from .torch_backend import torch_weighted_average
+
+    return torch_weighted_average(updates, weights, sample_counts=sample_counts, device=device)
+
+
+def torch_krum(
+    updates: list[np.ndarray] | np.ndarray,
+    byzantine_count: int,
+    *,
+    device: str = "auto",
+) -> KrumResult:
+    """Select a Krum update with torch pairwise distances."""
+
+    from .torch_backend import torch_krum_select
+
+    selected, scores, neighbor_count = torch_krum_select(
+        updates,
+        byzantine_count=byzantine_count,
+        device=device,
+    )
+    stacked = _stack_updates(updates)
+    return KrumResult(
+        update=stacked[selected].astype(np.float32),
+        selected_index=selected,
+        scores=scores,
+        neighbor_count=neighbor_count,
+    )
+
+
 def _stack_updates(updates: list[np.ndarray] | np.ndarray) -> np.ndarray:
     stacked = np.asarray(updates, dtype=np.float32)
     if stacked.ndim != 2:
