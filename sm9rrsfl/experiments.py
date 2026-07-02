@@ -149,13 +149,6 @@ def main() -> None:
         print(f"sm3_backend={sm3_backend_name()}", flush=True)
         if args.crypto_mode == "sm9" and args.accumulator_mode == "dynamic":
             print(f"rrs_backend={rrs_backend_name()}", flush=True)
-    jobs = resolve_parallel_jobs(args.jobs, dataset, pending_configs, args)
-    print(f"experiment_jobs={jobs}", flush=True)
-    progress = ProgressReporter(
-        total=len(runnable_configs),
-        completed=sum(result.config in runnable_configs for result in results),
-        enabled=not args.no_progress,
-    )
     checkpoint_dir = output_dir / ".checkpoints" if args.resume else None
     # 若上次恰好在“结果快照已落盘、检查点尚未删除”的极短窗口中退出，
     # 已完成结果是权威状态，启动时清理对应的冗余终态检查点。
@@ -165,6 +158,18 @@ def main() -> None:
             result.config,
             manifest["fingerprint"],
         )
+    confirm_matching_checkpoints(
+        checkpoint_dir,
+        pending_configs,
+        str(manifest["fingerprint"]),
+    )
+    jobs = resolve_parallel_jobs(args.jobs, dataset, pending_configs, args)
+    print(f"experiment_jobs={jobs}", flush=True)
+    progress = ProgressReporter(
+        total=len(runnable_configs),
+        completed=sum(result.config in runnable_configs for result in results),
+        enabled=not args.no_progress,
+    )
     if jobs == 1:
         for config in pending_configs:
             progress.start_config(config)
@@ -925,6 +930,98 @@ def _load_round_checkpoint(
         float(payload.get("runtime_seconds", 0.0)),
         float(payload.get("peak_memory_mb", 0.0)),
     )
+
+
+def confirm_matching_checkpoints(
+    checkpoint_dir: Path | None,
+    pending_configs: list[ExperimentConfig],
+    run_fingerprint: str,
+    *,
+    input_func=None,
+    interactive: bool | None = None,
+) -> dict[str, int]:
+    """对完全匹配的断点逐一询问续跑或从头开始。"""
+
+    counts = {"found": 0, "resumed": 0, "restarted": 0}
+    if checkpoint_dir is None:
+        return counts
+    checkpoint_dir = Path(checkpoint_dir)
+    if interactive is None:
+        interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    reader = input if input_func is None else input_func
+
+    for config in pending_configs:
+        checkpoint_path = _checkpoint_path(checkpoint_dir, config)
+        state, _, _ = _load_round_checkpoint(
+            checkpoint_path,
+            config,
+            run_fingerprint,
+        )
+        if state is None:
+            continue
+        counts["found"] += 1
+        completed_round = int(state.get("completed_round", 0))
+        terminal = isinstance(state.get("terminal_result"), ExperimentResult)
+        print("发现存在相同配置的断点：", flush=True)
+        print(f"  {_format_config_key(config)}", flush=True)
+        print(
+            f"  已完成轮次={completed_round}/{config.rounds}"
+            + ("（配置已完成，等待写入总结果）" if terminal else ""),
+            flush=True,
+        )
+
+        if not interactive:
+            print("  当前为非交互式终端，默认选择 Y，沿断点继续运行。", flush=True)
+            counts["resumed"] += 1
+            continue
+
+        while True:
+            try:
+                answer = str(reader("发现存在相同配置的断点，是否沿着断点运行（Y/N）？ "))
+            except EOFError:
+                answer = "Y"
+                print("未读取到输入，默认选择 Y。", flush=True)
+            normalized = answer.strip().lower()
+            if normalized in {"y", "yes"}:
+                counts["resumed"] += 1
+                print("已选择 Y：将从该断点继续运行。", flush=True)
+                break
+            if normalized in {"n", "no"}:
+                destination = _archive_rejected_checkpoint(
+                    checkpoint_path,
+                    completed_round=completed_round,
+                )
+                counts["restarted"] += 1
+                print(
+                    "已选择 N：本次将从第 0 轮开始；原断点已备份至 "
+                    f"{destination}",
+                    flush=True,
+                )
+                break
+            print("请输入 Y 或 N。", flush=True)
+    return counts
+
+
+def _archive_rejected_checkpoint(
+    checkpoint_path: Path,
+    *,
+    completed_round: int,
+) -> Path:
+    """用户选择从头运行时备份旧断点，而不是不可逆删除。"""
+
+    destination_dir = checkpoint_path.parent / "discarded"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    base = destination_dir / (
+        f"{checkpoint_path.stem}.round-{completed_round}.{timestamp}.pickle"
+    )
+    destination = base
+    suffix = 1
+    while destination.exists():
+        destination = base.with_name(f"{base.stem}-{suffix}{base.suffix}")
+        suffix += 1
+    checkpoint_path.replace(destination)
+    return destination
 
 
 def _write_round_checkpoint(

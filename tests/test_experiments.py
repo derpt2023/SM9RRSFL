@@ -12,6 +12,7 @@ from sm9rrsfl.experiments import (
     ProgressReporter,
     _format_duration,
     build_experiment_configs,
+    confirm_matching_checkpoints,
     default_output_dir,
     finalize_config_checkpoint,
     load_archived_results,
@@ -33,6 +34,59 @@ from sm9rrsfl.fl import (
 
 
 class ExperimentOutputDirTest(unittest.TestCase):
+    def test_matching_checkpoint_prompts_for_resume_or_restart(self):
+        dataset = make_synthetic_mnist_like(train_samples=40, test_samples=10, seed=18)
+        config = ExperimentConfig(
+            method="fedavg",
+            num_clients=4,
+            rounds=1,
+            early_stop=False,
+            seed=18,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint_dir = Path(tmp) / ".checkpoints"
+            run_measured_experiment(
+                dataset,
+                config,
+                checkpoint_dir=checkpoint_dir,
+                run_fingerprint="prompt-test",
+                retain_success_checkpoint=True,
+            )
+            checkpoint = next(checkpoint_dir.glob("*.pickle"))
+
+            with mock.patch("sys.stdout", new=io.StringIO()) as output:
+                resume_counts = confirm_matching_checkpoints(
+                    checkpoint_dir,
+                    [config],
+                    "prompt-test",
+                    input_func=lambda _prompt: "Y",
+                    interactive=True,
+                )
+            self.assertEqual(resume_counts, {"found": 1, "resumed": 1, "restarted": 0})
+            self.assertTrue(checkpoint.exists())
+            self.assertIn("已选择 Y", output.getvalue())
+
+            mismatch_counts = confirm_matching_checkpoints(
+                checkpoint_dir,
+                [config],
+                "different-fingerprint",
+                interactive=False,
+            )
+            self.assertEqual(mismatch_counts["found"], 0)
+
+            with mock.patch("sys.stdout", new=io.StringIO()) as output:
+                restart_counts = confirm_matching_checkpoints(
+                    checkpoint_dir,
+                    [config],
+                    "prompt-test",
+                    input_func=lambda _prompt: "N",
+                    interactive=True,
+                )
+            self.assertEqual(restart_counts, {"found": 1, "resumed": 0, "restarted": 1})
+            self.assertFalse(checkpoint.exists())
+            self.assertEqual(len(list((checkpoint_dir / "discarded").glob("*.pickle"))), 1)
+            self.assertIn("已选择 N", output.getvalue())
+
     def test_matching_archived_run_is_recovered_by_fingerprint(self):
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=17)
         config = ExperimentConfig(
