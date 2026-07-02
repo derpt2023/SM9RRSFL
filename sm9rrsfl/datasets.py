@@ -248,7 +248,7 @@ def partition_clients(
     dirichlet_alpha: float = 0.5,
     seed: int = 0,
 ) -> list[np.ndarray]:
-    """Partition sample indices among clients using IID or label Dirichlet splits."""
+    """按 IID 或标签 Dirichlet 分布划分客户端样本索引。"""
 
     if num_clients <= 0:
         raise ValueError("num_clients must be positive")
@@ -265,6 +265,7 @@ def partition_clients(
         raise ValueError("dirichlet_alpha must be positive")
 
     client_indices: list[list[int]] = [[] for _ in range(num_clients)]
+    # 每个标签独立抽取 Dirichlet 比例，alpha 越小，客户端标签偏斜越明显。
     for label in np.unique(labels):
         label_indices = all_indices[labels == label]
         rng.shuffle(label_indices)

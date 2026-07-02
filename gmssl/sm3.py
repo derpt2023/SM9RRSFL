@@ -2,6 +2,11 @@ import binascii
 from math import ceil
 from .func import rotl, bytes_to_list
 
+try:
+    from sm9rrsfl._native_sm3 import sm3_hexdigest as _native_sm3_hexdigest
+except ImportError:
+    _native_sm3_hexdigest = None
+
 IV = [
     1937774191, 1226093241, 388252375, 3666478592,
     2842636476, 372324522, 3817729613, 2969243214,
@@ -89,6 +94,16 @@ def sm3_cf(v_i, b_i):
     return [v_j[i] ^ v_i[i] for i in range(8)]
 
 def sm3_hash(msg):
+    # 本项目构建了原生扩展时，所有 SM9 内部短消息摘要也走 C 实现；结果与
+    # 下方兼容实现完全一致，并且不会长期占用 Python GIL。
+    if _native_sm3_hexdigest is not None:
+        return _native_sm3_hexdigest(bytes(msg))
+    return _sm3_hash_python(msg)
+
+
+def _sm3_hash_python(msg):
+    """保留原 gmssl 纯 Python 实现，供未构建扩展的平台回退。"""
+
     # print(msg)
     len1 = len(msg)
     reserve1 = len1 % 64

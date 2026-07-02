@@ -72,6 +72,7 @@ class Ding13TrajectoryDetector:
         *,
         round_id: int,
     ) -> Ding13RoundResult:
+        # 先提取当前奇异值，再与同一客户端上一轮奇异值做差形成轨迹特征。
         active_ids = [identity for identity in self.client_ids if identity in updates]
         current = {identity: self._singular_values(updates[identity]) for identity in active_ids}
 
@@ -84,6 +85,7 @@ class Ding13TrajectoryDetector:
 
         outliers: set[str] = set()
         if len(diff_features) >= 3:
+            # Isolation Forest 只处理低维奇异值差分，不扫描完整模型参数。
             ordered_ids = list(diff_features)
             features = np.asarray([diff_features[identity] for identity in ordered_ids], dtype=np.float32)
             scores = IsolationForestLite(
@@ -141,12 +143,19 @@ class Ding13TrajectoryDetector:
         for identity in self.removed:
             self.weights[identity] = 0.0
 
-    def _singular_values(self, update: np.ndarray) -> np.ndarray:
+    def _singular_values(self, update) -> np.ndarray:
         rows, cols = self.matrix_shape
         matrix_size = rows * cols
         end = self.matrix_offset + matrix_size
         if update.shape[0] < end:
             raise ValueError(f"update length {update.shape[0]} is too short for SVD matrix ending at {end}")
+        # Torch 实验只截取检测需要的小矩阵，并在设备端求奇异值；不会把完整
+        # CIFAR-10 更新为了 Ding13 检测复制回 CPU。
+        if _is_torch_tensor(update):
+            from .torch_backend import torch_singular_values_from_gram
+
+            matrix = update[self.matrix_offset:end].reshape(rows, cols)
+            return torch_singular_values_from_gram(matrix, device=self.device)
         matrix = np.asarray(update[self.matrix_offset:end], dtype=np.float32).reshape(rows, cols)
         if _should_use_torch(self.compute_backend, self.device):
             from .torch_backend import torch_singular_values_from_gram
@@ -258,3 +267,9 @@ def _should_use_torch(compute_backend: str, device: str) -> bool:
     except RuntimeError:
         return False
     return should_use_torch(compute_backend, device)
+
+
+def _is_torch_tensor(value) -> bool:
+    """避免为一次类型判断强制导入可选的 PyTorch。"""
+
+    return type(value).__module__.startswith("torch")

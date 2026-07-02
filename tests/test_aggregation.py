@@ -37,11 +37,41 @@ class KrumTest(unittest.TestCase):
         result = weighted_fedavg(updates, [1.0, 1.0], sample_counts=[1, 3])
         self.assertTrue(np.allclose(result, [7.5, 15.0]))
 
+    def test_streaming_weighted_fedavg_matches_stacked_path(self):
+        from sm9rrsfl import aggregation
+
+        updates = [
+            np.array([0.0, 2.0], dtype=np.float32),
+            np.array([10.0, 20.0], dtype=np.float32),
+        ]
+        with mock.patch.object(aggregation, "_STREAMING_AVERAGE_THRESHOLD_BYTES", 1):
+            result = aggregation.weighted_fedavg(updates, [0.75, 0.25])
+
+        self.assertTrue(np.allclose(result, [2.5, 6.5]))
+
     @unittest.skipIf(importlib.util.find_spec("torch") is None, "torch is not installed")
     def test_torch_weighted_fedavg_matches_numpy(self):
         updates = np.array([[0.0, 0.0], [10.0, 20.0]], dtype=np.float32)
         expected = weighted_fedavg(updates, [1.0, 1.0], sample_counts=[1, 3])
         result = torch_weighted_fedavg(updates, [1.0, 1.0], sample_counts=[1, 3], device="cpu")
+        self.assertTrue(np.allclose(result, expected))
+
+    @unittest.skipIf(importlib.util.find_spec("torch") is None, "torch is not installed")
+    def test_torch_streaming_average_matches_numpy(self):
+        from sm9rrsfl import torch_backend
+
+        updates = [
+            np.array([0.0, 0.0], dtype=np.float32),
+            np.array([10.0, 20.0], dtype=np.float32),
+        ]
+        expected = weighted_fedavg(updates, [1.0, 3.0])
+        with mock.patch.object(
+            torch_backend,
+            "_STREAMING_TORCH_AVERAGE_THRESHOLD_BYTES",
+            1,
+        ):
+            result = torch_weighted_fedavg(updates, [1.0, 3.0], device="cpu")
+
         self.assertTrue(np.allclose(result, expected))
 
     @unittest.skipIf(importlib.util.find_spec("torch") is None, "torch is not installed")
@@ -71,6 +101,20 @@ class KrumTest(unittest.TestCase):
                 sigma, u0 = torch_backend.torch_top_singular_feature(matrix, device="mps")
             with mock.patch("torch.linalg.svdvals", side_effect=AssertionError("unexpected torch svdvals")):
                 singulars = torch_backend.torch_singular_values_from_gram(matrix, device="mps")
+
+        self.assertAlmostEqual(sigma, 1.0)
+        self.assertEqual(u0.shape, (3,))
+        self.assertTrue(np.allclose(singulars, [1.0, 1.0, 1.0]))
+
+    @unittest.skipIf(importlib.util.find_spec("torch") is None, "torch is not installed")
+    def test_svd_helpers_fallback_when_torch_op_is_not_implemented(self):
+        from sm9rrsfl import torch_backend
+
+        matrix = np.eye(3, dtype=np.float32)
+        with mock.patch("torch.linalg.svd", side_effect=NotImplementedError("missing svd op")):
+            sigma, u0 = torch_backend.torch_top_singular_feature(matrix, device="cpu")
+        with mock.patch("torch.linalg.svdvals", side_effect=NotImplementedError("missing svdvals op")):
+            singulars = torch_backend.torch_singular_values_from_gram(matrix, device="cpu")
 
         self.assertAlmostEqual(sigma, 1.0)
         self.assertEqual(u0.shape, (3,))

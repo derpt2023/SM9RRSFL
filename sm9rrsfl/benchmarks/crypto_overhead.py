@@ -13,7 +13,7 @@ from time import perf_counter
 
 import numpy as np
 
-from sm9rrsfl.crypto import RRSPacket, SM9RRSContext, digest_update, sm3_hex_text
+from sm9rrsfl.crypto import RRSPacket, SM9RRSContext
 
 
 DEFAULT_CLIENT_COUNTS = (20, 50, 100)
@@ -240,33 +240,11 @@ def build_unsigned_packet(
     *,
     round_id: int,
 ) -> RRSPacket:
-    ring = tuple() if context.accumulator_mode == "dynamic" else context._sample_ring(identity)
-    update_digest = digest_update(update)
-    ring_accumulator, current_ring_digest, current_ring_size = context._ring_commitment(ring)
-    link_tag = sm3_hex_text(f"link:{config.task_id}:{identity}")[:32]
-    event_tag = sm3_hex_text(f"event:{config.task_id}:{round_id}:{update_digest}")[:32]
-    trapdoor_plain = json.dumps(
-        {"id": identity, "event": event_tag, "tag": link_tag},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    trapdoor = context._encrypt_trapdoor(trapdoor_plain)
-    signer_hint = identity if context.crypto_mode == "simulated" or context.accumulator_mode == "none" else ""
-    return RRSPacket(
-        task_id=config.task_id,
+    return context.build_unsigned_packet(
+        identity,
+        update,
         round_id=round_id,
-        ring=ring,
-        ring_accumulator=ring_accumulator,
-        ring_digest=current_ring_digest,
-        ring_size=current_ring_size,
-        link_tag=link_tag,
-        event_tag=event_tag,
-        update_digest=update_digest,
-        trapdoor=trapdoor,
-        signature=None,
-        crypto_mode=context.crypto_mode,
-        accumulator_mode=context.accumulator_mode,
-        _signer_identity_hint=signer_hint,
+        task_id=config.task_id,
     )
 
 

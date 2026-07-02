@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import weakref
 import numpy as np
 
 from .model import (
@@ -10,14 +11,13 @@ from .model import (
     ModelSpec,
     TrainStats,
     _as_nchw,
-    _vector_to_cifar_params,
-    params_to_vector,
-    vector_to_params,
 )
 
 
 SUPPORTED_BACKENDS = {"numpy", "auto", "torch"}
 SUPPORTED_DEVICES = {"auto", "cpu", "cuda", "mps"}
+_STREAMING_TORCH_AVERAGE_THRESHOLD_BYTES = 256 * 1024 * 1024
+_DATASET_TENSOR_CACHE: dict[tuple[int, str, ModelSpec], tuple[object, ...]] = {}
 
 
 @lru_cache(maxsize=1)
@@ -138,8 +138,46 @@ def torch_local_train_delta(
     return delta, TrainStats(loss=mean_loss, samples=len(labels_np))
 
 
+def _resident_dataset_tensors(torch, dataset, spec: ModelSpec, device) -> tuple[object, ...]:
+    """跨配置复用同一数据集的设备张量，避免反复上传完整 CIFAR-10。"""
+
+    key = (id(dataset), str(device), spec)
+    cached = _DATASET_TENSOR_CACHE.get(key)
+    if cached is not None and cached[0]() is dataset:
+        return cached[1:]
+
+    x_train = _torch_data(torch, dataset.x_train, spec, device)
+    y_train = torch.as_tensor(
+        np.asarray(dataset.y_train, dtype=np.int64),
+        dtype=torch.long,
+        device=device,
+    )
+    x_test = _torch_data(torch, dataset.x_test, spec, device)
+    y_test = torch.as_tensor(
+        np.asarray(dataset.y_test, dtype=np.int64),
+        dtype=torch.long,
+        device=device,
+    )
+
+    def clear_cache(_reference, cache_key=key):
+        _DATASET_TENSOR_CACHE.pop(cache_key, None)
+
+    _DATASET_TENSOR_CACHE[key] = (
+        weakref.ref(dataset, clear_cache),
+        x_train,
+        y_train,
+        x_test,
+        y_test,
+    )
+    return x_train, y_train, x_test, y_test
+
+
 class TorchTrainingContext:
-    """Keep dataset tensors and client indices resident on the selected device."""
+    """Keep dataset tensors and client indices resident on the selected device.
+
+    中文说明：同一轮的全局参数只从 CPU 传到设备一次。每个客户端都在设备端
+    克隆这份参数进行本地训练，最后仅把必须交给密码/检测层的更新传回 CPU。
+    """
 
     def __init__(
         self,
@@ -153,19 +191,49 @@ class TorchTrainingContext:
         self.torch = torch
         self.device = _resolve_device(torch, device)
         self.spec = spec or DEFAULT_SPEC
-        self.x_train = _torch_data(torch, dataset.x_train, self.spec, self.device)
-        self.y_train = torch.as_tensor(np.asarray(dataset.y_train, dtype=np.int64), dtype=torch.long, device=self.device)
-        self.x_test = _torch_data(torch, dataset.x_test, self.spec, self.device)
-        self.y_test = torch.as_tensor(np.asarray(dataset.y_test, dtype=np.int64), dtype=torch.long, device=self.device)
+        (
+            self.x_train,
+            self.y_train,
+            self.x_test,
+            self.y_test,
+        ) = _resident_dataset_tensors(torch, dataset, self.spec, self.device)
         self.client_indices = [
             torch.as_tensor(np.asarray(indices, dtype=np.int64), dtype=torch.long, device=self.device)
             for indices in client_indices
         ]
+        self._global_vector = None
+        self._global_vector_source: np.ndarray | None = None
+
+    def _ensure_global_vector(self, vector):
+        """缓存当前轮全局参数，避免每个客户端重复执行主机到设备传输。"""
+
+        if self._global_vector_source is not vector:
+            if self.torch.is_tensor(vector):
+                self._global_vector = vector.detach().to(
+                    device=self.device,
+                    dtype=self.torch.float32,
+                )
+            else:
+                array = np.ascontiguousarray(vector, dtype=np.float32)
+                self._global_vector = self.torch.from_numpy(array).to(
+                    device=self.device,
+                    dtype=self.torch.float32,
+                )
+            # 保留源数组引用，既能判断同一轮，也可防止 Python 复用旧对象 id。
+            self._global_vector_source = vector
+        return self._global_vector
 
     def accuracy(self, vector: np.ndarray, *, batch_size: int = 512) -> float:
         if int(self.y_test.numel()) == 0:
             return 0.0
-        params = _torch_params_from_vector(self.torch, vector, self.spec, self.device, requires_grad=False)
+        global_vector = self._ensure_global_vector(vector)
+        params = _torch_params_from_tensor(
+            self.torch,
+            global_vector,
+            self.spec,
+            requires_grad=False,
+            clone=False,
+        )
         correct = 0
         with self.torch.no_grad():
             for start in range(0, int(self.y_test.numel()), batch_size):
@@ -189,9 +257,16 @@ class TorchTrainingContext:
         if samples == 0:
             return np.zeros_like(global_vector), TrainStats(loss=0.0, samples=0)
 
-        params = list(_torch_params_from_vector(self.torch, global_vector, self.spec, self.device, requires_grad=True))
-        features = self.x_train.index_select(0, indices)
-        labels = self.y_train.index_select(0, indices)
+        global_tensor = self._ensure_global_vector(global_vector)
+        params = list(
+            _torch_params_from_tensor(
+                self.torch,
+                global_tensor,
+                self.spec,
+                requires_grad=True,
+                clone=True,
+            )
+        )
         rng = np.random.default_rng(seed)
 
         loss_sum = None
@@ -200,9 +275,17 @@ class TorchTrainingContext:
             order = rng.permutation(samples)
             for start in range(0, samples, batch_size):
                 batch_idx = order[start : start + batch_size]
-                index = self.torch.as_tensor(batch_idx, dtype=self.torch.long, device=self.device)
-                logits = _torch_forward(self.torch, params, features.index_select(0, index), self.spec)
-                loss = self.torch.nn.functional.cross_entropy(logits, labels.index_select(0, index))
+                local_index = self.torch.as_tensor(
+                    batch_idx,
+                    dtype=self.torch.long,
+                    device=self.device,
+                )
+                # 直接组合客户端索引和批索引，避免每轮复制完整客户端数据子集。
+                batch_index = indices.index_select(0, local_index)
+                features = self.x_train.index_select(0, batch_index)
+                labels = self.y_train.index_select(0, batch_index)
+                logits = _torch_forward(self.torch, params, features, self.spec)
+                loss = self.torch.nn.functional.cross_entropy(logits, labels)
                 loss.backward()
 
                 with self.torch.no_grad():
@@ -214,12 +297,192 @@ class TorchTrainingContext:
                 loss_sum = detached if loss_sum is None else loss_sum + detached
                 loss_batches += 1
 
-        updated = _torch_vector_from_params(params)
-        delta = (updated - global_vector).astype(np.float32)
+        updated_tensor = _torch_flat_vector_from_params(self.torch, params)
+        delta = (
+            updated_tensor.sub(global_tensor)
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32, copy=False)
+        )
         mean_loss = 0.0
         if loss_sum is not None and loss_batches:
             mean_loss = float((loss_sum / loss_batches).detach().cpu().item())
         return delta, TrainStats(loss=mean_loss, samples=samples)
+
+    def local_train_delta_resident(
+        self,
+        global_vector,
+        *,
+        client_idx: int,
+        lr: float,
+        epochs: int,
+        batch_size: int,
+        seed: int,
+    ):
+        """在设备端返回更新，供完整实验避免每客户端往返复制整个模型。"""
+
+        indices = self.client_indices[client_idx]
+        samples = int(indices.numel())
+        global_tensor = self._ensure_global_vector(global_vector)
+        if samples == 0:
+            return self.torch.zeros_like(global_tensor), TrainStats(loss=0.0, samples=0)
+
+        params = list(
+            _torch_params_from_tensor(
+                self.torch,
+                global_tensor,
+                self.spec,
+                requires_grad=True,
+                clone=True,
+            )
+        )
+        rng = np.random.default_rng(seed)
+        loss_sum = None
+        loss_batches = 0
+        for _ in range(epochs):
+            order = rng.permutation(samples)
+            for start in range(0, samples, batch_size):
+                local_index = self.torch.as_tensor(
+                    order[start : start + batch_size],
+                    dtype=self.torch.long,
+                    device=self.device,
+                )
+                batch_index = indices.index_select(0, local_index)
+                logits = _torch_forward(
+                    self.torch,
+                    params,
+                    self.x_train.index_select(0, batch_index),
+                    self.spec,
+                )
+                loss = self.torch.nn.functional.cross_entropy(
+                    logits,
+                    self.y_train.index_select(0, batch_index),
+                )
+                loss.backward()
+                with self.torch.no_grad():
+                    for param in params:
+                        if param.grad is not None:
+                            param -= lr * param.grad
+                            param.grad = None
+                detached = loss.detach()
+                loss_sum = detached if loss_sum is None else loss_sum + detached
+                loss_batches += 1
+
+        delta = _torch_flat_vector_from_params(self.torch, params).sub(global_tensor).detach()
+        mean_loss = 0.0
+        if loss_sum is not None and loss_batches:
+            mean_loss = float((loss_sum / loss_batches).detach().cpu().item())
+        return delta, TrainStats(loss=mean_loss, samples=samples)
+
+    def to_numpy(self, tensor) -> np.ndarray:
+        """仅在密码摘要或 CPU 检测确实需要时执行设备到主机传输。"""
+
+        if not self.torch.is_tensor(tensor):
+            return np.asarray(tensor, dtype=np.float32)
+        return tensor.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def poison_update(self, update, *, attack: str, scale: float, seed: int):
+        """在设备上执行与 NumPy 版本等价的投毒变换。"""
+
+        if attack == "none":
+            return update.clone()
+        if attack == "sign_flip":
+            return update.mul(-float(scale))
+        if attack == "gaussian":
+            std = float(self.torch.std(update, correction=0).detach().cpu().item())
+            if std <= 1e-12:
+                std = float(self.torch.linalg.vector_norm(update).detach().cpu().item()) / max(
+                    1,
+                    int(update.numel()),
+                ) ** 0.5
+            std = max(std, 1e-3)
+            if self.device.type == "mps":
+                # MPS 当前不提供独立 Generator；在 CPU 生成后一次性上传。
+                rng = np.random.default_rng(seed)
+                noise = rng.normal(
+                    0.0,
+                    float(scale) * std,
+                    size=tuple(update.shape),
+                ).astype(np.float32)
+                return self.torch.from_numpy(noise).to(device=self.device)
+            generator = self.torch.Generator(device=self.device.type)
+            generator.manual_seed(int(seed))
+            return self.torch.randn(
+                update.shape,
+                dtype=update.dtype,
+                device=update.device,
+                generator=generator,
+            ).mul(float(scale) * std)
+        if attack == "alternating":
+            from .attacks import _ALTERNATING_TRIGGER_SEED, _ALTERNATING_TRIGGER_SHARDS
+
+            poisoned = update.clone()
+            size = int(poisoned.numel())
+            if size == 0:
+                return poisoned
+            shard_count = min(_ALTERNATING_TRIGGER_SHARDS, size)
+            shard_index = seed % shard_count
+            start = size * shard_index // shard_count
+            end = size * (shard_index + 1) // shard_count
+            rms = float(self.torch.linalg.vector_norm(poisoned).detach().cpu().item()) / size**0.5
+            magnitude = max(rms, 1e-6) * (float(scale) / 100.0)
+            # 继续使用原实现的固定 NumPy 触发器，保持同一分片的符号模式不变。
+            rng = np.random.default_rng(_ALTERNATING_TRIGGER_SEED + shard_index)
+            trigger = rng.choice((-1.0, 1.0), size=end - start).astype(np.float32)
+            poisoned[start:end].add_(
+                self.torch.from_numpy(trigger).to(device=self.device),
+                alpha=magnitude,
+            )
+            return poisoned
+        raise ValueError("attack must be one of: none, sign_flip, gaussian, alternating")
+
+    def weighted_average(self, updates, weights, sample_counts=None):
+        """流式设备端加权聚合，不构造 N×P 的额外堆叠张量。"""
+
+        if not updates:
+            raise ValueError("at least one update is required")
+        weight_array = np.asarray(weights, dtype=np.float64)
+        if sample_counts is not None:
+            weight_array *= np.maximum(np.asarray(sample_counts, dtype=np.float64), 0.0)
+        total = float(np.sum(weight_array))
+        if total <= 0.0:
+            weight_array.fill(1.0 / len(updates))
+        else:
+            weight_array /= total
+        result = self.torch.zeros_like(updates[0])
+        for update, weight in zip(updates, weight_array):
+            result.add_(update, alpha=float(weight))
+        return result
+
+    def krum_select(self, updates, *, byzantine_count: int):
+        """直接在驻留设备的更新上计算 Krum 距离。"""
+
+        count = len(updates)
+        if count < 3:
+            raise ValueError("Krum requires at least 3 updates")
+        neighbor_count = count - byzantine_count - 2
+        if neighbor_count < 1:
+            raise ValueError("Krum requires n - f - 2 >= 1; reduce malicious ratio or increase clients")
+        stacked = self.torch.stack(updates)
+        distances = self.torch.cdist(stacked, stacked, p=2).square()
+        nearest = self.torch.topk(
+            distances,
+            k=neighbor_count + 1,
+            dim=1,
+            largest=False,
+        ).values[:, 1:]
+        scores = nearest.sum(dim=1)
+        selected = int(self.torch.argmin(scores).detach().cpu().item())
+        return selected, updates[selected], scores.detach().cpu().numpy().astype(np.float64)
+
+    def add_update(self, params, update):
+        """让新一轮全局参数继续驻留设备，避免聚合结果回传再上传。"""
+
+        return self._ensure_global_vector(params).add(update).detach()
+
+    def zeros_like(self, update):
+        return self.torch.zeros_like(update)
 
 
 def torch_weighted_average(
@@ -231,22 +494,44 @@ def torch_weighted_average(
 ) -> np.ndarray:
     torch = _torch_module()
     torch_device = _resolve_device(torch, device)
-    stacked_np = np.asarray(updates, dtype=np.float32)
-    if stacked_np.ndim != 2 or stacked_np.shape[0] == 0:
-        raise ValueError("updates must have shape [num_updates, num_parameters]")
+    if isinstance(updates, np.ndarray):
+        stacked_np = np.asarray(updates, dtype=np.float32)
+        if stacked_np.ndim != 2 or stacked_np.shape[0] == 0:
+            raise ValueError("updates must have shape [num_updates, num_parameters]")
+        update_count, parameter_count = stacked_np.shape
+    else:
+        if not updates:
+            raise ValueError("updates must have shape [num_updates, num_parameters]")
+        update_count = len(updates)
+        parameter_count = int(np.asarray(updates[0]).size)
+        stacked_np = None
     weight_np = np.asarray(weights, dtype=np.float64)
-    if weight_np.shape != (stacked_np.shape[0],):
+    if weight_np.shape != (update_count,):
         raise ValueError("weights must have shape [num_updates]")
     if sample_counts is not None:
         sample_np = np.asarray(sample_counts, dtype=np.float64)
-        if sample_np.shape != (stacked_np.shape[0],):
+        if sample_np.shape != (update_count,):
             raise ValueError("sample_counts must have shape [num_updates]")
         weight_np = weight_np * np.maximum(sample_np, 0.0)
     total = float(np.sum(weight_np))
     if total <= 0.0:
-        weight_np = np.full(stacked_np.shape[0], 1.0 / stacked_np.shape[0], dtype=np.float64)
+        weight_np = np.full(update_count, 1.0 / update_count, dtype=np.float64)
     else:
         weight_np = weight_np / total
+    estimated_bytes = update_count * parameter_count * np.dtype(np.float32).itemsize
+    if stacked_np is None and estimated_bytes >= _STREAMING_TORCH_AVERAGE_THRESHOLD_BYTES:
+        # 大模型逐条上传并累加，避免同时保留 CPU/GPU 两份完整更新矩阵。
+        result = torch.zeros(parameter_count, dtype=torch.float32, device=torch_device)
+        for update, weight in zip(updates, weight_np):
+            update_tensor = torch.as_tensor(
+                np.asarray(update, dtype=np.float32),
+                dtype=torch.float32,
+                device=torch_device,
+            )
+            result.add_(update_tensor, alpha=float(weight))
+        return result.detach().cpu().numpy().astype(np.float32, copy=False)
+    if stacked_np is None:
+        stacked_np = np.asarray(updates, dtype=np.float32)
     stacked = torch.as_tensor(stacked_np, dtype=torch.float32, device=torch_device)
     weights_t = torch.as_tensor(weight_np.astype(np.float32), dtype=torch.float32, device=torch_device)
     return weights_t.matmul(stacked).detach().cpu().numpy().astype(np.float32)
@@ -288,25 +573,50 @@ def torch_top_singular_feature(matrix: np.ndarray, *, device: str = "auto") -> t
     torch_device = _resolve_device(torch, device)
     matrix_np = np.asarray(matrix, dtype=np.float32)
     if getattr(torch_device, "type", None) == "mps":
-        u, singular_values, _ = np.linalg.svd(matrix_np, full_matrices=False)
-        return float(singular_values[0]), u[:, 0].astype(np.float32)
+        return _numpy_top_singular_feature(matrix_np)
     tensor = torch.as_tensor(matrix_np, dtype=torch.float32, device=torch_device)
-    u, singular_values, _ = torch.linalg.svd(tensor, full_matrices=False)
+    try:
+        u, singular_values, _ = torch.linalg.svd(tensor, full_matrices=False)
+    except NotImplementedError:
+        return _numpy_top_singular_feature(matrix_np)
     sigma = float(singular_values[0].detach().cpu().item())
     u0 = u[:, 0].detach().cpu().numpy().astype(np.float32)
     return sigma, u0
 
 
-def torch_singular_values_from_gram(matrix: np.ndarray, *, device: str = "auto") -> np.ndarray:
+def torch_singular_values_from_gram(matrix, *, device: str = "auto") -> np.ndarray:
     torch = _torch_module()
     torch_device = _resolve_device(torch, device)
-    matrix_np = np.asarray(matrix, dtype=np.float32)
     if getattr(torch_device, "type", None) == "mps":
-        gram = matrix_np.T @ matrix_np
-        return np.linalg.svd(gram, compute_uv=False).astype(np.float32)
-    tensor = torch.as_tensor(matrix_np, dtype=torch.float32, device=torch_device)
+        matrix_np = (
+            matrix.detach().cpu().numpy().astype(np.float32, copy=False)
+            if torch.is_tensor(matrix)
+            else np.asarray(matrix, dtype=np.float32)
+        )
+        return _numpy_singular_values_from_gram(matrix_np)
+    if torch.is_tensor(matrix):
+        tensor = matrix.detach().to(device=torch_device, dtype=torch.float32)
+        matrix_np = None
+    else:
+        matrix_np = np.asarray(matrix, dtype=np.float32)
+        tensor = torch.as_tensor(matrix_np, dtype=torch.float32, device=torch_device)
     gram = tensor.T.matmul(tensor)
-    return torch.linalg.svdvals(gram).detach().cpu().numpy().astype(np.float32)
+    try:
+        return torch.linalg.svdvals(gram).detach().cpu().numpy().astype(np.float32)
+    except NotImplementedError:
+        if matrix_np is None:
+            matrix_np = tensor.cpu().numpy().astype(np.float32, copy=False)
+        return _numpy_singular_values_from_gram(matrix_np)
+
+
+def _numpy_top_singular_feature(matrix: np.ndarray) -> tuple[float, np.ndarray]:
+    u, singular_values, _ = np.linalg.svd(matrix, full_matrices=False)
+    return float(singular_values[0]), u[:, 0].astype(np.float32)
+
+
+def _numpy_singular_values_from_gram(matrix: np.ndarray) -> np.ndarray:
+    gram = matrix.T @ matrix
+    return np.linalg.svd(gram, compute_uv=False).astype(np.float32)
 
 
 def _normalize_backend(compute_backend: str) -> str:
@@ -357,34 +667,80 @@ def _torch_params_from_vector(
     *,
     requires_grad: bool,
 ) -> tuple[object, ...]:
-    local = np.asarray(vector, dtype=np.float32)
-    if spec.architecture == "cifar10":
-        params = _vector_to_cifar_params(local, spec=spec)
-        arrays = (
-            params.conv1_w,
-            params.conv1_b,
-            params.conv2_w,
-            params.conv2_b,
-            params.dense1_w,
-            params.dense1_b,
-            params.dense2_w,
-            params.dense2_b,
-            params.logits_w,
-            params.logits_b,
-        )
-    else:
-        arrays = vector_to_params(local, spec=spec)
+    local = np.ascontiguousarray(vector, dtype=np.float32)
+    flat = torch.from_numpy(local).to(device=device, dtype=torch.float32)
+    return _torch_params_from_tensor(
+        torch,
+        flat,
+        spec,
+        requires_grad=requires_grad,
+        clone=True,
+    )
+
+
+def _torch_params_from_tensor(
+    torch,
+    flat_vector,
+    spec: ModelSpec,
+    *,
+    requires_grad: bool,
+    clone: bool,
+) -> tuple[object, ...]:
+    """把设备端扁平参数映射为模型张量；训练客户端使用独立 clone。"""
+
     tensors = []
-    for array in arrays:
-        tensor = torch.tensor(np.ascontiguousarray(array), dtype=torch.float32, device=device)
+    offset = 0
+    for shape in _parameter_shapes(spec):
+        size = int(np.prod(shape))
+        tensor = flat_vector.narrow(0, offset, size).reshape(shape)
+        tensor = tensor.clone().detach() if clone else tensor.detach()
         tensor.requires_grad_(requires_grad)
         tensors.append(tensor)
+        offset += size
+    if offset != int(flat_vector.numel()):
+        raise ValueError("parameter vector size does not match model specification")
     return tuple(tensors)
 
 
 def _torch_vector_from_params(params: list[object] | tuple[object, ...]) -> np.ndarray:
-    arrays = [param.detach().cpu().numpy().astype(np.float32, copy=False) for param in params]
-    return params_to_vector(*arrays)
+    torch = _torch_module()
+    return (
+        _torch_flat_vector_from_params(torch, params)
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32, copy=False)
+    )
+
+
+def _torch_flat_vector_from_params(torch, params: list[object] | tuple[object, ...]):
+    return torch.cat([param.detach().reshape(-1) for param in params], dim=0)
+
+
+def _parameter_shapes(spec: ModelSpec) -> tuple[tuple[int, ...], ...]:
+    channels, _, _ = spec.input_shape
+    kernel = spec.kernel_size
+    if spec.architecture == "cifar10":
+        filters1, filters2 = spec.cifar_conv_filters
+        hidden1, hidden2 = spec.cifar_hidden_dims
+        return (
+            (filters1, channels, kernel, kernel),
+            (filters1,),
+            (filters2, filters1, kernel, kernel),
+            (filters2,),
+            (spec.feature_dim, hidden1),
+            (hidden1,),
+            (hidden1, hidden2),
+            (hidden2,),
+            (hidden2, spec.num_classes),
+            (spec.num_classes,),
+        )
+    return (
+        (spec.conv_filters, channels, kernel, kernel),
+        (spec.conv_filters,),
+        (spec.feature_dim, spec.num_classes),
+        (spec.num_classes,),
+    )
 
 
 def _torch_forward(torch, params: list[object] | tuple[object, ...], x, spec: ModelSpec):

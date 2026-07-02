@@ -13,13 +13,14 @@
 - 文献 [13] 对照实验：复现其“奇异值轨迹差分 + Isolation Forest + 动态权重惩罚/恢复 + 连续异常剔除”的在线投毒检测流程。
 - 输出 `summary.csv`、`rounds.csv`、`summary.json`，并自动生成 HTML/SVG 可视化图表，便于后续绘图和论文表格整理。
 
-项目中已有的 `gmssl.sm9` 提供真实 SM9 签名、验签、加密和解密能力。当前默认启用 `--accumulator-mode dynamic`：`sm9rrsfl/accumulator.py` 按《基于国密算法 SM9 的可追踪环签名方案》实现双线性动态累加器，使用 `V=[∏(v_i+s)]P1` 和签名者见证 `W_i=[∏_{j≠i}(v_j+s)]P1` 表示公共环；`sm9rrsfl/crypto.py` 输出常数大小的环签名 `σ=(h,R,S,T)`，数据包中不再携带完整环成员列表，因此签名数据大小不会随环成员数量线性增长。为保持本项目原有审计流程，代码仍保留 SM9 加密撤销陷门，确认恶意后可直接追溯客户端身份。
+真实动态模式默认使用用户提供的 GmSSL C 源码：`sm9rrsfl/_native_rrs.c` 在 GmSSL 国标 SM9 曲线、点乘和双线性配对 API 上实现本方案原有的动态累加器、常数大小环签名 `σ=(h,R,S,T)` 与 SM9 IBE 撤销陷门，而不是用普通 SM9 身份签名替代环签名。公共环仍由 `V=[∏(v_i+s)]P1` 和见证 `W_i=[∏_{j≠i}(v_j+s)]P1` 表示，签名包不携带完整成员列表；协议公式、链接标签、审计撤销和检测规则保持不变。原生扩展不可用时会回退到原有 Python 实现。
 
 ## 目录结构
 
 当前代码按“核心方案、训练实验、密码开销实验、文档与测试”拆分：
 
 - `sm9rrsfl/crypto.py`、`sm9rrsfl/accumulator.py`：SM9-RRS 数据包、签名/验签、动态累加器和撤销陷门。
+- `sm9rrsfl/_native_rrs.c`、`sm9rrsfl/_native_sm3.c`：基于 GmSSL 的原生环签名/IBE 后端和大更新 SM3 摘要后端。
 - `sm9rrsfl/fl.py`、`sm9rrsfl/experiments.py`：联邦训练主流程和 MNIST/CIFAR-10 对比实验入口。
 - `sm9rrsfl/benchmarks/`：独立微基准实验入口，不混入 CNN 训练时间；目前包含签名与验签开销测试。
 - `gmssl/`：项目内置国密 SM2/SM3/SM4/SM9 实现。
@@ -39,9 +40,22 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+
+# 将 GmSSL-master.zip 放在 ~/Downloads 后，原地构建原生 SM3/SM9-RRS 扩展
+python setup.py build_ext --inplace
 ```
 
 基础运行不强制依赖 PyTorch、torchvision 或 scikit-learn；文献 [13] 的 Isolation Forest 已用纯 NumPy 实现。项目内已经包含实验所需的 `gmssl` SM2/SM3/SM4/SM9 代码。
+
+`setup.py` 会依次查找环境变量 `GMSSL_SOURCE`、已解压的 `~/Downloads/GmSSL-master/` 和 `~/Downloads/GmSSL-master.zip`；也可用 `GMSSL_ARCHIVE=/绝对路径/GmSSL-master.zip` 指定压缩包。原生运算会释放 Python GIL。程序启动时输出 `sm3_backend=native-extension` 和 `rrs_backend=gmssl-native` 才表示两层加速都已启用；构建失败不影响正确性，但会回退到明显更慢的 Python 实现。
+
+可单独检查后端：
+
+```bash
+python -c "from sm9rrsfl.crypto import rrs_backend_name, sm3_backend_name; print(sm3_backend_name(), rrs_backend_name())"
+```
+
+`--crypto-mode simulated` 明确用于快速验证联邦学习、攻击和检测流程，其更新摘要使用系统库加速的 SHA-256；`--crypto-mode sm9` 才使用真实 SM3/SM9。两种模式不会写入同一个默认输出目录。
 
 如果希望在 Mac 或 Windows 上使用 GPU 加速 CNN 本地训练，需要额外安装 PyTorch：
 
@@ -305,13 +319,13 @@ python -m sm9rrsfl.experiments \
 
 真实 SM9 CIFAR-10 主实验默认写入 `outputs/cifar10/`；模拟模式默认写入 `outputs/cifar10_simulated/`。
 
-上面的 `--jobs auto` 会根据系统物理内存和当前实验规模估算外层实验配置并发数，并在 PyTorch GPU/MPS/CUDA 后端下保守限制同一设备上的并发，避免 168 个配置同时抢占显存或内存。24GB Windows 和 36GB Mac 仍建议使用该限制；如果确认多 GPU 或更大内存可承受，可以显式改成 `--jobs 2`、`--jobs 4` 等固定值。
+上面的 `--jobs auto` 会根据系统物理内存和当前实验规模估算外层实验配置并发数；检测到单个 MPS/CUDA GPU 时自动固定为 `1`，避免配置争抢显存以及 CUDA fork 初始化错误。`--jobs 1` 只关闭配置级并发，单个配置仍使用 GPU。只有确认多 GPU 且已配置进程到设备的映射后，才建议显式提高并发数。
 
 外层并发默认优先使用进程池，让不同实验配置互相隔离；如果当前运行环境限制系统 semaphore 或进程池初始化，程序会提示 `process_pool_unavailable=...` 并自动回退到线程池继续执行。
 
-`--eval-interval 5` 表示每 5 轮评估一次测试集准确率，最后一轮始终评估。该参数只减少中间测试集前向计算，不改变训练、投毒、防御、聚合和最终评估逻辑；如果论文图表需要完整逐轮曲线，可改回 `--eval-interval 1`。
+`--eval-interval 5` 表示每 5 轮评估一次测试集准确率，最后一轮始终评估。它不改变训练、投毒、防御、聚合和最终评估公式，但启用早停时判断粒度会变粗，可能多运行到下一个评估点；如果论文图表需要完整逐轮曲线，可改回 `--eval-interval 1`。
 
-`--sm9-workers auto` 会并行处理 SM9-RRS 每轮中相互独立的封包、签名和验签工作；SVD 轨迹检测仍按客户端顺序更新状态，因此不改变撤销、降权和异常判定语义。
+`--sm9-workers auto`（默认）会用最多 8 个线程并行处理每轮中相互独立的 GmSSL 封包、签名和验签；原生 SM3、SM9 点乘和配对都会释放 GIL。SVD 轨迹检测仍按客户端稳定顺序更新状态，因此并行不会改变撤销、降权和异常判定语义。
 
 主实验运行时会显示配置级进度条和预计剩余时间，例如 `42/168 25.0% elapsed=... eta=...`。串行模式下会显示当前正在运行的配置；并发模式下会在每个配置完成后更新总进度。ETA 基于已经完成配置的平均耗时估算，前几个配置完成前会显示 `eta=estimating`。
 
@@ -333,7 +347,9 @@ python -m sm9rrsfl.experiments \
 --compute-backend auto --device auto
 ```
 
-启用 PyTorch 后端时，程序会把数据集张量和客户端索引保留在所选设备上，并优先使用 torch 执行 FedAvg/加权 FedAvg、Krum 距离计算和 SVD 特征提取。由于当前 PyTorch MPS 不支持 `torch.linalg.svd`，MPS 环境下的 SVD 特征提取会显式回到 NumPy/CPU 执行，避免 PyTorch 运行时反复 fallback 和输出 warning。上述优化只改变计算后端和数据搬运方式，不改变客户端划分、攻击启动轮次、聚合公式、检测阈值或撤销规则。
+启用 PyTorch 后端时，数据集、客户端索引、全局参数、客户端更新和聚合结果会持续驻留所选设备。FedAvg/加权 FedAvg、Krum 距离、投毒变换和 Ding13 SVD 特征均直接在设备端执行；真实 SM9 只为协议要求的更新 SM3 摘要回传一次 CPU 字节。MPS 不支持的 SVD 算子会显式转到 NumPy/CPU。上述优化不改变客户端划分、攻击启动轮次、聚合公式、检测阈值或撤销规则。
+
+运行默认启用断点续跑：第 1 轮前及每轮结束后都会原子写入 `输出目录/.checkpoints/`，每完成一个配置还会先更新事务式结果快照，再派生 CSV/JSON。训练、密码运算、检测、聚合、断电或手动终止发生在一轮中间时，保留的是上一轮完整一致状态，不会恢复“完成一半”的聚合。修复代码后使用完全相同的数据规模和参数重启命令，会从下一轮继续并跳过已完成配置；代码本身不参与运行指纹，实验参数或数据变化才会使旧结果移入 `.stale/`。以后再次执行某个旧命令时，程序也会按指纹自动找回对应 `.stale/` 结果，无需手工搬回 CSV。确实需要从零重跑时加 `--no-resume`。
 
 如果希望先快速复现模型收敛趋势和可视化，可以把上面的 `--crypto-mode sm9` 改成 `--crypto-mode simulated`。真实 SM9 模式会显著更慢，适合用于最终密码开销实验；模拟模式适合先检查准确率、抗投毒趋势和图表生成。
 
@@ -409,6 +425,7 @@ python -m sm9rrsfl.experiments \
 - `--data-dir data/mnist|data/cifar10`：数据集目录；未指定时会按 `--dataset` 自动选择默认目录。
 - `--methods sm9rrs krum ding13 fedavg`：选择实验方法。
 - `--ratios 0.00 0.10 0.20 0.40 0.45 0.60 0.80`：设置恶意节点比例，建议保留 `0.00` 用于生成无恶意节点基线图。
+- Krum 的邻居数为 `n-f-2`。若该值小于 `1`（例如 `10` 个客户端、`80%` 恶意客户端时 `f=8`），程序会在训练前跳过该无定义配置并写入 `skipped_configs.json`，不会修改 `f` 或让整个实验网格中断。即使某些高恶意比例仍可计算，超过经典 Krum 条件 `n≥2f+3` 时也只应视为压力测试，不代表理论鲁棒性保证仍成立。
 - `--train-samples 10000` / `--test-samples 2000`：限制真实数据集样本量；不传时使用完整真实数据集。快速实验建议显式传入较小样本数。
 - `--num-clients 20`：设置单个客户端数量；当没有传 `--client-counts` 时生效。
 - `--client-counts 20 50 100`：一次运行多个客户端数量，并生成客户端数量横向对比图；该参数优先于 `--num-clients`。
@@ -422,11 +439,12 @@ python -m sm9rrsfl.experiments \
 - `--partitions iid dirichlet`：一次运行多个数据划分场景，并分别生成可视化；该参数优先于 `--partition`。
 - `--dirichlet-alpha 0.5`：非 IID 强度，值越小各客户端标签分布越偏。
 - `--crypto-mode sm9|simulated`：真实 SM9 或快速模拟密码层。
-- `--compute-backend numpy|auto|torch`：CNN 本地训练/评估后端；默认 `numpy` 保持原实现，`torch` 强制使用 PyTorch，`auto` 在可用时使用 PyTorch GPU，否则回落到 NumPy。
+- `--compute-backend numpy|auto|torch`：CNN 本地训练/评估后端；默认 `auto`，有 CUDA/MPS 时自动使用 PyTorch GPU，否则回落到 NumPy；`numpy` 和 `torch` 可强制指定实现。
 - `--device auto|cpu|cuda|mps`：PyTorch 设备；Mac Apple Silicon 使用 `mps`，Windows/Linux NVIDIA 使用 `cuda`，`auto` 优先 CUDA、其次 MPS。
 - `--jobs 1|auto|N`：外层实验配置并发数。`auto` 会按系统物理内存和实验规模估算上限，并在单 GPU/MPS/CUDA 后端下保守限制并发；该参数只改变 168 个配置的调度顺序，不改变单个配置内部的实验变量。
 - `--eval-interval 1|5|10`：每隔多少轮评估一次测试集准确率；最终轮始终评估。`1` 会保留完整逐轮曲线，较大值可减少 CIFAR-10 正式实验中的测试集前向开销。
 - `--sm9-workers 1|auto|N`：SM9-RRS 每轮封包、签名和验签 worker 数；检测器状态仍按客户端顺序更新，不改变方案中的 SVD 轨迹判定、降权或撤销规则。
+- `--no-resume`：忽略输出目录中的已完成配置和逐轮检查点，从零开始本次实验；默认会安全断点续跑。
 - `--no-progress`：关闭终端进度条和 ETA 输出；训练、结果文件和可视化生成不受影响。
 - `--accumulator-mode dynamic|none`：默认 `dynamic`，使用动态累加器和常数大小环签名；`none` 为旧版实验抽象，会在签名包中携带抽样环成员列表。
 - `--ring-size 5`：旧版 `--accumulator-mode none` 下的抽样环大小；动态累加器模式下公共环默认为当前实验的全部客户端，签名包只记录累加器摘要和公共环大小。
@@ -444,11 +462,18 @@ python -m sm9rrsfl.experiments \
 
 默认输出目录按数据集和密码模式区分：MNIST 的 `--crypto-mode sm9` 写入 `outputs/mnist/`，CIFAR-10 的 `--crypto-mode sm9` 写入 `outputs/cifar10/`；模拟模式分别写入 `outputs/mnist_simulated/` 和 `outputs/cifar10_simulated/`；CIFAR-10 干净基线写入 `outputs/cifar10_clean_baseline/`。每个输出目录都会包含：
 
-- `summary.csv`：每个方法和恶意比例的一行摘要。
+- `summary.csv`：每个方法和恶意比例的一行摘要，同时包含训练、攻击、摘要、封包、签名、验签、检测、聚合和评估的分阶段耗时。使用多个 `sm9-workers` 时，密码字段是各客户端操作耗时之和，用于判断热点；`runtime_seconds` 才是配置的真实墙钟时间。
 - `rounds.csv`：逐轮准确率、误差、接收/拒绝更新数、黑名单数量、TP/FP 等。
 - `summary.json`：与 `summary.csv` 对应的 JSON 结果。
+- `run_manifest.json`：本次数据规模与完整配置指纹，用于确认检查点可以安全复用。
+- `skipped_configs.json`：因算法数学条件不成立而在训练前跳过的配置及具体原因。
+- `.completed_results.pickle`：已完成配置的事务式权威快照；即使断电发生在多个 CSV 替换之间，也能据此恢复并重新生成表格。
+- `last_failure.json`：最近一次未预料异常、完整堆栈、出错配置和最后完成轮次；该配置后来成功完成时会标记为 `resolved`。
+- `.checkpoints/*.pickle`：当前未完成配置的逐轮状态，配置成功完成后自动删除。
 - `visualizations.html`：自动生成的可视化总览页面。
 - `plots/*.svg`：各个图表的 SVG 文件，可直接插入论文或进一步编辑。
+
+每轮和每个配置的结果都通过临时文件及原子替换保存。长时间实验中途退出后，既能保留已经完成的配置，也能从当前配置的下一轮继续，而不必重跑前面的数百轮。
 
 当同时运行 IID 和 Non-IID 时，典型图表包括：
 

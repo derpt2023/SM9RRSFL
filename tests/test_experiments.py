@@ -1,21 +1,165 @@
 import argparse
+import csv
 import io
+import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from sm9rrsfl.experiments import (
     ProgressReporter,
     _format_duration,
+    build_experiment_configs,
     default_output_dir,
+    finalize_config_checkpoint,
+    load_archived_results,
+    load_completed_results_snapshot,
     parse_args,
+    read_results,
     resolve_parallel_jobs,
     resolve_output_dir,
+    run_measured_experiment,
+    write_result_files,
 )
-from sm9rrsfl.fl import ExperimentConfig
+from sm9rrsfl.datasets import make_synthetic_mnist_like
+from sm9rrsfl.fl import (
+    ExperimentConfig,
+    experiment_config_error,
+    malicious_client_count,
+    run_experiment,
+)
 
 
 class ExperimentOutputDirTest(unittest.TestCase):
+    def test_matching_archived_run_is_recovered_by_fingerprint(self):
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=17)
+        config = ExperimentConfig(
+            method="fedavg",
+            num_clients=2,
+            rounds=1,
+            early_stop=False,
+            seed=17,
+        )
+        result = run_experiment(dataset, config)
+        fingerprint = "abcdef123456" + "0" * 52
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            archived_dir = output_dir / ".stale" / fingerprint[:12]
+            archived_dir.mkdir(parents=True)
+            write_result_files(archived_dir, [result])
+
+            recovered = load_archived_results(output_dir, fingerprint, [config])
+
+        self.assertIsNotNone(recovered)
+        recovered_results, recovered_path = recovered
+        self.assertEqual(len(recovered_results), 1)
+        self.assertEqual(recovered_results[0].config, config)
+        self.assertEqual(recovered_path.name, fingerprint[:12])
+
+    def test_terminal_checkpoint_replays_completed_worker_before_parent_commit(self):
+        dataset = make_synthetic_mnist_like(train_samples=40, test_samples=10, seed=16)
+        config = ExperimentConfig(
+            method="fedavg",
+            malicious_ratio=0.0,
+            num_clients=4,
+            rounds=1,
+            early_stop=False,
+            seed=16,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint_dir = Path(tmp) / ".checkpoints"
+            first = run_measured_experiment(
+                dataset,
+                config,
+                checkpoint_dir=checkpoint_dir,
+                run_fingerprint="two-phase-test",
+                retain_success_checkpoint=True,
+            )
+            self.assertEqual(len(list(checkpoint_dir.glob("*.pickle"))), 1)
+
+            with mock.patch(
+                "sm9rrsfl.experiments.run_experiment",
+                side_effect=AssertionError("terminal result should be replayed"),
+            ):
+                replayed = run_measured_experiment(
+                    dataset,
+                    config,
+                    checkpoint_dir=checkpoint_dir,
+                    run_fingerprint="two-phase-test",
+                    retain_success_checkpoint=True,
+                )
+            finalize_config_checkpoint(checkpoint_dir, config, "two-phase-test")
+
+            self.assertEqual(first.records, replayed.records)
+            self.assertEqual(len(list(checkpoint_dir.glob("*.pickle"))), 0)
+
+    def test_invalid_numeric_arguments_fail_during_preflight(self):
+        invalid_commands = (
+            ["--ratios", "1.0"],
+            ["--client-counts", "0"],
+            ["--rounds", "0"],
+            ["--batch-size", "0"],
+            ["--lr", "0"],
+            ["--dirichlet-alpha", "0"],
+        )
+        for command in invalid_commands:
+            with self.subTest(command=command):
+                with mock.patch("sys.stderr", new=io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parse_args(command)
+
+    def test_krum_validation_uses_general_formula_across_boundaries(self):
+        ratios = (0.0, 0.25, 0.49, 0.5, 0.6, 0.8, 0.95)
+        for clients in range(1, 31):
+            for ratio in ratios:
+                config = ExperimentConfig(
+                    method="krum",
+                    num_clients=clients,
+                    malicious_ratio=ratio,
+                )
+                malicious = malicious_client_count(clients, ratio)
+                expected_invalid = clients < 3 or clients - malicious - 2 < 1
+                self.assertEqual(
+                    experiment_config_error(config) is not None,
+                    expected_invalid,
+                    msg=f"clients={clients}, ratio={ratio}, f={malicious}",
+                )
+
+    def test_invalid_krum_grid_points_are_detected_without_changing_manifest_grid(self):
+        args = parse_args(
+            [
+                "--methods",
+                "sm9rrs",
+                "krum",
+                "ding13",
+                "fedavg",
+                "--ratios",
+                "0",
+                "0.1",
+                "0.2",
+                "0.4",
+                "0.6",
+                "0.8",
+                "--partitions",
+                "iid",
+                "dirichlet",
+                "--client-counts",
+                "10",
+                "20",
+                "50",
+            ]
+        )
+        configs = build_experiment_configs(args)
+        invalid = [config for config in configs if experiment_config_error(config)]
+
+        self.assertEqual(len(configs), 144)
+        self.assertEqual(len(invalid), 2)
+        self.assertTrue(all(config.method == "krum" for config in invalid))
+        self.assertTrue(all(config.num_clients == 10 for config in invalid))
+        self.assertTrue(all(config.malicious_ratio == 0.8 for config in invalid))
+
     def test_sm9_mnist_default_keeps_main_output_directory(self):
         self.assertEqual(default_output_dir("mnist", "sm9"), Path("outputs/mnist"))
 
@@ -63,10 +207,10 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(args.lr, 0.05)
         self.assertEqual(args.lr_decay, 0.99)
 
-    def test_compute_backend_defaults_to_numpy(self):
+    def test_compute_backend_defaults_to_auto(self):
         args = parse_args([])
 
-        self.assertEqual(args.compute_backend, "numpy")
+        self.assertEqual(args.compute_backend, "auto")
         self.assertEqual(args.device, "auto")
         self.assertEqual(args.rounds, 30)
         self.assertEqual(args.local_epochs, 1)
@@ -129,6 +273,115 @@ class ExperimentOutputDirTest(unittest.TestCase):
         args = parse_args(["--jobs", "8"])
 
         self.assertEqual(resolve_parallel_jobs(args.jobs, object(), [object(), object()], args), 2)
+
+    def test_auto_jobs_uses_one_worker_for_single_gpu(self):
+        args = parse_args(["--jobs", "auto"])
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=2)
+        configs = [ExperimentConfig(), ExperimentConfig(method="fedavg")]
+
+        with mock.patch(
+            "sm9rrsfl.experiments.describe_compute_backend",
+            return_value="torch:cuda",
+        ):
+            jobs = resolve_parallel_jobs("auto", dataset, configs, args)
+
+        self.assertEqual(jobs, 1)
+
+    def test_explicit_jobs_is_also_capped_without_gpu_mapping(self):
+        args = parse_args(["--jobs", "4"])
+        configs = [ExperimentConfig(), ExperimentConfig(method="fedavg")]
+        with mock.patch(
+            "sm9rrsfl.experiments.describe_compute_backend",
+            return_value="torch:mps",
+        ):
+            jobs = resolve_parallel_jobs("4", object(), configs, args)
+
+        self.assertEqual(jobs, 1)
+
+    def test_incremental_checkpoint_round_trip_includes_stage_timings(self):
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=4)
+        result = run_experiment(
+            dataset,
+            ExperimentConfig(
+                method="fedavg",
+                num_clients=2,
+                rounds=1,
+                early_stop=False,
+                seed=4,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            write_result_files(output_dir, [result])
+            snapshot = load_completed_results_snapshot(output_dir)
+            restored = read_results(output_dir / "summary.csv", output_dir / "rounds.csv")
+            with (output_dir / "summary.csv").open(newline="", encoding="utf-8") as handle:
+                row = next(csv.DictReader(handle))
+
+        self.assertEqual(len(restored), 1)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(len(snapshot), 1)
+        self.assertIn("training_seconds", row)
+        self.assertGreaterEqual(restored[0].stage_timings.training_seconds, 0.0)
+
+    def test_unexpected_second_round_failure_resumes_from_atomic_checkpoint(self):
+        from sm9rrsfl import fl as fl_module
+
+        dataset = make_synthetic_mnist_like(train_samples=80, test_samples=20, seed=15)
+        config = ExperimentConfig(
+            method="fedavg",
+            malicious_ratio=0.0,
+            num_clients=4,
+            rounds=3,
+            local_epochs=1,
+            batch_size=16,
+            early_stop=False,
+            seed=15,
+        )
+        uninterrupted = run_experiment(dataset, config)
+        original_fedavg = fl_module._fedavg
+        calls = 0
+
+        def fail_during_second_round(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("injected second-round failure")
+            return original_fedavg(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            checkpoint_dir = output_dir / ".checkpoints"
+            with mock.patch.object(fl_module, "_fedavg", side_effect=fail_during_second_round):
+                with self.assertRaisesRegex(RuntimeError, "injected second-round failure"):
+                    run_measured_experiment(
+                        dataset,
+                        config,
+                        checkpoint_dir=checkpoint_dir,
+                        run_fingerprint="test-run",
+                    )
+
+            with (output_dir / "last_failure.json").open(encoding="utf-8") as handle:
+                failure = json.load(handle)
+            self.assertEqual(failure["last_completed_round"], 1)
+            self.assertTrue(failure["checkpoint_exists"])
+            self.assertEqual(len(list(checkpoint_dir.glob("*.pickle"))), 1)
+
+            resumed = run_measured_experiment(
+                dataset,
+                config,
+                checkpoint_dir=checkpoint_dir,
+                run_fingerprint="test-run",
+            )
+            with (output_dir / "last_failure.json").open(encoding="utf-8") as handle:
+                resolved_failure = json.load(handle)
+
+        self.assertEqual(
+            [record.accuracy for record in resumed.records],
+            [record.accuracy for record in uninterrupted.records],
+        )
+        self.assertTrue(resolved_failure["resolved"])
+        self.assertEqual(len(list(checkpoint_dir.glob("*.pickle"))), 0)
 
     def test_progress_can_be_disabled(self):
         args = parse_args(["--no-progress"])

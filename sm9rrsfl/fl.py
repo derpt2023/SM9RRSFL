@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from time import perf_counter
+from typing import Any, Callable
 import numpy as np
 
-from .aggregation import fedavg, krum, torch_krum, torch_weighted_fedavg, weighted_fedavg
+from .aggregation import KrumResult, fedavg, krum, torch_krum, torch_weighted_fedavg, weighted_fedavg
 from .attacks import poison_update
-from .crypto import SM9RRSContext, RRSPacket, digest_update
+from .crypto import SM9RRSContext, RRSPacket
 from .ding13_detector import Ding13TrajectoryDetector
 from .datasets import ImageDataset, partition_clients
 from .model import accuracy, init_params, local_train_delta, model_spec_for_dataset
@@ -65,6 +67,24 @@ class RoundRecord:
 
 
 @dataclass(frozen=True)
+class StageTimings:
+    """单个配置各阶段的累计耗时，便于直接定位性能瓶颈。"""
+
+    training_seconds: float = 0.0
+    attack_seconds: float = 0.0
+    hash_seconds: float = 0.0
+    packet_build_seconds: float = 0.0
+    sign_seconds: float = 0.0
+    verify_seconds: float = 0.0
+    detection_seconds: float = 0.0
+    aggregation_seconds: float = 0.0
+    evaluation_seconds: float = 0.0
+
+    def summary_dict(self) -> dict[str, float]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ExperimentResult:
     config: ExperimentConfig
     records: list[RoundRecord]
@@ -75,6 +95,7 @@ class ExperimentResult:
     blacklisted_clients: tuple[str, ...]
     runtime_seconds: float = 0.0
     peak_memory_mb: float = 0.0
+    stage_timings: StageTimings = field(default_factory=StageTimings)
 
     def summary_dict(self) -> dict[str, object]:
         return {
@@ -86,36 +107,58 @@ class ExperimentResult:
             "blacklisted_clients": ",".join(self.blacklisted_clients),
             "runtime_seconds": self.runtime_seconds,
             "peak_memory_mb": self.peak_memory_mb,
+            **self.stage_timings.summary_dict(),
         }
 
 
 @dataclass(frozen=True)
 class _ClientUpdateCandidate:
     identity: str
-    delta: np.ndarray
+    delta: Any
+    cpu_delta: np.ndarray
     samples: int
 
 
 @dataclass(frozen=True)
 class _VerifiedSM9Candidate:
     identity: str
-    delta: np.ndarray
+    delta: Any
+    cpu_delta: np.ndarray
     samples: int
     packet: RRSPacket
     verified: bool
+    hash_seconds: float
+    packet_build_seconds: float
+    sign_seconds: float
+    verify_seconds: float
 
 
 @dataclass(frozen=True)
 class _SM9ProcessingResult:
-    updates: list[np.ndarray]
+    updates: list[Any]
     samples: list[int]
     clients: list[str]
     suspicious_clients: set[str]
     rejected: int
+    hash_seconds: float
+    packet_build_seconds: float
+    sign_seconds: float
+    verify_seconds: float
+    detection_seconds: float
 
 
-def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> ExperimentResult:
-    """Run one federated experiment configuration."""
+def run_experiment(
+    dataset: ImageDataset,
+    config: ExperimentConfig,
+    *,
+    resume_state: dict[str, Any] | None = None,
+    checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> ExperimentResult:
+    """运行一个完整联邦学习配置。
+
+    主流程按“客户端本地训练 -> 投毒 -> 密码验证/检测 -> 聚合 -> 评估”推进，
+    StageTimings 对这些阶段分别计时，避免只看到总时长却无法定位瓶颈。
+    """
 
     if config.method not in {"sm9rrs", "krum", "ding13", "fedavg"}:
         raise ValueError("method must be one of: sm9rrs, krum, ding13, fedavg")
@@ -125,6 +168,23 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
         raise ValueError("eval_interval must be at least 1")
     if config.sm9_workers < 1:
         raise ValueError("sm9_workers must be at least 1")
+    if config.num_clients < 1:
+        raise ValueError("num_clients must be at least 1")
+    if config.rounds < 1:
+        raise ValueError("rounds must be at least 1")
+    if config.local_epochs < 1:
+        raise ValueError("local_epochs must be at least 1")
+    if config.batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    if config.lr <= 0.0 or config.lr_decay <= 0.0:
+        raise ValueError("lr and lr_decay must be positive")
+    if config.partition == "dirichlet" and config.dirichlet_alpha <= 0.0:
+        raise ValueError("dirichlet_alpha must be positive")
+    invalid_reason = experiment_config_error(config)
+    if invalid_reason is not None:
+        # 在加载/划分数据和执行本地训练前失败，避免无效 Krum 参数跑数小时后
+        # 才在第一轮聚合阶段报错。
+        raise ValueError(invalid_reason)
 
     client_ids = [f"client-{idx}" for idx in range(config.num_clients)]
     client_indices = partition_clients(
@@ -145,19 +205,49 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
     model_spec = model_spec_for_dataset(dataset)
     torch_context = _maybe_torch_context(dataset, client_indices, model_spec, config)
     params = init_params(seed=config.seed, spec=model_spec)
-    records = [
-        _make_record(
-            config,
-            round_id=0,
-            acc=_evaluate_accuracy(params, dataset, model_spec, config, torch_context),
-            accepted=0,
-            rejected=0,
-            blacklisted=0,
-            tp=0,
-            fp=0,
-            krum_selected="",
-        )
-    ]
+    training_seconds = 0.0
+    attack_seconds = 0.0
+    hash_seconds = 0.0
+    packet_build_seconds = 0.0
+    sign_seconds = 0.0
+    verify_seconds = 0.0
+    detection_seconds = 0.0
+    aggregation_seconds = 0.0
+    evaluation_seconds = 0.0
+    start_round = 1
+    if resume_state is None:
+        evaluation_started = perf_counter()
+        initial_accuracy = _evaluate_accuracy(params, dataset, model_spec, config, torch_context)
+        evaluation_seconds = perf_counter() - evaluation_started
+        records = [
+            _make_record(
+                config,
+                round_id=0,
+                acc=initial_accuracy,
+                accepted=0,
+                rejected=0,
+                blacklisted=0,
+                tp=0,
+                fp=0,
+                krum_selected="",
+            )
+        ]
+    else:
+        # 检查点只恢复协议与训练状态；密码上下文重新安全生成，因为旧私钥
+        # 不参与跨轮检测，link_tag 和恶意客户端选择仍由任务参数稳定确定。
+        params = np.asarray(resume_state["params"], dtype=np.float32)
+        records = list(resume_state["records"])
+        start_round = int(resume_state["completed_round"]) + 1
+        timings = resume_state.get("timings", {})
+        training_seconds = float(timings.get("training_seconds", 0.0))
+        attack_seconds = float(timings.get("attack_seconds", 0.0))
+        hash_seconds = float(timings.get("hash_seconds", 0.0))
+        packet_build_seconds = float(timings.get("packet_build_seconds", 0.0))
+        sign_seconds = float(timings.get("sign_seconds", 0.0))
+        verify_seconds = float(timings.get("verify_seconds", 0.0))
+        detection_seconds = float(timings.get("detection_seconds", 0.0))
+        aggregation_seconds = float(timings.get("aggregation_seconds", 0.0))
+        evaluation_seconds = float(timings.get("evaluation_seconds", 0.0))
 
     crypto = None
     detector = None
@@ -197,12 +287,50 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             device=config.device,
         )
 
-    blacklisted: set[str] = set()
-    true_positive_revocations = 0
-    false_positive_revocations = 0
+    if resume_state is not None:
+        if config.method == "sm9rrs":
+            detector = resume_state["detector"]
+            sm9_weight_manager = resume_state["weight_manager"]
+        elif config.method == "ding13":
+            ding13_detector = resume_state["ding13_detector"]
 
-    for round_id in range(1, config.rounds + 1):
-        updates: list[np.ndarray] = []
+    blacklisted: set[str] = set(resume_state.get("blacklisted", ())) if resume_state else set()
+    true_positive_revocations = (
+        int(resume_state.get("true_positive_revocations", 0)) if resume_state else 0
+    )
+    false_positive_revocations = (
+        int(resume_state.get("false_positive_revocations", 0)) if resume_state else 0
+    )
+
+    if checkpoint_callback is not None and resume_state is None:
+        # 第 1 轮开始前也建立一致状态。若首轮训练、密码运算或聚合即报错，
+        # 修复后可从 round 0 恢复，不必重复初始化和初始评估。
+        checkpoint_callback(
+            _build_checkpoint_state(
+                completed_round=0,
+                params=params,
+                records=records,
+                blacklisted=blacklisted,
+                true_positive_revocations=true_positive_revocations,
+                false_positive_revocations=false_positive_revocations,
+                detector=detector,
+                weight_manager=sm9_weight_manager,
+                ding13_detector=ding13_detector,
+                training_seconds=training_seconds,
+                attack_seconds=attack_seconds,
+                hash_seconds=hash_seconds,
+                packet_build_seconds=packet_build_seconds,
+                sign_seconds=sign_seconds,
+                verify_seconds=verify_seconds,
+                detection_seconds=detection_seconds,
+                aggregation_seconds=aggregation_seconds,
+                evaluation_seconds=evaluation_seconds,
+            )
+        )
+
+    for round_id in range(start_round, config.rounds + 1):
+        # 每轮重新收集仍处于活跃状态的客户端更新；黑名单客户端不再参与训练。
+        updates: list[Any] = []
         update_samples: list[int] = []
         update_clients: list[str] = []
         sm9_candidates: list[_ClientUpdateCandidate] = []
@@ -213,6 +341,7 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             if identity in blacklisted:
                 continue
             indices = client_indices[client_idx]
+            training_started = perf_counter()
             delta, stats = _local_train_client_delta(
                 params,
                 dataset,
@@ -223,20 +352,32 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 config=config,
                 torch_context=torch_context,
             )
+            training_seconds += perf_counter() - training_started
             attack_active = identity in malicious_set and round_id >= attack_start
             if attack_active:
-                delta = poison_update(
+                attack_started = perf_counter()
+                delta = _poison_client_update(
                     delta,
                     attack=config.attack,
                     scale=config.attack_scale,
                     seed=config.seed + round_id * 4099 + client_idx,
+                    torch_context=torch_context,
                 )
+                attack_seconds += perf_counter() - attack_started
 
             if config.method == "sm9rrs":
+                # SM3 必须摘要服务器实际收到的字节，因此密码流程只在这里做一次
+                # 必需的 D2H；设备端副本继续用于后面的聚合。
+                cpu_delta = (
+                    torch_context.to_numpy(delta)
+                    if torch_context is not None
+                    else np.asarray(delta, dtype=np.float32)
+                )
                 sm9_candidates.append(
                     _ClientUpdateCandidate(
                         identity=identity,
                         delta=delta,
+                        cpu_delta=cpu_delta,
                         samples=stats.samples,
                     )
                 )
@@ -247,6 +388,7 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             update_clients.append(identity)
 
         if config.method == "sm9rrs" and sm9_candidates:
+            # 密码封包可并行，轨迹检测必须按客户端稳定顺序更新历史状态。
             assert crypto is not None and detector is not None
             sm9_result = _process_sm9_candidates(
                 sm9_candidates,
@@ -262,13 +404,26 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             update_clients.extend(sm9_result.clients)
             suspicious_clients.update(sm9_result.suspicious_clients)
             rejected += sm9_result.rejected
+            hash_seconds += sm9_result.hash_seconds
+            packet_build_seconds += sm9_result.packet_build_seconds
+            sign_seconds += sm9_result.sign_seconds
+            verify_seconds += sm9_result.verify_seconds
+            detection_seconds += sm9_result.detection_seconds
 
         krum_selected = ""
         record_accepted = len(updates)
         record_rejected = rejected
         if updates:
+            # 四种方法共享训练结果，只在服务端检测和聚合规则上分支。
+            aggregation_started = perf_counter()
+            detection_inside_aggregation = 0.0
             if config.method == "krum":
-                result = _krum(updates, byzantine_count=len(malicious_clients), config=config)
+                result = _krum(
+                    updates,
+                    byzantine_count=len(malicious_clients),
+                    config=config,
+                    torch_context=torch_context,
+                )
                 aggregate = result.update
                 krum_selected = update_clients[result.selected_index]
             elif config.method == "sm9rrs":
@@ -284,13 +439,18 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 weights = [weight_result.weights[identity] for identity in update_clients]
                 effective_total = sum(weight * samples for weight, samples in zip(weights, update_samples))
                 if effective_total <= 0.0:
-                    aggregate = np.zeros_like(updates[0])
+                    aggregate = (
+                        torch_context.zeros_like(updates[0])
+                        if torch_context is not None
+                        else np.zeros_like(updates[0])
+                    )
                 else:
                     aggregate = _weighted_fedavg(
                         updates,
                         weights,
                         sample_counts=update_samples,
                         config=config,
+                        torch_context=torch_context,
                     )
                 record_accepted = sum(
                     1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
@@ -299,11 +459,15 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
             elif config.method == "ding13":
                 assert ding13_detector is not None
                 update_by_client = dict(zip(update_clients, updates))
+                detection_started = perf_counter()
                 ding13_result = ding13_detector.evaluate_round(
                     update_by_client,
                     malicious_set,
                     round_id=round_id,
                 )
+                detection_elapsed = perf_counter() - detection_started
+                detection_seconds += detection_elapsed
+                detection_inside_aggregation += detection_elapsed
                 blacklisted.update(ding13_result.newly_removed)
                 true_positive_revocations += ding13_result.true_positive_removed
                 false_positive_revocations += ding13_result.false_positive_removed
@@ -313,18 +477,33 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                     weights,
                     sample_counts=update_samples,
                     config=config,
+                    torch_context=torch_context,
                 )
                 record_accepted = sum(
                     1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
                 )
                 record_rejected = len(ding13_result.outliers)
             else:
-                aggregate = _fedavg(updates, update_samples, config=config)
-            params = (params + aggregate).astype(np.float32)
+                aggregate = _fedavg(
+                    updates,
+                    update_samples,
+                    config=config,
+                    torch_context=torch_context,
+                )
+            params = (
+                torch_context.add_update(params, aggregate)
+                if torch_context is not None
+                else (params + aggregate).astype(np.float32)
+            )
+            aggregation_seconds += (
+                perf_counter() - aggregation_started - detection_inside_aggregation
+            )
 
         should_evaluate = round_id == config.rounds or round_id % config.eval_interval == 0
         if should_evaluate:
+            evaluation_started = perf_counter()
             acc = _evaluate_accuracy(params, dataset, model_spec, config, torch_context)
+            evaluation_seconds += perf_counter() - evaluation_started
             records.append(
                 _make_record(
                     config,
@@ -339,8 +518,35 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
                 )
             )
             can_stop = not malicious_clients or round_id >= attack_start
-            if config.early_stop and can_stop and 1.0 - acc <= config.target_error:
-                break
+            should_stop = config.early_stop and can_stop and 1.0 - acc <= config.target_error
+        else:
+            should_stop = False
+
+        if checkpoint_callback is not None:
+            checkpoint_callback(
+                _build_checkpoint_state(
+                    completed_round=round_id,
+                    params=params,
+                    records=records,
+                    blacklisted=blacklisted,
+                    true_positive_revocations=true_positive_revocations,
+                    false_positive_revocations=false_positive_revocations,
+                    detector=detector,
+                    weight_manager=sm9_weight_manager,
+                    ding13_detector=ding13_detector,
+                    training_seconds=training_seconds,
+                    attack_seconds=attack_seconds,
+                    hash_seconds=hash_seconds,
+                    packet_build_seconds=packet_build_seconds,
+                    sign_seconds=sign_seconds,
+                    verify_seconds=verify_seconds,
+                    detection_seconds=detection_seconds,
+                    aggregation_seconds=aggregation_seconds,
+                    evaluation_seconds=evaluation_seconds,
+                )
+            )
+        if should_stop:
+            break
 
     final = records[-1]
     return ExperimentResult(
@@ -351,6 +557,17 @@ def run_experiment(dataset: ImageDataset, config: ExperimentConfig) -> Experimen
         stopped_round=final.round,
         malicious_clients=tuple(malicious_clients),
         blacklisted_clients=tuple(sorted(blacklisted)),
+        stage_timings=StageTimings(
+            training_seconds=training_seconds,
+            attack_seconds=attack_seconds,
+            hash_seconds=hash_seconds,
+            packet_build_seconds=packet_build_seconds,
+            sign_seconds=sign_seconds,
+            verify_seconds=verify_seconds,
+            detection_seconds=detection_seconds,
+            aggregation_seconds=aggregation_seconds,
+            evaluation_seconds=evaluation_seconds,
+        ),
     )
 
 
@@ -426,13 +643,16 @@ def _process_sm9_candidates(
     clients: list[str] = []
     suspicious_clients: set[str] = set()
     rejected = 0
+    detection_seconds = 0.0
     has_malicious_clients = bool(malicious_clients)
     for candidate in verified_candidates:
         if not candidate.verified:
             rejected += 1
             continue
         if has_malicious_clients:
-            decision = detector.evaluate(candidate.packet.link_tag, candidate.delta)
+            detection_started = perf_counter()
+            decision = detector.evaluate(candidate.packet.link_tag, candidate.cpu_delta)
+            detection_seconds += perf_counter() - detection_started
             if not decision.accepted:
                 suspicious_clients.add(candidate.identity)
         updates.append(candidate.delta)
@@ -444,6 +664,14 @@ def _process_sm9_candidates(
         clients=clients,
         suspicious_clients=suspicious_clients,
         rejected=rejected,
+        # 多线程时这些值是所有客户端操作耗时之和，用来判断热点而非相加还原墙钟时间。
+        hash_seconds=sum(candidate.hash_seconds for candidate in verified_candidates),
+        packet_build_seconds=sum(
+            candidate.packet_build_seconds for candidate in verified_candidates
+        ),
+        sign_seconds=sum(candidate.sign_seconds for candidate in verified_candidates),
+        verify_seconds=sum(candidate.verify_seconds for candidate in verified_candidates),
+        detection_seconds=detection_seconds,
     )
 
 
@@ -454,21 +682,39 @@ def _create_verified_sm9_candidate(
     round_id: int,
     task_id: str,
 ) -> _VerifiedSM9Candidate:
-    update_digest = digest_update(candidate.delta)
-    packet = crypto.create_packet(
+    # 摘要算法由密码上下文决定：真实模式使用 SM3，仿真模式走快速 SHA-256。
+    hash_started = perf_counter()
+    update_digest = crypto.digest_update(candidate.cpu_delta)
+    hash_seconds = perf_counter() - hash_started
+
+    packet_started = perf_counter()
+    unsigned = crypto.build_unsigned_packet(
         candidate.identity,
-        candidate.delta,
+        candidate.cpu_delta,
         round_id=round_id,
         task_id=task_id,
         update_digest=update_digest,
     )
-    verified = crypto.verify_packet(packet, candidate.delta, update_digest=update_digest)
+    packet_build_seconds = perf_counter() - packet_started
+
+    sign_started = perf_counter()
+    packet = crypto.sign_packet(candidate.identity, unsigned)
+    sign_seconds = perf_counter() - sign_started
+
+    verify_started = perf_counter()
+    verified = crypto.verify_packet(packet, candidate.cpu_delta, update_digest=update_digest)
+    verify_seconds = perf_counter() - verify_started
     return _VerifiedSM9Candidate(
         identity=candidate.identity,
         delta=candidate.delta,
+        cpu_delta=candidate.cpu_delta,
         samples=candidate.samples,
         packet=packet,
         verified=verified,
+        hash_seconds=hash_seconds,
+        packet_build_seconds=packet_build_seconds,
+        sign_seconds=sign_seconds,
+        verify_seconds=verify_seconds,
     )
 
 
@@ -485,6 +731,61 @@ def _evaluate_accuracy(params, dataset, model_spec, config: ExperimentConfig, to
     )
 
 
+def _params_for_checkpoint(params) -> np.ndarray:
+    """把可能驻留 GPU 的全局参数转换为可移植的 float32 检查点。"""
+
+    if type(params).__module__.startswith("torch"):
+        return params.detach().cpu().numpy().astype(np.float32, copy=True)
+    return np.asarray(params, dtype=np.float32).copy()
+
+
+def _build_checkpoint_state(
+    *,
+    completed_round: int,
+    params,
+    records: list[RoundRecord],
+    blacklisted: set[str],
+    true_positive_revocations: int,
+    false_positive_revocations: int,
+    detector,
+    weight_manager,
+    ding13_detector,
+    training_seconds: float,
+    attack_seconds: float,
+    hash_seconds: float,
+    packet_build_seconds: float,
+    sign_seconds: float,
+    verify_seconds: float,
+    detection_seconds: float,
+    aggregation_seconds: float,
+    evaluation_seconds: float,
+) -> dict[str, Any]:
+    """只在轮次边界构造一致快照，绝不保存完成一半的聚合状态。"""
+
+    return {
+        "completed_round": completed_round,
+        "params": _params_for_checkpoint(params),
+        "records": list(records),
+        "blacklisted": tuple(sorted(blacklisted)),
+        "true_positive_revocations": true_positive_revocations,
+        "false_positive_revocations": false_positive_revocations,
+        "detector": detector,
+        "weight_manager": weight_manager,
+        "ding13_detector": ding13_detector,
+        "timings": {
+            "training_seconds": training_seconds,
+            "attack_seconds": attack_seconds,
+            "hash_seconds": hash_seconds,
+            "packet_build_seconds": packet_build_seconds,
+            "sign_seconds": sign_seconds,
+            "verify_seconds": verify_seconds,
+            "detection_seconds": detection_seconds,
+            "aggregation_seconds": aggregation_seconds,
+            "evaluation_seconds": evaluation_seconds,
+        },
+    }
+
+
 def _local_train_client_delta(
     params: np.ndarray,
     dataset: ImageDataset,
@@ -499,7 +800,7 @@ def _local_train_client_delta(
     seed = config.seed + round_id * 1009 + client_idx
     lr = config.lr * (config.lr_decay ** (round_id - 1))
     if torch_context is not None:
-        return torch_context.local_train_delta(
+        return torch_context.local_train_delta_resident(
             params,
             client_idx=client_idx,
             lr=lr,
@@ -522,32 +823,66 @@ def _local_train_client_delta(
 
 
 def _fedavg(
-    updates: list[np.ndarray],
+    updates: list[Any],
     sample_counts: list[int],
     *,
     config: ExperimentConfig,
-) -> np.ndarray:
+    torch_context=None,
+):
+    if torch_context is not None:
+        return torch_context.weighted_average(updates, sample_counts)
     if _can_use_torch_ops(config):
         return torch_weighted_fedavg(updates, sample_counts, device=config.device)
     return fedavg(updates, sample_counts)
 
 
 def _weighted_fedavg(
-    updates: list[np.ndarray],
+    updates: list[Any],
     weights: list[float],
     *,
     sample_counts: list[int],
     config: ExperimentConfig,
-) -> np.ndarray:
+    torch_context=None,
+):
+    if torch_context is not None:
+        return torch_context.weighted_average(updates, weights, sample_counts)
     if _can_use_torch_ops(config):
         return torch_weighted_fedavg(updates, weights, sample_counts=sample_counts, device=config.device)
     return weighted_fedavg(updates, weights, sample_counts=sample_counts)
 
 
-def _krum(updates: list[np.ndarray], *, byzantine_count: int, config: ExperimentConfig):
+def _krum(
+    updates: list[Any],
+    *,
+    byzantine_count: int,
+    config: ExperimentConfig,
+    torch_context=None,
+):
+    if torch_context is not None:
+        selected, update, scores = torch_context.krum_select(
+            updates,
+            byzantine_count=byzantine_count,
+        )
+        return KrumResult(
+            update=update,
+            selected_index=selected,
+            scores=scores,
+            neighbor_count=len(updates) - byzantine_count - 2,
+        )
     if _can_use_torch_ops(config):
         return torch_krum(updates, byzantine_count=byzantine_count, device=config.device)
     return krum(updates, byzantine_count=byzantine_count)
+
+
+def _poison_client_update(update, *, attack: str, scale: float, seed: int, torch_context):
+    if torch_context is not None:
+        return torch_context.poison_update(
+            update,
+            attack=attack,
+            scale=scale,
+            seed=seed,
+        )
+    return poison_update(update, attack=attack, scale=scale, seed=seed)
 
 
 def _can_use_torch_ops(config: ExperimentConfig) -> bool:
@@ -559,13 +894,43 @@ def _can_use_torch_ops(config: ExperimentConfig) -> bool:
 
 
 def _choose_malicious(client_ids: list[str], ratio: float, seed: int) -> tuple[str, ...]:
-    count = int(round(len(client_ids) * ratio))
-    count = min(max(count, 0), len(client_ids) - 1)
+    count = malicious_client_count(len(client_ids), ratio)
     rng = np.random.default_rng(seed + 17)
     if count == 0:
         return tuple()
     selected = rng.choice(client_ids, size=count, replace=False)
     return tuple(sorted(str(item) for item in selected))
+
+
+def malicious_client_count(num_clients: int, ratio: float) -> int:
+    """按实验原有取整规则计算恶意客户端数。"""
+
+    count = int(round(num_clients * ratio))
+    return min(max(count, 0), num_clients - 1)
+
+
+def experiment_config_error(config: ExperimentConfig) -> str | None:
+    """返回配置在算法定义上不可执行的原因；可执行时返回 ``None``。"""
+
+    if config.method != "krum":
+        return None
+    malicious_count = malicious_client_count(
+        config.num_clients,
+        config.malicious_ratio,
+    )
+    neighbor_count = config.num_clients - malicious_count - 2
+    if config.num_clients < 3:
+        return (
+            "Krum is undefined: at least 3 clients are required "
+            f"(n={config.num_clients})"
+        )
+    if neighbor_count < 1:
+        return (
+            "Krum is undefined for this configuration: "
+            f"n={config.num_clients}, f={malicious_count}, "
+            f"n-f-2={neighbor_count}; require n-f-2 >= 1"
+        )
+    return None
 
 
 def _make_record(

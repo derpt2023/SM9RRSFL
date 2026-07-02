@@ -15,7 +15,7 @@ class WeightUpdateResult:
 
 
 class SuspicionWeightManager:
-    """Ding13-style penalty/recovery weights for suspected clients."""
+    """维护疑似客户端的惩罚、恢复和连续异常移除状态。"""
 
     def __init__(
         self,
@@ -52,6 +52,7 @@ class SuspicionWeightManager:
         active = [identity for identity in active_ids if identity not in self.removed]
 
         for identity in active:
+            # 单次异常只降权；只有连续异常达到阈值后才永久移出聚合集合。
             if identity in suspicious_ids:
                 self.weights[identity] *= self.penalty_factor
                 self.consecutive_suspicions[identity] += 1

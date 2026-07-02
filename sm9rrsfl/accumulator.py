@@ -98,11 +98,12 @@ class SM9DynamicAccumulator:
         return ate.pairing(witness, identity_public) == ate.pairing(accumulator_value, self.p2)
 
     def materialize_ring(self, identities: tuple[str, ...] | list[str]) -> AccumulatorRingMaterial:
-        """Precompute V, all W_i, and g1 for a public ring."""
+        """一次性预计算公共环的累加值、全部见证和配对缓存基础量。"""
 
         ring = _canonical_ring(identities)
         if len(ring) > self.max_size:
             raise ValueError("ring size exceeds accumulator max_size")
+        # 这些值在整个实验配置内固定，预计算可避免每轮重复椭圆曲线运算。
         factors = {identity: self._identity_factor(identity) for identity in ring}
         total = 1
         for factor in factors.values():

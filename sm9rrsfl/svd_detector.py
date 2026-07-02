@@ -65,6 +65,7 @@ class LongitudinalSVDDetector:
         self._states: dict[str, _TagState] = {}
 
     def evaluate(self, tag: str, update: np.ndarray) -> DetectionResult:
+        # link_tag 对应稳定客户端轨迹；窗口只保存相邻轮次的变化统计量。
         feature = self._extract(update)
         state = self._states.setdefault(tag, _TagState())
         if state.previous is None:

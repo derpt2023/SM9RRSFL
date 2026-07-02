@@ -16,7 +16,7 @@ def poison_update(
     scale: float = 5.0,
     seed: int = 0,
 ) -> np.ndarray:
-    """Return a malicious version of a client update."""
+    """根据实验配置生成恶意客户端更新，输入原始更新保持不变。"""
 
     if attack == "none":
         return update.astype(np.float32, copy=True)
@@ -40,13 +40,14 @@ def _alternating_trigger_poison(
     scale: float,
     seed: int,
 ) -> np.ndarray:
-    """Inject one small shard of a decomposed trigger into the update."""
+    """每次只注入一个触发器分片，并随客户端/轮次种子轮换分片位置。"""
 
     poisoned = update.astype(np.float32, copy=True)
     flat = poisoned.reshape(-1)
     if flat.size == 0:
         return poisoned
 
+    # 将完整参数向量等分为多个分片，模拟交替式、局部且隐蔽的梯度扰动。
     shard_count = min(_ALTERNATING_TRIGGER_SHARDS, flat.size)
     shard_index = seed % shard_count
     start = flat.size * shard_index // shard_count

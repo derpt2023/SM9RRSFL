@@ -820,6 +820,8 @@ def _conv2d_forward(
     stride: int,
     padding: int,
 ) -> np.ndarray:
+    """NumPy 参考卷积实现；正式大规模实验优先使用 Torch 后端。"""
+
     n_samples, _, height, width = x.shape
     filters, _, kernel, _ = weights.shape
     x_padded = np.pad(
@@ -831,6 +833,7 @@ def _conv2d_forward(
     out_w = (width + 2 * padding - kernel) // stride + 1
     out = np.empty((n_samples, filters, out_h, out_w), dtype=np.float32)
 
+    # 仅在空间维度保留 Python 循环，批次、通道和卷积核计算交给 tensordot。
     for out_row in range(out_h):
         row = out_row * stride
         for out_col in range(out_w):
@@ -853,6 +856,8 @@ def _conv2d_backward(
     stride: int,
     padding: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """NumPy 卷积反向传播参考实现，重点保证公式透明和测试可复现。"""
+
     _, _, height, width = x.shape
     _, _, kernel, _ = weights.shape
     x_padded = np.pad(
@@ -865,6 +870,7 @@ def _conv2d_backward(
     grad_b = np.sum(grad_out, axis=(0, 2, 3)).astype(np.float32)
 
     out_h, out_w = grad_out.shape[2:]
+    # 大模型下该双重循环成本较高，GPU/CPU Torch 路径会调用优化卷积内核。
     for out_row in range(out_h):
         row = out_row * stride
         for out_col in range(out_w):
