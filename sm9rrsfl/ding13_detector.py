@@ -161,8 +161,9 @@ class Ding13TrajectoryDetector:
             from .torch_backend import torch_singular_values_from_gram
 
             return torch_singular_values_from_gram(matrix, device=self.device)
-        gram = matrix.T @ matrix
-        return np.linalg.svd(gram, compute_uv=False).astype(np.float32)
+        from .torch_backend import numpy_singular_values_from_gram
+
+        return numpy_singular_values_from_gram(matrix)
 
 
 class IsolationForestLite:

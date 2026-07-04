@@ -1,10 +1,46 @@
 import unittest
+from unittest import mock
+
+import numpy as np
 
 from sm9rrsfl.datasets import make_synthetic_mnist_like
 from sm9rrsfl.fl import ExperimentConfig, run_experiment
 
 
 class FederatedLoopTest(unittest.TestCase):
+    def test_nonfinite_client_update_is_rejected_before_aggregation(self):
+        from sm9rrsfl import fl as fl_module
+
+        dataset = make_synthetic_mnist_like(train_samples=80, test_samples=20, seed=20)
+        config = ExperimentConfig(
+            method="fedavg",
+            malicious_ratio=0.0,
+            num_clients=4,
+            rounds=1,
+            local_epochs=1,
+            batch_size=16,
+            early_stop=False,
+            seed=20,
+        )
+        original = fl_module._local_train_client_delta
+
+        def inject_nan(*args, **kwargs):
+            delta, stats = original(*args, **kwargs)
+            if kwargs["client_idx"] == 0:
+                delta = delta.copy()
+                delta[0] = np.nan
+            return delta, stats
+
+        with mock.patch.object(
+            fl_module,
+            "_local_train_client_delta",
+            side_effect=inject_nan,
+        ):
+            result = run_experiment(dataset, config)
+
+        self.assertEqual(result.records[-1].rejected_updates, 1)
+        self.assertTrue(np.isfinite(result.final_accuracy))
+
     def test_invalid_krum_config_fails_before_training(self):
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=14)
         config = ExperimentConfig(

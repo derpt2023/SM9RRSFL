@@ -8,6 +8,44 @@ from sm9rrsfl.aggregation import fedavg, krum, torch_krum, torch_weighted_fedavg
 
 
 class KrumTest(unittest.TestCase):
+    def test_numpy_svd_fallbacks_survive_lapack_nonconvergence(self):
+        from sm9rrsfl import torch_backend
+
+        rng = np.random.default_rng(19)
+        matrix = rng.normal(size=(12, 4)).astype(np.float32)
+        expected = np.linalg.svd(matrix.T @ matrix, compute_uv=False)
+
+        with mock.patch(
+            "numpy.linalg.svd",
+            side_effect=np.linalg.LinAlgError("injected nonconvergence"),
+        ):
+            eig_fallback = torch_backend.numpy_singular_values_from_gram(matrix)
+            sigma, direction = torch_backend.numpy_top_singular_feature(matrix)
+
+        with mock.patch(
+            "numpy.linalg.svd",
+            side_effect=np.linalg.LinAlgError("injected nonconvergence"),
+        ), mock.patch(
+            "numpy.linalg.eigvalsh",
+            side_effect=np.linalg.LinAlgError("injected eigen failure"),
+        ):
+            jacobi_fallback = torch_backend.numpy_singular_values_from_gram(matrix)
+
+        self.assertTrue(np.allclose(eig_fallback, expected, rtol=1e-5, atol=1e-6))
+        self.assertTrue(np.allclose(jacobi_fallback, expected, rtol=1e-5, atol=1e-6))
+        self.assertTrue(np.isfinite(sigma))
+        self.assertTrue(np.isfinite(direction).all())
+        self.assertAlmostEqual(float(np.linalg.norm(direction)), 1.0, places=5)
+
+    def test_scaled_gram_singular_values_remain_finite_for_large_float32_input(self):
+        from sm9rrsfl.torch_backend import numpy_singular_values_from_gram
+
+        matrix = np.full((32, 4), 1e30, dtype=np.float32)
+        singulars = numpy_singular_values_from_gram(matrix)
+
+        self.assertTrue(np.isfinite(singulars).all())
+        self.assertGreater(float(singulars[0]), 0.0)
+
     def test_krum_selects_update_near_honest_cluster(self):
         updates = np.array(
             [

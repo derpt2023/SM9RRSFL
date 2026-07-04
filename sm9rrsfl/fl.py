@@ -365,6 +365,12 @@ def run_experiment(
                 )
                 attack_seconds += perf_counter() - attack_started
 
+            # 任意 NaN/Inf 更新都不能进入摘要、检测或聚合。否则即使 SVD
+            # 做了兜底，FedAvg/Krum 仍可能把全局模型永久污染为非有限值。
+            if not _update_is_finite(delta):
+                rejected += 1
+                continue
+
             if config.method == "sm9rrs":
                 # SM3 必须摘要服务器实际收到的字节，因此密码流程只在这里做一次
                 # 必需的 D2H；设备端副本继续用于后面的聚合。
@@ -417,15 +423,22 @@ def run_experiment(
             # 四种方法共享训练结果，只在服务端检测和聚合规则上分支。
             aggregation_started = perf_counter()
             detection_inside_aggregation = 0.0
+            aggregate = None
             if config.method == "krum":
-                result = _krum(
-                    updates,
-                    byzantine_count=len(malicious_clients),
-                    config=config,
-                    torch_context=torch_context,
-                )
-                aggregate = result.update
-                krum_selected = update_clients[result.selected_index]
+                active_neighbor_count = len(updates) - len(malicious_clients) - 2
+                if active_neighbor_count < 1:
+                    # 若多个非有限更新被拒绝后 Krum 条件临时失效，本轮保持
+                    # 全局模型不变，而不是再次让整个长任务崩溃。
+                    record_rejected += len(updates)
+                else:
+                    result = _krum(
+                        updates,
+                        byzantine_count=len(malicious_clients),
+                        config=config,
+                        torch_context=torch_context,
+                    )
+                    aggregate = result.update
+                    krum_selected = update_clients[result.selected_index]
             elif config.method == "sm9rrs":
                 assert sm9_weight_manager is not None
                 weight_result = sm9_weight_manager.update(
@@ -455,7 +468,7 @@ def run_experiment(
                 record_accepted = sum(
                     1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
                 )
-                record_rejected = len(suspicious_clients)
+                record_rejected = rejected + len(suspicious_clients)
             elif config.method == "ding13":
                 assert ding13_detector is not None
                 update_by_client = dict(zip(update_clients, updates))
@@ -482,7 +495,7 @@ def run_experiment(
                 record_accepted = sum(
                     1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
                 )
-                record_rejected = len(ding13_result.outliers)
+                record_rejected = rejected + len(ding13_result.outliers)
             else:
                 aggregate = _fedavg(
                     updates,
@@ -490,11 +503,12 @@ def run_experiment(
                     config=config,
                     torch_context=torch_context,
                 )
-            params = (
-                torch_context.add_update(params, aggregate)
-                if torch_context is not None
-                else (params + aggregate).astype(np.float32)
-            )
+            if aggregate is not None:
+                params = (
+                    torch_context.add_update(params, aggregate)
+                    if torch_context is not None
+                    else (params + aggregate).astype(np.float32)
+                )
             aggregation_seconds += (
                 perf_counter() - aggregation_started - detection_inside_aggregation
             )
@@ -883,6 +897,14 @@ def _poison_client_update(update, *, attack: str, scale: float, seed: int, torch
             seed=seed,
         )
     return poison_update(update, attack=attack, scale=scale, seed=seed)
+
+
+def _update_is_finite(update) -> bool:
+    """同时支持 NumPy 和驻留设备的 Torch 更新，只回传一个布尔标量。"""
+
+    if type(update).__module__.startswith("torch"):
+        return bool(update.isfinite().all().detach().cpu().item())
+    return bool(np.isfinite(np.asarray(update)).all())
 
 
 def _can_use_torch_ops(config: ExperimentConfig) -> bool:

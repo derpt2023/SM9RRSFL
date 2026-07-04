@@ -577,7 +577,7 @@ def torch_top_singular_feature(matrix: np.ndarray, *, device: str = "auto") -> t
     tensor = torch.as_tensor(matrix_np, dtype=torch.float32, device=torch_device)
     try:
         u, singular_values, _ = torch.linalg.svd(tensor, full_matrices=False)
-    except NotImplementedError:
+    except (NotImplementedError, RuntimeError):
         return _numpy_top_singular_feature(matrix_np)
     sigma = float(singular_values[0].detach().cpu().item())
     u0 = u[:, 0].detach().cpu().numpy().astype(np.float32)
@@ -603,20 +603,155 @@ def torch_singular_values_from_gram(matrix, *, device: str = "auto") -> np.ndarr
     gram = tensor.T.matmul(tensor)
     try:
         return torch.linalg.svdvals(gram).detach().cpu().numpy().astype(np.float32)
-    except NotImplementedError:
+    except (NotImplementedError, RuntimeError):
         if matrix_np is None:
             matrix_np = tensor.cpu().numpy().astype(np.float32, copy=False)
         return _numpy_singular_values_from_gram(matrix_np)
 
 
 def _numpy_top_singular_feature(matrix: np.ndarray) -> tuple[float, np.ndarray]:
-    u, singular_values, _ = np.linalg.svd(matrix, full_matrices=False)
-    return float(singular_values[0]), u[:, 0].astype(np.float32)
+    scaled, scale = _scaled_finite_matrix(matrix)
+    rows = scaled.shape[0]
+    if scale == 0.0:
+        direction = np.zeros(rows, dtype=np.float32)
+        if rows:
+            direction[0] = 1.0
+        return 0.0, direction
+    try:
+        u, singular_values, _ = np.linalg.svd(scaled, full_matrices=False)
+        sigma = float(singular_values[0]) * scale
+        direction = u[:, 0]
+    except np.linalg.LinAlgError:
+        # LAPACK 偶发不收敛时使用确定性的幂迭代求第一左奇异向量。
+        sigma_scaled, direction = _power_top_singular_feature(scaled)
+        sigma = sigma_scaled * scale
+    sigma = min(sigma, float(np.finfo(np.float32).max))
+    return float(sigma), np.asarray(direction, dtype=np.float32)
 
 
 def _numpy_singular_values_from_gram(matrix: np.ndarray) -> np.ndarray:
-    gram = matrix.T @ matrix
-    return np.linalg.svd(gram, compute_uv=False).astype(np.float32)
+    scaled, scale = _scaled_finite_matrix(matrix)
+    columns = scaled.shape[1]
+    if scale == 0.0:
+        return np.zeros(columns, dtype=np.float32)
+    try:
+        # svd(A)^2 与 svd(A.T@A) 数学等价，但避免先构造 Gram 导致条件数
+        # 平方和 float32 溢出；统一用 float64 缩放矩阵计算。
+        singular = np.linalg.svd(scaled, compute_uv=False)
+        values = np.zeros(columns, dtype=np.float64)
+        values[: len(singular)] = np.square(singular)
+    except np.linalg.LinAlgError:
+        gram = scaled.T @ scaled
+        try:
+            values = np.linalg.eigvalsh(gram)[::-1]
+        except np.linalg.LinAlgError:
+            values = np.sort(_jacobi_eigenvalues_symmetric(gram))[::-1]
+        values = np.maximum(values, 0.0)
+    values *= scale * scale
+    values = np.nan_to_num(
+        values,
+        nan=0.0,
+        posinf=float(np.finfo(np.float32).max),
+        neginf=0.0,
+    )
+    values = np.clip(values, 0.0, float(np.finfo(np.float32).max))
+    return values.astype(np.float32)
+
+
+def numpy_top_singular_feature(matrix: np.ndarray) -> tuple[float, np.ndarray]:
+    """公开稳定 CPU 实现，供未启用 Torch 的检测器复用。"""
+
+    return _numpy_top_singular_feature(matrix)
+
+
+def numpy_singular_values_from_gram(matrix: np.ndarray) -> np.ndarray:
+    """公开稳定 CPU 实现，返回与 Gram 矩阵 SVD 相同的奇异值。"""
+
+    return _numpy_singular_values_from_gram(matrix)
+
+
+def _scaled_finite_matrix(matrix: np.ndarray) -> tuple[np.ndarray, float]:
+    array = np.asarray(matrix, dtype=np.float64)
+    if array.ndim != 2:
+        raise ValueError("SVD input must be a two-dimensional matrix")
+    if not np.isfinite(array).all():
+        raise ValueError("SVD input contains NaN or infinity")
+    if array.size == 0:
+        return array, 0.0
+    scale = float(np.max(np.abs(array)))
+    if scale == 0.0:
+        return array, 0.0
+    return array / scale, scale
+
+
+def _power_top_singular_feature(matrix: np.ndarray) -> tuple[float, np.ndarray]:
+    rows, columns = matrix.shape
+    if rows == 0 or columns == 0:
+        return 0.0, np.zeros(rows, dtype=np.float64)
+    column_norms = np.einsum("ij,ij->j", matrix, matrix)
+    vector = np.zeros(columns, dtype=np.float64)
+    vector[int(np.argmax(column_norms))] = 1.0
+    direction = np.zeros(rows, dtype=np.float64)
+    for _ in range(128):
+        left = matrix @ vector
+        sigma = float(np.sqrt(np.dot(left, left)))
+        if sigma <= np.finfo(np.float64).eps:
+            direction.fill(0.0)
+            direction[0] = 1.0
+            return 0.0, direction
+        next_direction = left / sigma
+        right = matrix.T @ next_direction
+        norm = float(np.sqrt(np.dot(right, right)))
+        if norm <= np.finfo(np.float64).eps:
+            return sigma, next_direction
+        next_vector = right / norm
+        if np.max(np.abs(next_vector - vector)) <= 1e-12:
+            vector = next_vector
+            direction = next_direction
+            break
+        vector = next_vector
+        direction = next_direction
+    left = matrix @ vector
+    sigma = float(np.sqrt(np.dot(left, left)))
+    if sigma > np.finfo(np.float64).eps:
+        direction = left / sigma
+    return sigma, direction
+
+
+def _jacobi_eigenvalues_symmetric(matrix: np.ndarray) -> np.ndarray:
+    """小型对称矩阵的纯 NumPy Jacobi 兜底，避免再次依赖 LAPACK。"""
+
+    values = np.asarray(matrix, dtype=np.float64).copy()
+    size = values.shape[0]
+    if size <= 1:
+        return np.diag(values).copy()
+    for _ in range(max(32, size * size * 16)):
+        upper = np.abs(np.triu(values, k=1))
+        flat_index = int(np.argmax(upper))
+        maximum = float(upper.flat[flat_index])
+        tolerance = np.finfo(np.float64).eps * max(1.0, float(np.max(np.abs(values))))
+        if maximum <= tolerance:
+            break
+        p, q = np.unravel_index(flat_index, upper.shape)
+        apq = values[p, q]
+        tau = (values[q, q] - values[p, p]) / (2.0 * apq)
+        sign = 1.0 if tau >= 0.0 else -1.0
+        tangent = sign / (abs(tau) + np.sqrt(1.0 + tau * tau))
+        cosine = 1.0 / np.sqrt(1.0 + tangent * tangent)
+        sine = tangent * cosine
+        app = values[p, p]
+        aqq = values[q, q]
+        for k in range(size):
+            if k == p or k == q:
+                continue
+            akp = values[k, p]
+            akq = values[k, q]
+            values[k, p] = values[p, k] = cosine * akp - sine * akq
+            values[k, q] = values[q, k] = sine * akp + cosine * akq
+        values[p, p] = cosine * cosine * app - 2.0 * sine * cosine * apq + sine * sine * aqq
+        values[q, q] = sine * sine * app + 2.0 * sine * cosine * apq + cosine * cosine * aqq
+        values[p, q] = values[q, p] = 0.0
+    return np.diag(values).copy()
 
 
 def _normalize_backend(compute_backend: str) -> str:

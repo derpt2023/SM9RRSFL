@@ -125,8 +125,10 @@ class LongitudinalSVDDetector:
 
             sigma, u0 = torch_top_singular_feature(matrix, device=self.device)
             return _Feature(sigma=sigma, u0=u0)
-        u, singular_values, _ = np.linalg.svd(matrix, full_matrices=False)
-        return _Feature(sigma=float(singular_values[0]), u0=u[:, 0].astype(np.float32))
+        from .torch_backend import numpy_top_singular_feature
+
+        sigma, u0 = numpy_top_singular_feature(matrix)
+        return _Feature(sigma=sigma, u0=u0)
 
 
 def _abs_cosine(a: np.ndarray, b: np.ndarray, eps: float) -> float:
