@@ -1,122 +1,155 @@
-"""Dynamic accumulator helpers for the SM9 traceable ring-signature facade.
-
-The construction follows the accumulator component used in Xie et al. (2025):
-for a ring U={ID_i}, v_i = H1(ID_i || hid, N), V=[prod_i(v_i+s)]P1, and the
-signer's witness is W_i=[prod_{j!=i}(v_j+s)]P1.  The gmssl implementation names
-the pairing arguments as e(G2, G1), so the paper's P1 lives in gmssl's G2 and
-the paper's P2 lives in gmssl's G1.
-"""
+"""Low-level standard-SM9 bilinear accumulator relation helpers."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from random import SystemRandom
-from typing import Any
+import hashlib
 
-from gmssl import sm9
-from gmssl import optimized_curve as ec
-from gmssl import optimized_field_elements as fq
-from gmssl import optimized_pairing as ate
+from gmssl import sm3
+
+from . import sm9_backend
+
+
+N = sm9_backend.SM9_ORDER
 
 
 @dataclass
 class AccumulatorRingMaterial:
     ring: tuple[str, ...]
     ring_digest: str
-    value: Any
+    value: bytes
     value_digest: str
-    g1: Any
-    witnesses: dict[str, Any]
-    _g2_cache: dict[str, Any] = field(default_factory=dict)
+    g1: bytes
+    witnesses: dict[str, bytes]
+    _g2_cache: dict[str, bytes] = field(default_factory=dict)
 
 
 class SM9DynamicAccumulator:
-    """Nguyen-style bilinear dynamic accumulator mapped onto gmssl SM9 groups."""
+    """Nguyen-style accumulator with the Word scheme's G1/G2 direction."""
 
     def __init__(
         self,
-        sign_public: tuple[Any, Any, Any, Any],
+        sign_public: tuple[bytes, bytes, bytes, bytes],
         *,
-        max_size: int,
-        hid: str = "01",
-        seed: int | None = None,
+        trace_public: bytes,
+        public_basis: tuple[bytes, ...] | list[bytes],
+        hid: int = 0x01,
     ) -> None:
-        if max_size < 1:
-            raise ValueError("max_size must be positive")
+        sm9_backend.require_available()
         self.sign_public = sign_public
-        self.p1 = sign_public[0]
-        self.p2 = sign_public[1]
-        self.sign_master_public = sign_public[2]
+        self.p1, self.p2, self.sign_master_public, _ = sign_public
+        if not sm9_backend.g1_validate(self.p1):
+            raise ValueError("sign_public P1 is not a valid SM9 G1 point")
+        if not sm9_backend.g2_validate(self.p2) or not sm9_backend.g2_validate(
+            self.sign_master_public
+        ):
+            raise ValueError("sign_public contains an invalid SM9 G2 point")
+        if not 0 <= hid <= 255:
+            raise ValueError("hid must fit in one octet")
         self.hid = hid
-        self.max_size = max_size
-        self.secret = _seeded_scalar(seed, "accumulator-secret") if seed is not None else _random_scalar()
-        self.public_s = ec.multiply(self.p2, self.secret)
-        self.public_basis = tuple(
-            ec.multiply(self.p1, pow(self.secret, exponent, ec.curve_order))
-            for exponent in range(max_size + 1)
-        )
+        if not sm9_backend.g2_validate(trace_public):
+            raise ValueError("trace_public is not a valid SM9 G2 point")
+        basis = tuple(public_basis)
+        if len(basis) < 2 or not all(
+            sm9_backend.g1_validate(point) for point in basis
+        ):
+            raise ValueError("public_basis must contain P1 through [xi^q]P1")
+        if basis[0] != self.p1:
+            raise ValueError("public_basis[0] must equal P1")
+        for exponent in range(len(basis) - 1):
+            if not sm9_backend.gt_equal(
+                sm9_backend.pair(basis[exponent], trace_public),
+                sm9_backend.pair(basis[exponent + 1], self.p2),
+            ):
+                raise ValueError("public_basis failed the L_xi recurrence")
+        self.public_s = trace_public
+        self.public_basis = basis
+        self.max_size = len(basis) - 1
 
     def identity_scalar(self, identity: str) -> int:
-        """Return v_i = H1(ID_i || hid, N), matching SM9 signing KeyGen."""
+        """Return the standard direct ``H1(ID||hid,N)`` scalar."""
 
-        user_id = sm9.sm3_hash(sm9.str2hexbytes(identity))
-        return sm9.h2rf(1, (user_id + self.hid).encode("utf-8"), ec.curve_order)
+        return sm9_backend.hash_to_scalar(
+            1,
+            identity.encode("utf-8") + bytes((self.hid,)),
+        )
 
-    def accumulate(self, identities: tuple[str, ...] | list[str]) -> Any:
-        """Compute V=[prod_i(v_i+s)]P1 for a ring."""
-
+    def accumulate(self, identities: tuple[str, ...] | list[str]) -> bytes:
         ring = _canonical_ring(identities)
         if len(ring) > self.max_size:
             raise ValueError("ring size exceeds accumulator max_size")
-        return ec.multiply(self.p1, self._ring_factor(ring))
+        polynomial = _product_polynomial(
+            self.identity_scalar(identity) for identity in ring
+        )
+        return self._evaluate_basis(polynomial)
 
-    def witness(self, identities: tuple[str, ...] | list[str], identity: str) -> Any:
-        """Compute W_i=[prod_{j!=i}(v_j+s)]P1 for one ring member."""
+    def witness(
+        self,
+        identities: tuple[str, ...] | list[str],
+        identity: str,
+    ) -> bytes:
+        ring = _canonical_ring(identities)
+        if identity not in ring:
+            raise ValueError("identity is not in the accumulated ring")
+        polynomial = _product_polynomial(
+            self.identity_scalar(member) for member in ring
+        )
+        return self._evaluate_basis(
+            _divide_by_linear_factor(
+                polynomial,
+                self.identity_scalar(identity),
+            )
+        )
+
+    def add(self, identities: tuple[str, ...] | list[str], identity: str) -> bytes:
+        """Rebuild ACC after a member addition, as required by ring rotation."""
+
+        ring = _canonical_ring(identities)
+        if identity in ring:
+            raise ValueError("identity is already in the accumulated ring")
+        return self.accumulate((*ring, str(identity)))
+
+    def delete(self, identities: tuple[str, ...] | list[str], identity: str) -> bytes:
+        """Rebuild ACC after revocation without exposing ``xi``."""
 
         ring = _canonical_ring(identities)
         if identity not in ring:
             raise ValueError("identity is not in the accumulated ring")
-        return ec.multiply(self.p1, self._ring_factor(ring, skip=identity))
+        remaining = tuple(member for member in ring if member != identity)
+        if not remaining:
+            raise ValueError("accumulator ring must not become empty")
+        return self.accumulate(remaining)
 
-    def add(self, accumulator_value: Any, identity: str) -> Any:
-        """Dynamically add an identity to an existing accumulator value."""
-
-        return ec.multiply(accumulator_value, self._identity_factor(identity))
-
-    def delete(self, accumulator_value: Any, identity: str) -> Any:
-        """Dynamically delete an identity from an accumulator value."""
-
-        return ec.multiply(
-            accumulator_value,
-            fq.prime_field_inv(self._identity_factor(identity), ec.curve_order),
+    def verify_witness(
+        self,
+        accumulator_value: bytes,
+        witness: bytes,
+        identity: str,
+    ) -> bool:
+        identity_public = sm9_backend.g2_add(
+            sm9_backend.g2_mul(self.p2, self.identity_scalar(identity)),
+            self.public_s,
+        )
+        return sm9_backend.gt_equal(
+            sm9_backend.pair(witness, identity_public),
+            sm9_backend.pair(accumulator_value, self.p2),
         )
 
-    def verify_witness(self, accumulator_value: Any, witness: Any, identity: str) -> bool:
-        """Verify e(W_i, [v_i]P2 + S_pub) == e(V, P2)."""
-
-        identity_public = ec.add(ec.multiply(self.p2, self.identity_scalar(identity)), self.public_s)
-        return ate.pairing(witness, identity_public) == ate.pairing(accumulator_value, self.p2)
-
-    def materialize_ring(self, identities: tuple[str, ...] | list[str]) -> AccumulatorRingMaterial:
-        """一次性预计算公共环的累加值、全部见证和配对缓存基础量。"""
-
+    def materialize_ring(
+        self,
+        identities: tuple[str, ...] | list[str],
+    ) -> AccumulatorRingMaterial:
         ring = _canonical_ring(identities)
         if len(ring) > self.max_size:
             raise ValueError("ring size exceeds accumulator max_size")
-        # 这些值在整个实验配置内固定，预计算可避免每轮重复椭圆曲线运算。
-        factors = {identity: self._identity_factor(identity) for identity in ring}
-        total = 1
-        for factor in factors.values():
-            total = (total * factor) % ec.curve_order
-        value = ec.multiply(self.p1, total)
+        value = self.accumulate(ring)
         witnesses = {
-            identity: ec.multiply(
-                self.p1,
-                (total * fq.prime_field_inv(factor, ec.curve_order)) % ec.curve_order,
-            )
-            for identity, factor in factors.items()
+            identity: self.witness(ring, identity) for identity in ring
         }
-        g1 = ate.pairing(self.p1, self.sign_master_public) * ate.pairing(value, self.p2)
+        g1 = sm9_backend.gt_mul(
+            sm9_backend.pair(self.p1, self.sign_master_public),
+            sm9_backend.pair(value, self.p2),
+        )
         return AccumulatorRingMaterial(
             ring=ring,
             ring_digest=ring_digest(ring),
@@ -130,51 +163,109 @@ class SM9DynamicAccumulator:
         self,
         material: AccumulatorRingMaterial,
         identity: str,
-        signing_private_key: Any,
-    ) -> Any:
-        """Return g2=e(W_i+ds_i, P2), computed lazily and cached per identity."""
-
+        signing_private_key: bytes,
+    ) -> bytes:
         if identity not in material._g2_cache:
-            material._g2_cache[identity] = ate.pairing(
-                ec.add(material.witnesses[identity], signing_private_key),
+            material._g2_cache[identity] = sm9_backend.pair(
+                sm9_backend.g1_add(
+                    material.witnesses[identity],
+                    signing_private_key,
+                ),
                 self.p2,
             )
         return material._g2_cache[identity]
 
-    def _ring_factor(self, ring: tuple[str, ...], *, skip: str | None = None) -> int:
-        factor = 1
-        for identity in ring:
-            if identity == skip:
-                continue
-            factor = (factor * self._identity_factor(identity)) % ec.curve_order
-        return factor
-
-    def _identity_factor(self, identity: str) -> int:
-        return (self.identity_scalar(identity) + self.secret) % ec.curve_order
-
-
-def h2_scalar(ring_digest_value: str, message: str, omega: Any) -> int:
-    msg_hash = sm9.sm3_hash(sm9.str2hexbytes(f"{ring_digest_value}|{message}"))
-    return sm9.h2rf(2, (msg_hash + sm9.fe2sp(omega)).encode("utf-8"), ec.curve_order)
+    def _evaluate_basis(self, coefficients: tuple[int, ...]) -> bytes:
+        if len(coefficients) > len(self.public_basis):
+            raise ValueError("polynomial exceeds accumulator public_basis")
+        points = (
+            sm9_backend.g1_mul(point, coefficient % N)
+            for coefficient, point in zip(coefficients, self.public_basis)
+            if coefficient % N != 0
+        )
+        return _g1_sum(points)
 
 
-def point_digest(point: Any) -> str:
-    normalized = ec.normalize(point) if not ec.is_inf(point) else point
-    return sm9.sm3_hash(sm9.str2hexbytes(sm9.ec2sp(normalized)))
+def point_digest(point: bytes) -> str:
+    return _sm3_hex(point)
 
 
 def ring_digest(identities: tuple[str, ...] | list[str]) -> str:
-    return sm9.sm3_hash(sm9.str2hexbytes("|".join(_canonical_ring(identities))))
+    ring = _canonical_ring(identities)
+    encoded_ring = _encode_fields(
+        *(identity.encode("utf-8") for identity in ring)
+    )
+    return _sm3_hex(
+        _encode_fields(
+            b"SM9-RRS-FL/H3/RID/v2",
+            encoded_ring,
+        )
+    )
 
 
 def _canonical_ring(identities: tuple[str, ...] | list[str]) -> tuple[str, ...]:
-    return tuple(sorted(str(identity) for identity in identities))
+    ring = tuple(str(identity) for identity in identities)
+    if not ring or len(set(ring)) != len(ring):
+        raise ValueError("ring identities must be non-empty and unique")
+    return ring
 
 
-def _random_scalar() -> int:
-    return SystemRandom().randrange(1, ec.curve_order)
+def _product_polynomial(values) -> tuple[int, ...]:
+    coefficients = [1]
+    for raw_value in values:
+        value = int(raw_value) % N
+        updated = [0] * (len(coefficients) + 1)
+        for exponent, coefficient in enumerate(coefficients):
+            updated[exponent] = (updated[exponent] + value * coefficient) % N
+            updated[exponent + 1] = (updated[exponent + 1] + coefficient) % N
+        coefficients = updated
+    return tuple(coefficients)
 
 
-def _seeded_scalar(seed: int, label: str) -> int:
-    digest = sm9.sm3_hash(sm9.str2hexbytes(f"{label}:{seed}"))
-    return (int(digest, 16) % (ec.curve_order - 1)) + 1
+def _divide_by_linear_factor(
+    coefficients: tuple[int, ...],
+    value: int,
+) -> tuple[int, ...]:
+    factor = int(value) % N
+    quotient = [0] * (len(coefficients) - 1)
+    quotient[-1] = coefficients[-1] % N
+    for exponent in range(len(quotient) - 2, -1, -1):
+        quotient[exponent] = (
+            coefficients[exponent + 1] - factor * quotient[exponent + 1]
+        ) % N
+    if (coefficients[0] - factor * quotient[0]) % N != 0:
+        raise ValueError("polynomial does not contain the requested factor")
+    return tuple(quotient)
+
+
+def _g1_sum(points) -> bytes:
+    iterator = iter(points)
+    try:
+        total = next(iterator)
+    except StopIteration as exc:
+        raise ValueError("cannot evaluate an all-zero accumulator polynomial") from exc
+    for point in iterator:
+        total = sm9_backend.g1_add(total, point)
+    return total
+
+
+def _encode_fields(*fields: bytes) -> bytes:
+    encoded = bytearray()
+    for value in fields:
+        encoded.extend(len(value).to_bytes(8, "big"))
+        encoded.extend(value)
+    return bytes(encoded)
+
+
+def _sm3_hex(data: bytes) -> str:
+    if "sm3" in hashlib.algorithms_available:
+        return hashlib.new("sm3", data).hexdigest()
+    return sm3.sm3_hash(list(data))
+
+
+__all__ = [
+    "AccumulatorRingMaterial",
+    "SM9DynamicAccumulator",
+    "point_digest",
+    "ring_digest",
+]

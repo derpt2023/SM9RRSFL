@@ -10,7 +10,13 @@ import numpy as np
 
 from .aggregation import KrumResult, fedavg, krum, torch_krum, torch_weighted_fedavg, weighted_fedavg
 from .attacks import poison_update
-from .crypto import SM9RRSContext, RRSPacket
+from .crypto import (
+    ASVerifier,
+    AuditorService,
+    ClientSigner,
+    RRSPacket,
+    SM9RRSContext,
+)
 from .ding13_detector import Ding13TrajectoryDetector
 from .datasets import ImageDataset, partition_clients
 from .model import accuracy, init_params, local_train_delta, model_spec_for_dataset
@@ -38,10 +44,9 @@ class ExperimentConfig:
     attack_start_round: int = 0
     detector_window: int = 3
     z_threshold: float = 3.0
-    ring_size: int = 5
     crypto_mode: str = "sm9"
-    accumulator_mode: str = "dynamic"
-    strict_ring_verify: bool = False
+    dkg_threshold: int = 2
+    dkg_nodes: int = 3
     early_stop: bool = True
     eval_interval: int = 1
     sm9_workers: int = 1
@@ -121,7 +126,8 @@ class _ClientUpdateCandidate:
 
 @dataclass(frozen=True)
 class _VerifiedSM9Candidate:
-    identity: str
+    # AS-facing state contains only the opaque, verified packet and update.
+    # Experiment ground truth remains in malicious_set outside this object.
     delta: Any
     cpu_delta: np.ndarray
     samples: int
@@ -137,8 +143,9 @@ class _VerifiedSM9Candidate:
 class _SM9ProcessingResult:
     updates: list[Any]
     samples: list[int]
-    clients: list[str]
-    suspicious_clients: set[str]
+    tags: list[str]
+    suspicious_tags: set[str]
+    candidates_by_tag: dict[str, _VerifiedSM9Candidate]
     rejected: int
     hash_seconds: float
     packet_build_seconds: float
@@ -168,6 +175,8 @@ def run_experiment(
         raise ValueError("eval_interval must be at least 1")
     if config.sm9_workers < 1:
         raise ValueError("sm9_workers must be at least 1")
+    if not 1 <= config.dkg_threshold <= config.dkg_nodes:
+        raise ValueError("dkg_threshold must satisfy 1 <= threshold <= dkg_nodes")
     if config.num_clients < 1:
         raise ValueError("num_clients must be at least 1")
     if config.rounds < 1:
@@ -178,6 +187,8 @@ def run_experiment(
         raise ValueError("batch_size must be at least 1")
     if config.lr <= 0.0 or config.lr_decay <= 0.0:
         raise ValueError("lr and lr_decay must be positive")
+    if config.attack_start_round < 0:
+        raise ValueError("attack_start_round must be non-negative")
     if config.partition == "dirichlet" and config.dirichlet_alpha <= 0.0:
         raise ValueError("dirichlet_alpha must be positive")
     invalid_reason = experiment_config_error(config)
@@ -233,8 +244,8 @@ def run_experiment(
             )
         ]
     else:
-        # 检查点只恢复协议与训练状态；密码上下文重新安全生成，因为旧私钥
-        # 不参与跨轮检测，link_tag 和恶意客户端选择仍由任务参数稳定确定。
+        # 新方案的 Tag_pi depends on dS_pi and h_t.  The D-KGC shares and task
+        # salt are therefore restored together with the longitudinal detector.
         params = np.asarray(resume_state["params"], dtype=np.float32)
         records = list(resume_state["records"])
         start_round = int(resume_state["completed_round"]) + 1
@@ -249,29 +260,54 @@ def run_experiment(
         aggregation_seconds = float(timings.get("aggregation_seconds", 0.0))
         evaluation_seconds = float(timings.get("evaluation_seconds", 0.0))
 
+    blacklisted: set[str] = set(resume_state.get("blacklisted", ())) if resume_state else set()
+    true_positive_revocations = (
+        int(resume_state.get("true_positive_revocations", 0)) if resume_state else 0
+    )
+    false_positive_revocations = (
+        int(resume_state.get("false_positive_revocations", 0)) if resume_state else 0
+    )
+
     crypto = None
+    client_signers: dict[str, ClientSigner] = {}
+    as_verifier: ASVerifier | None = None
+    auditor: AuditorService | None = None
     detector = None
     ding13_detector = None
     sm9_weight_manager = None
     if config.method == "sm9rrs":
+        crypto_state = resume_state.get("crypto_state") if resume_state else None
+        if resume_state is not None and crypto_state is None:
+            raise ValueError("SM9-RRS checkpoint is missing D-KGC/task state")
         crypto = SM9RRSContext(
             client_ids,
-            ring_size=config.ring_size,
             crypto_mode=config.crypto_mode,
-            accumulator_mode=config.accumulator_mode,
-            strict_ring_verify=config.strict_ring_verify,
+            dkg_threshold=config.dkg_threshold,
+            dkg_nodes=config.dkg_nodes,
             seed=config.seed,
+            state=crypto_state,
         )
+        crypto.register_task(
+            dataset.name,
+            [identity for identity in client_ids if identity not in blacklisted],
+        )
+        client_signers = {
+            identity: crypto.client_signer(identity) for identity in client_ids
+        }
+        as_verifier = crypto.as_verifier(
+            expected_update_shape=(model_spec.parameter_size,),
+        )
+        auditor = crypto.auditor_service()
         detector = LongitudinalSVDDetector(
             window_size=detector_window,
             z_threshold=z_threshold,
-            matrix_offset=model_spec.svd_matrix_offset,
-            matrix_shape=model_spec.svd_matrix_shape,
+            num_classes=model_spec.num_classes,
+            expected_update_size=model_spec.parameter_size,
             compute_backend=config.compute_backend,
             device=config.device,
         )
         sm9_weight_manager = SuspicionWeightManager(
-            client_ids,
+            participant_count=len(client_ids),
             penalty_factor=config.suspicion_penalty_factor,
             recovery_factor=config.suspicion_recovery_factor,
             remove_after=suspicion_remove_after,
@@ -294,13 +330,51 @@ def run_experiment(
         elif config.method == "ding13":
             ding13_detector = resume_state["ding13_detector"]
 
-    blacklisted: set[str] = set(resume_state.get("blacklisted", ())) if resume_state else set()
-    true_positive_revocations = (
-        int(resume_state.get("true_positive_revocations", 0)) if resume_state else 0
-    )
-    false_positive_revocations = (
-        int(resume_state.get("false_positive_revocations", 0)) if resume_state else 0
-    )
+    task_exhausted = False
+    if config.method == "sm9rrs":
+        assert (
+            crypto is not None
+            and as_verifier is not None
+            and auditor is not None
+            and sm9_weight_manager is not None
+        )
+        # A failed audit is checkpointed with its complete immutable evidence.
+        # Resolve it before accepting any later-round update so a restart cannot
+        # strand a digest-only pending entry or silently bypass C_tol.
+        for evidence in as_verifier.pending_audit_evidence(dataset.name):
+            tag = as_verifier.tag_key(evidence.packet)
+            if tag not in sm9_weight_manager.pending_trace:
+                raise ValueError(
+                    "checkpoint pending audit is absent from the weight-manager state"
+                )
+            try:
+                trace_result = _trace_and_archive(
+                    as_verifier,
+                    auditor,
+                    evidence,
+                )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "a restored SM9-RRS audit is still unresolved; task remains active"
+                ) from exc
+            sm9_weight_manager.confirm_revocation(tag)
+            blacklisted.add(trace_result.identity)
+            if trace_result.identity in malicious_set:
+                true_positive_revocations += 1
+            else:
+                false_positive_revocations += 1
+
+        if as_verifier.pending_audit_digests(dataset.name):
+            raise RuntimeError("restored audit queue was not closed after successful retry")
+        if blacklisted:
+            remaining_ring = [
+                identity for identity in client_ids if identity not in blacklisted
+            ]
+            if remaining_ring:
+                crypto.update_task_ring(dataset.name, remaining_ring)
+            else:
+                crypto.finalize_task(dataset.name)
+                task_exhausted = True
 
     if checkpoint_callback is not None and resume_state is None:
         # 第 1 轮开始前也建立一致状态。若首轮训练、密码运算或聚合即报错，
@@ -316,6 +390,7 @@ def run_experiment(
                 detector=detector,
                 weight_manager=sm9_weight_manager,
                 ding13_detector=ding13_detector,
+                crypto=crypto,
                 training_seconds=training_seconds,
                 attack_seconds=attack_seconds,
                 hash_seconds=hash_seconds,
@@ -328,13 +403,17 @@ def run_experiment(
             )
         )
 
-    for round_id in range(start_round, config.rounds + 1):
+    for round_id in (
+        () if task_exhausted else range(start_round, config.rounds + 1)
+    ):
         # 每轮重新收集仍处于活跃状态的客户端更新；黑名单客户端不再参与训练。
+        unresolved_audit_error: BaseException | None = None
         updates: list[Any] = []
         update_samples: list[int] = []
         update_clients: list[str] = []
         sm9_candidates: list[_ClientUpdateCandidate] = []
-        suspicious_clients: set[str] = set()
+        suspicious_tags: set[str] = set()
+        sm9_candidates_by_tag: dict[str, _VerifiedSM9Candidate] = {}
         rejected = 0
 
         for client_idx, identity in enumerate(client_ids):
@@ -395,20 +474,21 @@ def run_experiment(
 
         if config.method == "sm9rrs" and sm9_candidates:
             # 密码封包可并行，轨迹检测必须按客户端稳定顺序更新历史状态。
-            assert crypto is not None and detector is not None
+            assert detector is not None and as_verifier is not None
             sm9_result = _process_sm9_candidates(
                 sm9_candidates,
-                crypto=crypto,
+                client_signers=client_signers,
+                as_verifier=as_verifier,
                 detector=detector,
-                malicious_clients=malicious_clients,
                 round_id=round_id,
                 task_id=dataset.name,
                 workers=config.sm9_workers,
             )
             updates.extend(sm9_result.updates)
             update_samples.extend(sm9_result.samples)
-            update_clients.extend(sm9_result.clients)
-            suspicious_clients.update(sm9_result.suspicious_clients)
+            update_clients.extend(sm9_result.tags)
+            suspicious_tags.update(sm9_result.suspicious_tags)
+            sm9_candidates_by_tag.update(sm9_result.candidates_by_tag)
             rejected += sm9_result.rejected
             hash_seconds += sm9_result.hash_seconds
             packet_build_seconds += sm9_result.packet_build_seconds
@@ -440,17 +520,68 @@ def run_experiment(
                     aggregate = result.update
                     krum_selected = update_clients[result.selected_index]
             elif config.method == "sm9rrs":
-                assert sm9_weight_manager is not None
+                assert (
+                    sm9_weight_manager is not None
+                    and crypto is not None
+                    and as_verifier is not None
+                    and auditor is not None
+                )
                 weight_result = sm9_weight_manager.update(
                     update_clients,
-                    suspicious_clients,
-                    malicious_set,
+                    suspicious_tags,
                 )
-                blacklisted.update(weight_result.newly_removed)
-                true_positive_revocations += weight_result.true_positive_removed
-                false_positive_revocations += weight_result.false_positive_removed
-                weights = [weight_result.weights[identity] for identity in update_clients]
-                effective_total = sum(weight * samples for weight, samples in zip(weights, update_samples))
+                accepted_trace_identities: set[str] = set()
+                for tag in weight_result.trace_requested_tags:
+                    candidate = sm9_candidates_by_tag.get(tag)
+                    if candidate is None:
+                        raise RuntimeError(
+                            "C_tol trace request has no matching verified evidence"
+                        )
+                    try:
+                        evidence = as_verifier.build_trace_evidence(
+                            candidate.packet,
+                            candidate.cpu_delta,
+                        )
+                        trace_result = _trace_and_archive(
+                            as_verifier,
+                            auditor,
+                            evidence,
+                        )
+                    except (RuntimeError, TypeError, ValueError) as exc:
+                        # Word 4.3.3 requires the C_tol trigger update to be
+                        # rejected immediately.  Preserve its exact evidence
+                        # for retry and keep its round weight at zero; no
+                        # permanent identity removal occurs without Eq. (7).
+                        unresolved_audit_error = exc
+                        continue
+                    sm9_weight_manager.confirm_revocation(tag)
+                    accepted_trace_identities.add(trace_result.identity)
+                    blacklisted.add(trace_result.identity)
+                    if trace_result.identity in malicious_set:
+                        true_positive_revocations += 1
+                    else:
+                        false_positive_revocations += 1
+
+                if accepted_trace_identities:
+                    remaining_ring = [
+                        identity for identity in client_ids if identity not in blacklisted
+                    ]
+                    if remaining_ring:
+                        crypto.update_task_ring(dataset.name, remaining_ring)
+                    else:
+                        # There is no valid non-empty ring to install.  Close
+                        # the task immediately so the revoked signer cannot use
+                        # stale client/AS material from the previous RID.
+                        crypto.finalize_task(dataset.name)
+                        task_exhausted = True
+
+                # The manager contains the final zero/non-zero decision for
+                # every C_tol trigger and any successfully revoked tag.
+                weights = [sm9_weight_manager.weights[tag] for tag in update_clients]
+                # Section 4.3.3 already normalizes w_pi over A^(r).  Applying
+                # sample counts again would implement w_pi*n_pi rather than
+                # the aggregation equation stated in the Word scheme.
+                effective_total = sum(weights)
                 if effective_total <= 0.0:
                     aggregate = (
                         torch_context.zeros_like(updates[0])
@@ -461,14 +592,16 @@ def run_experiment(
                     aggregate = _weighted_fedavg(
                         updates,
                         weights,
-                        sample_counts=update_samples,
+                        sample_counts=None,
                         config=config,
                         torch_context=torch_context,
                     )
                 record_accepted = sum(
                     1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
                 )
-                record_rejected = rejected + len(suspicious_clients)
+                # Single anomalies are downweighted but still aggregated.  Only
+                # C_tol-trigger packets have zero weight and are rejected.
+                record_rejected = rejected + sum(weight <= 0.0 for weight in weights)
             elif config.method == "ding13":
                 assert ding13_detector is not None
                 update_by_client = dict(zip(update_clients, updates))
@@ -548,6 +681,7 @@ def run_experiment(
                     detector=detector,
                     weight_manager=sm9_weight_manager,
                     ding13_detector=ding13_detector,
+                    crypto=crypto,
                     training_seconds=training_seconds,
                     attack_seconds=attack_seconds,
                     hash_seconds=hash_seconds,
@@ -559,8 +693,45 @@ def run_experiment(
                     evaluation_seconds=evaluation_seconds,
                 )
             )
+        if config.method == "sm9rrs" and unresolved_audit_error is not None:
+            raise RuntimeError(
+                "SM9-RRS trace remains pending; retry from the durable checkpoint"
+            ) from unresolved_audit_error
+        if task_exhausted:
+            break
         if should_stop:
             break
+
+    # Every trace result accepted above was explicitly archived through the AS
+    # capability. finalize_task checks its own pending-evidence registry before
+    # destroying h_t, kappa_t and cached task-linking material.
+    if crypto is not None:
+        if not crypto.is_task_finalized(dataset.name):
+            crypto.finalize_task(dataset.name)
+        if checkpoint_callback is not None:
+            checkpoint_callback(
+                _build_checkpoint_state(
+                    completed_round=records[-1].round,
+                    params=params,
+                    records=records,
+                    blacklisted=blacklisted,
+                    true_positive_revocations=true_positive_revocations,
+                    false_positive_revocations=false_positive_revocations,
+                    detector=detector,
+                    weight_manager=sm9_weight_manager,
+                    ding13_detector=ding13_detector,
+                    crypto=crypto,
+                    training_seconds=training_seconds,
+                    attack_seconds=attack_seconds,
+                    hash_seconds=hash_seconds,
+                    packet_build_seconds=packet_build_seconds,
+                    sign_seconds=sign_seconds,
+                    verify_seconds=verify_seconds,
+                    detection_seconds=detection_seconds,
+                    aggregation_seconds=aggregation_seconds,
+                    evaluation_seconds=evaluation_seconds,
+                )
+            )
 
     final = records[-1]
     return ExperimentResult(
@@ -585,17 +756,29 @@ def run_experiment(
     )
 
 
+def _trace_and_archive(
+    as_verifier: ASVerifier,
+    auditor: AuditorService,
+    evidence,
+):
+    """Complete one pending audit or leave its durable entry untouched."""
+
+    trace_result = auditor.trace(evidence)
+    if not as_verifier.verify_trace_result(evidence, trace_result):
+        raise ValueError("AS rejected the returned threshold trace result")
+    if not as_verifier.archive_trace_result(evidence, trace_result):
+        raise RuntimeError("AS could not archive the verified trace result")
+    return trace_result
+
+
 def _effective_detector_settings(
     dataset: ImageDataset,
     config: ExperimentConfig,
 ) -> tuple[int, float, int]:
-    if dataset.name != "cifar10":
-        return config.detector_window, config.z_threshold, config.suspicion_remove_after
-    return (
-        max(config.detector_window, 8),
-        max(config.z_threshold, 5.0),
-        max(config.suspicion_remove_after, 5),
-    )
+    del dataset
+    # Word 4.3.3 uses the configured K, theta=3, and C_tol without a
+    # dataset-specific hidden override.
+    return config.detector_window, config.z_threshold, config.suspicion_remove_after
 
 
 def _maybe_torch_context(
@@ -621,20 +804,21 @@ def _maybe_torch_context(
 def _process_sm9_candidates(
     candidates: list[_ClientUpdateCandidate],
     *,
-    crypto: SM9RRSContext,
+    client_signers: dict[str, ClientSigner],
+    as_verifier: ASVerifier,
     detector: LongitudinalSVDDetector,
-    malicious_clients: tuple[str, ...],
     round_id: int,
     task_id: str,
     workers: int,
 ) -> _SM9ProcessingResult:
-    if workers > 1 and crypto.accumulator_mode == "dynamic":
+    if workers > 1:
         with ThreadPoolExecutor(max_workers=min(workers, len(candidates))) as executor:
             verified_candidates = list(
                 executor.map(
                     lambda candidate: _create_verified_sm9_candidate(
                         candidate,
-                        crypto=crypto,
+                        signer=client_signers[candidate.identity],
+                        as_verifier=as_verifier,
                         round_id=round_id,
                         task_id=task_id,
                     ),
@@ -645,7 +829,8 @@ def _process_sm9_candidates(
         verified_candidates = [
             _create_verified_sm9_candidate(
                 candidate,
-                crypto=crypto,
+                signer=client_signers[candidate.identity],
+                as_verifier=as_verifier,
                 round_id=round_id,
                 task_id=task_id,
             )
@@ -654,29 +839,44 @@ def _process_sm9_candidates(
 
     updates: list[np.ndarray] = []
     samples: list[int] = []
-    clients: list[str] = []
-    suspicious_clients: set[str] = set()
+    tags: list[str] = []
+    suspicious_tags: set[str] = set()
+    candidates_by_tag: dict[str, _VerifiedSM9Candidate] = {}
     rejected = 0
     detection_seconds = 0.0
-    has_malicious_clients = bool(malicious_clients)
     for candidate in verified_candidates:
         if not candidate.verified:
             rejected += 1
             continue
-        if has_malicious_clients:
-            detection_started = perf_counter()
-            decision = detector.evaluate(candidate.packet.link_tag, candidate.cpu_delta)
+        tag = as_verifier.tag_key(candidate.packet)
+        # One authenticated Tag may submit at most once in a round.  The FL
+        # driver normally produces one packet per client; this guard preserves
+        # the server-side protocol invariant under adversarial inputs.
+        if not tag or tag in candidates_by_tag:
+            rejected += 1
+            continue
+        detection_started = perf_counter()
+        try:
+            decision = detector.evaluate(tag, candidate.cpu_delta)
+        except (TypeError, ValueError):
+            # A correctly signed but schema-invalid model vector is not a
+            # valid G_pi^(r); reject it without mutating the tag trajectory.
             detection_seconds += perf_counter() - detection_started
-            if not decision.accepted:
-                suspicious_clients.add(candidate.identity)
+            rejected += 1
+            continue
+        detection_seconds += perf_counter() - detection_started
+        if not decision.accepted:
+            suspicious_tags.add(tag)
         updates.append(candidate.delta)
         samples.append(candidate.samples)
-        clients.append(candidate.identity)
+        tags.append(tag)
+        candidates_by_tag[tag] = candidate
     return _SM9ProcessingResult(
         updates=updates,
         samples=samples,
-        clients=clients,
-        suspicious_clients=suspicious_clients,
+        tags=tags,
+        suspicious_tags=suspicious_tags,
+        candidates_by_tag=candidates_by_tag,
         rejected=rejected,
         # 多线程时这些值是所有客户端操作耗时之和，用来判断热点而非相加还原墙钟时间。
         hash_seconds=sum(candidate.hash_seconds for candidate in verified_candidates),
@@ -692,18 +892,18 @@ def _process_sm9_candidates(
 def _create_verified_sm9_candidate(
     candidate: _ClientUpdateCandidate,
     *,
-    crypto: SM9RRSContext,
+    signer: ClientSigner,
+    as_verifier: ASVerifier,
     round_id: int,
     task_id: str,
 ) -> _VerifiedSM9Candidate:
     # 摘要算法由密码上下文决定：真实模式使用 SM3，仿真模式走快速 SHA-256。
     hash_started = perf_counter()
-    update_digest = crypto.digest_update(candidate.cpu_delta)
+    update_digest = signer.digest_update(candidate.cpu_delta)
     hash_seconds = perf_counter() - hash_started
 
     packet_started = perf_counter()
-    unsigned = crypto.build_unsigned_packet(
-        candidate.identity,
+    unsigned = signer.build_unsigned_packet(
         candidate.cpu_delta,
         round_id=round_id,
         task_id=task_id,
@@ -712,14 +912,18 @@ def _create_verified_sm9_candidate(
     packet_build_seconds = perf_counter() - packet_started
 
     sign_started = perf_counter()
-    packet = crypto.sign_packet(candidate.identity, unsigned)
+    packet = signer.sign_packet(unsigned)
     sign_seconds = perf_counter() - sign_started
 
     verify_started = perf_counter()
-    verified = crypto.verify_packet(packet, candidate.cpu_delta, update_digest=update_digest)
+    verified = as_verifier.verify_packet(
+        packet,
+        candidate.cpu_delta,
+        expected_task_id=task_id,
+        expected_round_id=round_id,
+    )
     verify_seconds = perf_counter() - verify_started
     return _VerifiedSM9Candidate(
-        identity=candidate.identity,
         delta=candidate.delta,
         cpu_delta=candidate.cpu_delta,
         samples=candidate.samples,
@@ -764,6 +968,7 @@ def _build_checkpoint_state(
     detector,
     weight_manager,
     ding13_detector,
+    crypto: SM9RRSContext | None,
     training_seconds: float,
     attack_seconds: float,
     hash_seconds: float,
@@ -786,6 +991,7 @@ def _build_checkpoint_state(
         "detector": detector,
         "weight_manager": weight_manager,
         "ding13_detector": ding13_detector,
+        "crypto_state": crypto.export_state() if crypto is not None else None,
         "timings": {
             "training_seconds": training_seconds,
             "attack_seconds": attack_seconds,
@@ -854,7 +1060,7 @@ def _weighted_fedavg(
     updates: list[Any],
     weights: list[float],
     *,
-    sample_counts: list[int],
+    sample_counts: list[int] | None,
     config: ExperimentConfig,
     torch_context=None,
 ):

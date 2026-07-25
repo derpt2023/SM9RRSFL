@@ -111,6 +111,33 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertGreater(result.stage_timings.evaluation_seconds, 0.0)
         self.assertGreaterEqual(result.stage_timings.hash_seconds, 0.0)
 
+    def test_completed_sm9_task_checkpoint_contains_only_finalized_tombstone(self):
+        dataset = make_synthetic_mnist_like(
+            train_samples=80,
+            test_samples=20,
+            seed=101,
+        )
+        checkpoints = []
+        run_experiment(
+            dataset,
+            ExperimentConfig(
+                method="sm9rrs",
+                malicious_ratio=0.0,
+                num_clients=4,
+                rounds=1,
+                local_epochs=1,
+                batch_size=16,
+                crypto_mode="simulated",
+                early_stop=False,
+                seed=101,
+            ),
+            checkpoint_callback=checkpoints.append,
+        )
+
+        crypto_state = checkpoints[-1]["crypto_state"]
+        self.assertIn(dataset.name, crypto_state.finalized_task_ids)
+        self.assertNotIn(dataset.name, {task.task_id for task in crypto_state.tasks})
+
     def test_eval_interval_keeps_initial_and_final_records(self):
         dataset = make_synthetic_mnist_like(train_samples=80, test_samples=20, seed=11)
         result = run_experiment(
@@ -150,6 +177,99 @@ class FederatedLoopTest(unittest.TestCase):
 
         self.assertEqual(result.blacklisted_clients, tuple())
         self.assertEqual(result.records[-1].accepted_updates, 4)
+
+    def test_failed_trace_is_retryable_and_keeps_ctol_updates_rejected(self):
+        from sm9rrsfl import fl as fl_module
+
+        dataset = make_synthetic_mnist_like(train_samples=40, test_samples=20, seed=121)
+        config = ExperimentConfig(
+            method="sm9rrs",
+            malicious_ratio=0.0,
+            num_clients=2,
+            rounds=1,
+            local_epochs=1,
+            batch_size=16,
+            crypto_mode="simulated",
+            suspicion_remove_after=1,
+            early_stop=False,
+            seed=121,
+        )
+        checkpoints = []
+        with (
+            mock.patch.object(
+                fl_module.LongitudinalSVDDetector,
+                "evaluate",
+                return_value=mock.Mock(accepted=False),
+            ),
+            mock.patch.object(
+                fl_module,
+                "_trace_and_archive",
+                side_effect=ValueError("temporary trace failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "trace remains pending"),
+        ):
+            run_experiment(
+                dataset,
+                config,
+                checkpoint_callback=checkpoints.append,
+            )
+
+        failed_state = checkpoints[-1]
+        self.assertEqual(failed_state["completed_round"], 1)
+        self.assertEqual(failed_state["records"][-1].accepted_updates, 0)
+        self.assertEqual(failed_state["records"][-1].rejected_updates, 2)
+        manager = failed_state["weight_manager"]
+        self.assertEqual(len(manager.pending_trace), 2)
+        self.assertEqual(sum(manager.weights.values()), 0.0)
+        pending = failed_state["crypto_state"].pending_audits
+        self.assertEqual(len(pending), 2)
+        self.assertTrue(
+            all(not item.evidence.model_update.flags.writeable for item in pending)
+        )
+
+        resumed_checkpoints = []
+        resumed = run_experiment(
+            dataset,
+            config,
+            resume_state=failed_state,
+            checkpoint_callback=resumed_checkpoints.append,
+        )
+        self.assertEqual(len(resumed.blacklisted_clients), 2)
+        terminal = resumed_checkpoints[-1]["crypto_state"]
+        self.assertIn(dataset.name, terminal.finalized_task_ids)
+        self.assertEqual(terminal.pending_audits, ())
+
+    def test_revoking_last_member_closes_task_instead_of_reusing_old_ring(self):
+        from sm9rrsfl import fl as fl_module
+
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=122)
+        checkpoints = []
+        with mock.patch.object(
+            fl_module.LongitudinalSVDDetector,
+            "evaluate",
+            return_value=mock.Mock(accepted=False),
+        ):
+            result = run_experiment(
+                dataset,
+                ExperimentConfig(
+                    method="sm9rrs",
+                    malicious_ratio=0.0,
+                    num_clients=1,
+                    rounds=1,
+                    local_epochs=1,
+                    batch_size=16,
+                    crypto_mode="simulated",
+                    suspicion_remove_after=1,
+                    early_stop=False,
+                    seed=122,
+                ),
+                checkpoint_callback=checkpoints.append,
+            )
+
+        self.assertEqual(result.blacklisted_clients, ("client-0",))
+        terminal = checkpoints[-1]["crypto_state"]
+        self.assertIn(dataset.name, terminal.finalized_task_ids)
+        self.assertNotIn(dataset.name, {task.task_id for task in terminal.tasks})
 
 
 if __name__ == "__main__":

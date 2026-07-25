@@ -24,7 +24,9 @@ class CryptoOverheadBenchmarkTest(unittest.TestCase):
             self.assertEqual(len(result.summaries), 2)
             self.assertEqual(len(result.samples), 4)
             for summary in result.summaries:
+                self.assertEqual(summary.protocol_version, 2)
                 self.assertEqual(summary.verify_successes, 2)
+                self.assertGreaterEqual(summary.task_precompute_ms, 0.0)
                 self.assertGreaterEqual(summary.sign_mean_ms, 0.0)
                 self.assertGreaterEqual(summary.verify_mean_ms, 0.0)
             self.assertTrue((Path(tmp) / "summary.csv").exists())
@@ -35,7 +37,7 @@ class CryptoOverheadBenchmarkTest(unittest.TestCase):
             self.assertTrue((Path(tmp) / "plots" / "mean_operation_overhead.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "signature_overhead.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "verification_overhead.svg").exists())
-            self.assertTrue((Path(tmp) / "plots" / "setup_and_cache_overhead.svg").exists())
+            self.assertTrue((Path(tmp) / "plots" / "setup_and_precompute_overhead.svg").exists())
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from typing import Deque
 
 import numpy as np
 
-from .model import DEFAULT_SPEC, NUM_CLASSES
+from .model import NUM_CLASSES
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,7 @@ class DetectionResult:
     z_sigma: float = 0.0
     z_direction: float = 0.0
     sigma_delta: float = 0.0
-    direction_shift: float = 0.0
+    cosine_similarity: float = 0.0
 
 
 @dataclass
@@ -29,12 +29,13 @@ class _Feature:
 
 @dataclass
 class _TagState:
-    previous: _Feature | None = None
-    history: Deque[tuple[float, float]] = field(default_factory=deque)
+    last_observed: _Feature | None = None
+    observed_count: int = 0
+    normal_history: Deque[tuple[float, float]] = field(default_factory=deque)
 
 
 class LongitudinalSVDDetector:
-    """Per-link-tag SVD trajectory detector with sliding-window Z-scores."""
+    """Per-task-tag SVD trajectory detector with sliding-window Z-scores."""
 
     def __init__(
         self,
@@ -45,95 +46,190 @@ class LongitudinalSVDDetector:
         num_classes: int = NUM_CLASSES,
         matrix_offset: int | None = None,
         matrix_shape: tuple[int, int] | None = None,
+        expected_update_size: int | None = None,
         compute_backend: str = "numpy",
         device: str = "auto",
         eps: float = 1e-8,
     ) -> None:
-        if window_size < 1:
-            raise ValueError("window_size must be at least 1")
+        if isinstance(window_size, bool) or not isinstance(window_size, int):
+            raise TypeError("window_size must be an integer")
+        if window_size < 2:
+            raise ValueError("window_size must be at least 2")
+        if not np.isfinite(z_threshold) or z_threshold <= 0.0:
+            raise ValueError("z_threshold must be finite and positive")
+        if isinstance(num_classes, bool) or not isinstance(num_classes, int):
+            raise TypeError("num_classes must be an integer")
+        if num_classes < 1:
+            raise ValueError("num_classes must be at least 1")
+        if input_dim is not None and (
+            isinstance(input_dim, bool) or not isinstance(input_dim, int)
+        ):
+            raise TypeError("input_dim must be an integer")
+        if input_dim is not None and input_dim < 1:
+            raise ValueError("input_dim must be positive")
+        if expected_update_size is not None:
+            if isinstance(expected_update_size, bool) or not isinstance(
+                expected_update_size,
+                int,
+            ):
+                raise TypeError("expected_update_size must be an integer")
+            if expected_update_size < 1:
+                raise ValueError("expected_update_size must be positive")
+        if not np.isfinite(eps) or eps <= 0.0:
+            raise ValueError("eps must be finite and positive")
+        if input_dim is not None and (
+            matrix_offset is not None or matrix_shape is not None
+        ):
+            raise ValueError("input_dim cannot be combined with matrix_offset or matrix_shape")
         self.window_size = window_size
         self.z_threshold = z_threshold
         if input_dim is not None:
             self.matrix_offset = 0
             self.matrix_shape = (input_dim, num_classes)
+        elif matrix_offset is not None or matrix_shape is not None:
+            if matrix_shape is None:
+                raise ValueError("matrix_shape is required when matrix_offset is provided")
+            self.matrix_offset = 0 if matrix_offset is None else matrix_offset
+            self.matrix_shape = matrix_shape
         else:
-            self.matrix_offset = DEFAULT_SPEC.svd_matrix_offset if matrix_offset is None else matrix_offset
-            self.matrix_shape = DEFAULT_SPEC.svd_matrix_shape if matrix_shape is None else matrix_shape
+            # Word 4.3.3 defines G_pi^(r) from the complete one-dimensional
+            # model update.  Its concrete row count depends on the received
+            # update length and is therefore resolved in _extract().
+            self.matrix_offset = None
+            self.matrix_shape = None
+        if self.matrix_offset is not None:
+            if isinstance(self.matrix_offset, bool) or not isinstance(
+                self.matrix_offset,
+                int,
+            ):
+                raise TypeError("matrix_offset must be an integer")
+            if self.matrix_offset < 0:
+                raise ValueError("matrix_offset must be non-negative")
+        if self.matrix_shape is not None:
+            if len(self.matrix_shape) != 2 or any(
+                isinstance(size, bool)
+                or not isinstance(size, int)
+                or size < 1
+                for size in self.matrix_shape
+            ):
+                raise ValueError("matrix_shape must contain two positive dimensions")
+        self.num_classes = num_classes
+        self.expected_update_size = expected_update_size
         self.eps = eps
         self.compute_backend = compute_backend
         self.device = device
         self._states: dict[str, _TagState] = {}
 
     def evaluate(self, tag: str, update: np.ndarray) -> DetectionResult:
-        # link_tag 对应稳定客户端轨迹；窗口只保存相邻轮次的变化统计量。
+        # Tag_pi 对应稳定的任务内匿名轨迹；窗口只吸收通过检测的正常特征。
         feature = self._extract(update)
         state = self._states.setdefault(tag, _TagState())
-        if state.previous is None:
-            state.previous = feature
+        if state.last_observed is None:
+            state.last_observed = feature
+            state.observed_count = 1
             return DetectionResult(accepted=True, reason="initial_observation")
 
-        sigma_delta = abs(feature.sigma - state.previous.sigma)
-        cosine = _abs_cosine(feature.u0, state.previous.u0, self.eps)
-        direction_shift = 1.0 - cosine
+        # Word 4.3.3: Delta lambda is signed and rho is the original cosine,
+        # not |Delta lambda| or 1-|cosine|.
+        sigma_delta = feature.sigma - state.last_observed.sigma
+        cosine = _cosine(feature.u0, state.last_observed.u0, self.eps)
 
-        if len(state.history) >= self.window_size:
-            history = np.asarray(state.history, dtype=np.float64)
+        # The first K observations are the baseline period, so round K+1 is
+        # scored for the first time.  There are K-1 adjacent Delta/rho pairs
+        # at that point because the first observation has no predecessor.
+        should_score = state.observed_count >= self.window_size
+        if should_score and state.normal_history:
+            history = np.asarray(state.normal_history, dtype=np.float64)
             mu = np.mean(history, axis=0)
             std = np.std(history, axis=0)
-            sigma_scale = max(std[0], abs(mu[0]) * 0.25, 1e-6)
-            direction_scale = max(std[1], 0.05)
-            z_sigma = (sigma_delta - mu[0]) / sigma_scale
-            z_direction = (direction_shift - mu[1]) / direction_scale
-            sigma_alert = z_sigma > self.z_threshold and sigma_delta > max(mu[0] * 3.0, 1e-4)
-            direction_alert = z_direction > self.z_threshold and direction_shift > 0.35
-            if sigma_alert or direction_alert:
+            z_sigma = abs(sigma_delta - mu[0]) / max(float(std[0]), self.eps)
+            z_direction = abs(cosine - mu[1]) / max(float(std[1]), self.eps)
+            if z_sigma > self.z_threshold or z_direction > self.z_threshold:
+                # Delta/rho are defined against the immediately preceding
+                # communication round.  An anomalous feature is excluded from
+                # the normal-history window, but it is still the r-1 endpoint
+                # for the next round's adjacent-trajectory comparison.
+                state.last_observed = feature
+                state.observed_count += 1
                 return DetectionResult(
                     accepted=False,
                     reason="z_score_threshold",
                     z_sigma=float(z_sigma),
                     z_direction=float(z_direction),
                     sigma_delta=float(sigma_delta),
-                    direction_shift=float(direction_shift),
+                    cosine_similarity=float(cosine),
                 )
         else:
             z_sigma = 0.0
             z_direction = 0.0
 
-        state.history.append((float(sigma_delta), float(direction_shift)))
-        while len(state.history) > self.window_size:
-            state.history.popleft()
-        state.previous = feature
-        reason = "baseline_warmup" if len(state.history) < self.window_size else "accepted"
+        state.normal_history.append((float(sigma_delta), float(cosine)))
+        while len(state.normal_history) > self.window_size:
+            state.normal_history.popleft()
+        state.last_observed = feature
+        state.observed_count += 1
+        reason = "accepted" if should_score else "baseline_warmup"
         return DetectionResult(
             accepted=True,
             reason=reason,
             z_sigma=float(z_sigma),
             z_direction=float(z_direction),
             sigma_delta=float(sigma_delta),
-            direction_shift=float(direction_shift),
+            cosine_similarity=float(cosine),
         )
 
     def _extract(self, update: np.ndarray) -> _Feature:
-        rows, cols = self.matrix_shape
-        matrix_size = rows * cols
-        end = self.matrix_offset + matrix_size
-        if update.shape[0] < end:
-            raise ValueError(f"update length {update.shape[0]} is too short for SVD matrix ending at {end}")
-        matrix = np.asarray(update[self.matrix_offset:end], dtype=np.float32).reshape(rows, cols)
+        vector = np.asarray(update, dtype=np.float32)
+        if vector.ndim != 1:
+            raise ValueError("SVD update must be a one-dimensional vector")
+        if (
+            self.expected_update_size is not None
+            and vector.size != self.expected_update_size
+        ):
+            raise ValueError(
+                "SVD update length does not match the registered model"
+            )
+        if self.matrix_shape is None:
+            if vector.size == 0:
+                raise ValueError("SVD update must not be empty")
+            rows = (vector.size + self.num_classes - 1) // self.num_classes
+            padded = np.zeros(rows * self.num_classes, dtype=np.float32)
+            padded[: vector.size] = vector
+            matrix = padded.reshape(rows, self.num_classes)
+        else:
+            rows, cols = self.matrix_shape
+            matrix_size = rows * cols
+            assert self.matrix_offset is not None
+            end = self.matrix_offset + matrix_size
+            if vector.size < end:
+                raise ValueError(
+                    f"update length {vector.size} is too short for SVD matrix ending at {end}"
+                )
+            matrix = vector[self.matrix_offset:end].reshape(rows, cols)
         if _should_use_torch(self.compute_backend, self.device):
             from .torch_backend import torch_top_singular_feature
 
             sigma, u0 = torch_top_singular_feature(matrix, device=self.device)
-            return _Feature(sigma=sigma, u0=u0)
+            return _Feature(sigma=sigma, u0=_canonical_direction(u0))
         from .torch_backend import numpy_top_singular_feature
 
         sigma, u0 = numpy_top_singular_feature(matrix)
-        return _Feature(sigma=sigma, u0=u0)
+        return _Feature(sigma=sigma, u0=_canonical_direction(u0))
 
 
-def _abs_cosine(a: np.ndarray, b: np.ndarray, eps: float) -> float:
+def _cosine(a: np.ndarray, b: np.ndarray, eps: float) -> float:
     denom = max(float(np.linalg.norm(a) * np.linalg.norm(b)), eps)
-    return abs(float(np.dot(a, b) / denom))
+    return float(np.dot(a, b) / denom)
+
+
+def _canonical_direction(direction: np.ndarray) -> np.ndarray:
+    """Choose one deterministic representative of the SVD sign ambiguity."""
+
+    vector = np.asarray(direction, dtype=np.float32)
+    if vector.ndim != 1 or vector.size == 0:
+        raise ValueError("first singular vector must be non-empty and one-dimensional")
+    pivot = int(np.argmax(np.abs(vector)))
+    return -vector if vector[pivot] < 0.0 else vector
 
 
 def _should_use_torch(compute_backend: str, device: str) -> bool:

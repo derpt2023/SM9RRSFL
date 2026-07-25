@@ -10,6 +10,7 @@ import ctypes
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pickle
@@ -147,7 +148,7 @@ def main() -> None:
             print(f"skipped {_format_config_key(config)} reason={reason}", flush=True)
     if any(config.method == "sm9rrs" for config in configs):
         print(f"sm3_backend={sm3_backend_name()}", flush=True)
-        if args.crypto_mode == "sm9" and args.accumulator_mode == "dynamic":
+        if args.crypto_mode == "sm9":
             print(f"rrs_backend={rrs_backend_name()}", flush=True)
     checkpoint_dir = output_dir / ".checkpoints" if args.resume else None
     # 若上次恰好在“结果快照已落盘、检查点尚未删除”的极短窗口中退出，
@@ -343,14 +344,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--attack-start-round",
         type=int,
         default=0,
-        help="0 means detector_window + 2, leaving a benign SVD baseline window.",
+        help="0 means K + 2, leaving K benign SVD baseline observations.",
     )
-    parser.add_argument("--detector-window", type=int, default=3)
+    parser.add_argument(
+        "--K",
+        "--k",
+        "--detector-window",
+        dest="detector_window",
+        type=int,
+        default=3,
+        help=(
+            "Paper parameter K: number of initial observations used to build "
+            "each task-tag SVD baseline. Scoring starts at observation K + 1."
+        ),
+    )
     parser.add_argument("--z-threshold", type=float, default=3.0)
-    parser.add_argument("--ring-size", type=int, default=5)
     parser.add_argument("--crypto-mode", choices=["sm9", "simulated"], default="sm9")
-    parser.add_argument("--accumulator-mode", choices=["dynamic", "none"], default="dynamic")
-    parser.add_argument("--strict-ring-verify", action="store_true")
+    parser.add_argument("--dkg-threshold", type=int, default=2)
+    parser.add_argument("--dkg-nodes", type=int, default=3)
     parser.add_argument("--no-early-stop", action="store_true")
     parser.add_argument(
         "--eval-interval",
@@ -368,7 +379,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--suspicion-penalty-factor", type=float, default=0.5)
     parser.add_argument("--suspicion-recovery-factor", type=float, default=2.0)
-    parser.add_argument("--suspicion-remove-after", type=int, default=3)
+    parser.add_argument(
+        "--C_tol",
+        "--c-tol",
+        "--suspicion-remove-after",
+        dest="suspicion_remove_after",
+        type=int,
+        default=3,
+        help=(
+            "Paper parameter C_tol: number of consecutive suspicious rounds "
+            "required before threshold trace and revocation are requested."
+        ),
+    )
     parser.add_argument("--no-visualizations", action="store_true")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress and ETA output.")
     parser.add_argument(
@@ -405,8 +427,20 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         (args.lr_decay > 0.0, "--lr-decay must be positive"),
         (0.0 <= args.target_error <= 1.0, "--target-error must be in [0, 1]"),
         (args.dirichlet_alpha > 0.0, "--dirichlet-alpha must be positive"),
-        (args.detector_window >= 1, "--detector-window must be at least 1"),
-        (args.ring_size >= 1, "--ring-size must be at least 1"),
+        (
+            args.attack_start_round >= 0,
+            "--attack-start-round must be non-negative",
+        ),
+        (args.detector_window >= 2, "--K must be at least 2"),
+        (
+            math.isfinite(args.z_threshold) and args.z_threshold > 0.0,
+            "--z-threshold must be finite and positive",
+        ),
+        (args.suspicion_remove_after >= 1, "--C_tol must be at least 1"),
+        (
+            1 <= args.dkg_threshold <= args.dkg_nodes,
+            "--dkg-threshold must satisfy 1 <= threshold <= --dkg-nodes",
+        ),
         (args.eval_interval >= 1, "--eval-interval must be at least 1"),
         (
             args.train_samples is None or args.train_samples >= 1,
@@ -450,10 +484,9 @@ def build_experiment_configs(args: argparse.Namespace) -> list[ExperimentConfig]
                             attack_start_round=args.attack_start_round,
                             detector_window=args.detector_window,
                             z_threshold=args.z_threshold,
-                            ring_size=args.ring_size,
                             crypto_mode=args.crypto_mode,
-                            accumulator_mode=args.accumulator_mode,
-                            strict_ring_verify=args.strict_ring_verify,
+                            dkg_threshold=args.dkg_threshold,
+                            dkg_nodes=args.dkg_nodes,
                             early_stop=not args.no_early_stop,
                             eval_interval=args.eval_interval,
                             sm9_workers=args.sm9_workers,
@@ -1427,10 +1460,9 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             attack_start_round=int(row["attack_start_round"]),
             detector_window=int(row["detector_window"]),
             z_threshold=float(row["z_threshold"]),
-            ring_size=int(row["ring_size"]),
             crypto_mode=row["crypto_mode"],
-            accumulator_mode=row.get("accumulator_mode") or "dynamic",
-            strict_ring_verify=_parse_bool(row["strict_ring_verify"]),
+            dkg_threshold=int(row.get("dkg_threshold") or 2),
+            dkg_nodes=int(row.get("dkg_nodes") or 3),
             early_stop=_parse_bool(row.get("early_stop", "True")),
             eval_interval=int(row.get("eval_interval") or 1),
             sm9_workers=int(row.get("sm9_workers") or 1),

@@ -157,6 +157,9 @@ class ExperimentOutputDirTest(unittest.TestCase):
             ["--batch-size", "0"],
             ["--lr", "0"],
             ["--dirichlet-alpha", "0"],
+            ["--attack-start-round", "-1"],
+            ["--K", "1"],
+            ["--C_tol", "0"],
         )
         for command in invalid_commands:
             with self.subTest(command=command):
@@ -316,6 +319,25 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
         self.assertEqual(args.eval_interval, 5)
         self.assertEqual(args.sm9_workers, 3)
+
+    def test_paper_k_and_c_tol_cli_names_map_to_internal_config_fields(self):
+        args = parse_args(["--K", "10", "--C_tol", "6"])
+        config = build_experiment_configs(args)[0]
+
+        self.assertEqual(args.detector_window, 10)
+        self.assertEqual(args.suspicion_remove_after, 6)
+        self.assertEqual(config.detector_window, 10)
+        self.assertEqual(config.suspicion_remove_after, 6)
+
+        legacy = parse_args(
+            ["--detector-window", "8", "--suspicion-remove-after", "5"]
+        )
+        self.assertEqual(legacy.detector_window, 8)
+        self.assertEqual(legacy.suspicion_remove_after, 5)
+
+        lowercase = parse_args(["--k", "7", "--c-tol", "4"])
+        self.assertEqual(lowercase.detector_window, 7)
+        self.assertEqual(lowercase.suspicion_remove_after, 4)
 
     def test_sm9_workers_auto_is_bounded_by_client_count(self):
         args = parse_args(["--num-clients", "4", "--sm9-workers", "auto"])

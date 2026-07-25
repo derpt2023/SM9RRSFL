@@ -10,6 +10,8 @@ __all__ = [
     "fl",
     "mnist",
     "model",
+    "sm9_backend",
     "svd_detector",
+    "threshold",
     "weighting",
 ]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from html import escape
 import json
 from pathlib import Path
@@ -27,10 +27,9 @@ class CryptoOverheadConfig:
     warmup: int = 3
     update_size: int = 4096
     crypto_mode: str = "sm9"
-    accumulator_mode: str = "dynamic"
-    ring_size: int = 5
-    strict_ring_verify: bool = False
-    precompute_sign_cache: bool = True
+    dkg_threshold: int = 2
+    dkg_nodes: int = 3
+    precompute_task_material: bool = True
     task_id: str = "crypto-overhead"
     output_dir: Path = DEFAULT_OUTPUT_DIR
     visualizations: bool = True
@@ -40,13 +39,13 @@ class CryptoOverheadConfig:
 @dataclass(frozen=True)
 class ClientCountSummary:
     crypto_mode: str
-    accumulator_mode: str
+    protocol_version: int
     num_clients: int
     iterations: int
     warmup: int
     update_size: int
     setup_ms: float
-    sign_cache_ms: float
+    task_precompute_ms: float
     sign_mean_ms: float
     sign_median_ms: float
     sign_p95_ms: float
@@ -61,7 +60,7 @@ class ClientCountSummary:
 @dataclass(frozen=True)
 class OperationSample:
     crypto_mode: str
-    accumulator_mode: str
+    protocol_version: int
     num_clients: int
     iteration: int
     signer: str
@@ -95,10 +94,9 @@ def parse_args() -> CryptoOverheadConfig:
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--update-size", type=int, default=4096)
     parser.add_argument("--crypto-mode", choices=["sm9", "simulated"], default="sm9")
-    parser.add_argument("--accumulator-mode", choices=["dynamic", "none"], default="dynamic")
-    parser.add_argument("--ring-size", type=int, default=5)
-    parser.add_argument("--strict-ring-verify", action="store_true")
-    parser.add_argument("--no-precompute-sign-cache", action="store_true")
+    parser.add_argument("--dkg-threshold", type=int, default=2)
+    parser.add_argument("--dkg-nodes", type=int, default=3)
+    parser.add_argument("--no-task-precompute", action="store_true")
     parser.add_argument("--task-id", default="crypto-overhead")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--no-visualizations", action="store_true")
@@ -110,10 +108,9 @@ def parse_args() -> CryptoOverheadConfig:
         warmup=args.warmup,
         update_size=args.update_size,
         crypto_mode=args.crypto_mode,
-        accumulator_mode=args.accumulator_mode,
-        ring_size=args.ring_size,
-        strict_ring_verify=args.strict_ring_verify,
-        precompute_sign_cache=not args.no_precompute_sign_cache,
+        dkg_threshold=args.dkg_threshold,
+        dkg_nodes=args.dkg_nodes,
+        precompute_task_material=not args.no_task_precompute,
         task_id=args.task_id,
         output_dir=args.output_dir,
         visualizations=not args.no_visualizations,
@@ -140,26 +137,29 @@ def benchmark_client_count(
     setup_started = perf_counter()
     context = SM9RRSContext(
         list(client_ids),
-        ring_size=config.ring_size,
         crypto_mode=config.crypto_mode,
-        accumulator_mode=config.accumulator_mode,
-        strict_ring_verify=config.strict_ring_verify,
+        dkg_threshold=config.dkg_threshold,
+        dkg_nodes=config.dkg_nodes,
         seed=config.seed,
     )
     setup_ms = _elapsed_ms(setup_started)
 
     rng = np.random.default_rng(config.seed + num_clients)
     update = rng.normal(size=config.update_size).astype(np.float32)
-    cache_ms = 0.0
-    if config.precompute_sign_cache:
-        cache_ms = precompute_sign_cache(context, client_ids, update, config)
+    task_precompute_ms = 0.0
+    if config.precompute_task_material:
+        task_precompute_ms = precompute_task_material(context, client_ids, config)
 
     for index in range(config.warmup):
         identity = client_ids[index % num_clients]
         packet = build_unsigned_packet(context, identity, update, config, round_id=index + 1)
-        signature = context._sign(identity, context._message_for(packet))
-        signed_packet = replace(packet, signature=signature)
-        if not context.verify_packet(signed_packet, update):
+        signed_packet = context.sign_packet(identity, packet)
+        if not context.verify_packet(
+            signed_packet,
+            update,
+            expected_task_id=config.task_id,
+            expected_round_id=index + 1,
+        ):
             raise RuntimeError(f"warmup verification failed for {identity}")
 
     sign_ms_values: list[float] = []
@@ -169,15 +169,16 @@ def benchmark_client_count(
         identity = client_ids[index % num_clients]
         round_id = config.warmup + index + 1
         packet = build_unsigned_packet(context, identity, update, config, round_id=round_id)
-        message = context._message_for(packet)
-
         sign_started = perf_counter()
-        signature = context._sign(identity, message)
+        signed_packet = context.sign_packet(identity, packet)
         sign_ms = _elapsed_ms(sign_started)
-
-        signed_packet = replace(packet, signature=signature)
         verify_started = perf_counter()
-        verify_ok = context.verify_packet(signed_packet, update)
+        verify_ok = context.verify_packet(
+            signed_packet,
+            update,
+            expected_task_id=config.task_id,
+            expected_round_id=round_id,
+        )
         verify_ms = _elapsed_ms(verify_started)
         if not verify_ok:
             raise RuntimeError(f"verification failed for {identity}")
@@ -187,7 +188,7 @@ def benchmark_client_count(
         samples.append(
             OperationSample(
                 crypto_mode=config.crypto_mode,
-                accumulator_mode=config.accumulator_mode,
+                protocol_version=signed_packet.protocol_version,
                 num_clients=num_clients,
                 iteration=index + 1,
                 signer=identity,
@@ -199,13 +200,13 @@ def benchmark_client_count(
 
     summary = ClientCountSummary(
         crypto_mode=config.crypto_mode,
-        accumulator_mode=config.accumulator_mode,
+        protocol_version=2,
         num_clients=num_clients,
         iterations=config.iterations,
         warmup=config.warmup,
         update_size=config.update_size,
         setup_ms=setup_ms,
-        sign_cache_ms=cache_ms,
+        task_precompute_ms=task_precompute_ms,
         sign_mean_ms=mean(sign_ms_values),
         sign_median_ms=median(sign_ms_values),
         sign_p95_ms=_percentile(sign_ms_values, 0.95),
@@ -219,16 +220,14 @@ def benchmark_client_count(
     return summary, samples
 
 
-def precompute_sign_cache(
+def precompute_task_material(
     context: SM9RRSContext,
     client_ids: tuple[str, ...],
-    update: np.ndarray,
     config: CryptoOverheadConfig,
 ) -> float:
     started = perf_counter()
-    for index, identity in enumerate(client_ids):
-        packet = build_unsigned_packet(context, identity, update, config, round_id=index + 1)
-        context._sign(identity, context._message_for(packet))
+    context.register_task(config.task_id, client_ids)
+    context.precompute_task_material(config.task_id, client_ids)
     return _elapsed_ms(started)
 
 
@@ -318,15 +317,15 @@ def generate_visualizations(summaries: list[ClientCountSummary], output_dir: str
     )
     generated.append(("验签开销", verify_path.relative_to(out).as_posix()))
 
-    setup_path = plot_dir / "setup_and_cache_overhead.svg"
+    setup_path = plot_dir / "setup_and_precompute_overhead.svg"
     _write_text(
         setup_path,
         _grouped_bar_chart(
-            title="初始化与签名缓存预热开销",
+            title="系统初始化与任务材料预计算开销",
             values={
                 str(row.num_clients): {
                     "上下文初始化": row.setup_ms,
-                    "签名缓存预热": row.sign_cache_ms,
+                    "任务材料预计算": row.task_precompute_ms,
                 }
                 for row in summaries
             },
@@ -334,7 +333,7 @@ def generate_visualizations(summaries: list[ClientCountSummary], output_dir: str
             y_label="耗时（ms）",
         ),
     )
-    generated.append(("初始化与缓存预热开销", setup_path.relative_to(out).as_posix()))
+    generated.append(("初始化与任务预计算开销", setup_path.relative_to(out).as_posix()))
 
     dashboard = out / "visualizations.html"
     _write_text(dashboard, _dashboard_html(summaries, generated))
@@ -352,14 +351,14 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
 
 def print_summary(summaries: list[ClientCountSummary]) -> None:
     print(
-        "clients setup_ms sign_cache_ms sign_mean_ms sign_p95_ms "
+        "clients setup_ms task_precompute_ms sign_mean_ms sign_p95_ms "
         "verify_mean_ms verify_p95_ms"
     )
     for row in summaries:
         print(
             f"{row.num_clients:7d} "
             f"{row.setup_ms:8.2f} "
-            f"{row.sign_cache_ms:13.2f} "
+            f"{row.task_precompute_ms:18.2f} "
             f"{row.sign_mean_ms:12.2f} "
             f"{row.sign_p95_ms:11.2f} "
             f"{row.verify_mean_ms:14.2f} "
@@ -485,7 +484,7 @@ def _dashboard_html(
 ) -> str:
     if summaries:
         first = summaries[0]
-        mode = f"{first.crypto_mode} / {first.accumulator_mode}"
+        mode = f"{first.crypto_mode} / protocol-v{first.protocol_version}"
         detail = (
             f"迭代次数 {first.iterations}，预热 {first.warmup}，"
             f"更新向量长度 {first.update_size}。"
@@ -576,8 +575,8 @@ def _validate_config(config: CryptoOverheadConfig) -> None:
         raise ValueError("warmup must be non-negative")
     if config.update_size < 1:
         raise ValueError("update_size must be positive")
-    if config.ring_size < 1:
-        raise ValueError("ring_size must be positive")
+    if not 1 <= config.dkg_threshold <= config.dkg_nodes:
+        raise ValueError("dkg_threshold must satisfy 1 <= threshold <= dkg_nodes")
 
 
 def _elapsed_ms(started: float) -> float:
