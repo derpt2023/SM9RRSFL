@@ -157,6 +157,22 @@ class ExperimentOutputDirTest(unittest.TestCase):
             ["--batch-size", "0"],
             ["--lr", "0"],
             ["--dirichlet-alpha", "0"],
+            ["--attack-scale", "0"],
+            ["--attack-boost", "0"],
+            ["--attack-epochs", "0"],
+            ["--attack-stealth-steps", "0"],
+            ["--attack-distance-weight", "-1"],
+            ["--attack-source-label", "-1"],
+            ["--attack-target-label", "10"],
+            ["--attack-target-count", "0"],
+            [
+                "--attack",
+                "alternating_minimization",
+                "--attack-source-label",
+                "5",
+                "--attack-target-label",
+                "5",
+            ],
             ["--attack-start-round", "-1"],
             ["--K", "1"],
             ["--C_tol", "0"],
@@ -274,6 +290,68 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(args.batch_size, 32)
         self.assertEqual(args.lr, 0.05)
         self.assertEqual(args.lr_decay, 1.0)
+        self.assertEqual(args.attack, "alternating_minimization")
+        self.assertEqual(args.attack_boost, 10.0)
+        self.assertEqual(args.attack_epochs, 10)
+        self.assertEqual(args.attack_stealth_steps, 10)
+        self.assertEqual(args.attack_distance_weight, 1e-4)
+        self.assertEqual(args.attack_source_label, 5)
+        self.assertEqual(args.attack_target_label, 7)
+        self.assertEqual(args.attack_target_count, 1)
+
+    def test_alternating_alias_and_parameters_map_to_config(self):
+        args = parse_args(
+            [
+                "--attack",
+                "alternating",
+                "--attack-boost",
+                "12",
+                "--attack-epochs",
+                "3",
+                "--attack-stealth-steps",
+                "4",
+                "--attack-distance-weight",
+                "0.002",
+                "--attack-source-label",
+                "2",
+                "--attack-target-label",
+                "9",
+                "--attack-target-count",
+                "6",
+            ]
+        )
+        config = build_experiment_configs(args)[0]
+
+        self.assertEqual(args.attack, "alternating_minimization")
+        self.assertEqual(config.attack, "alternating_minimization")
+        self.assertEqual(config.attack_boost, 12.0)
+        self.assertEqual(config.attack_epochs, 3)
+        self.assertEqual(config.attack_stealth_steps, 4)
+        self.assertEqual(config.attack_distance_weight, 0.002)
+        self.assertEqual(config.attack_source_label, 2)
+        self.assertEqual(config.attack_target_label, 9)
+        self.assertEqual(config.attack_target_count, 6)
+
+    def test_attack_scale_is_rejected_for_alternating_minimization(self):
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", new=stderr), self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--attack",
+                    "alternating_minimization",
+                    "--attack-scale",
+                    "100",
+                ]
+            )
+        self.assertIn(
+            "--attack-scale does not control alternating minimization",
+            stderr.getvalue(),
+        )
+
+        sign_flip = parse_args(
+            ["--attack", "sign_flip", "--attack-scale", "100"]
+        )
+        self.assertEqual(sign_flip.attack_scale, 100.0)
 
     def test_cifar10_uses_paper_training_defaults(self):
         args = parse_args(["--dataset", "cifar10"])

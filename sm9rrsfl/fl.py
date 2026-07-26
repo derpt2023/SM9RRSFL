@@ -9,7 +9,7 @@ from typing import Any, Callable
 import numpy as np
 
 from .aggregation import KrumResult, fedavg, krum, torch_krum, torch_weighted_fedavg, weighted_fedavg
-from .attacks import poison_update
+from .attacks import is_alternating_minimization_attack, poison_update
 from .crypto import (
     ASVerifier,
     AuditorService,
@@ -19,7 +19,14 @@ from .crypto import (
 )
 from .ding13_detector import Ding13TrajectoryDetector
 from .datasets import ImageDataset, partition_clients
-from .model import accuracy, init_params, local_train_delta, model_spec_for_dataset
+from .model import (
+    accuracy,
+    alternating_minimization_delta,
+    init_params,
+    local_train_delta,
+    model_spec_for_dataset,
+    targeted_metrics,
+)
 from .svd_detector import LongitudinalSVDDetector
 from .weighting import SuspicionWeightManager
 
@@ -39,8 +46,15 @@ class ExperimentConfig:
     device: str = "auto"
     partition: str = "iid"
     dirichlet_alpha: float = 0.5
-    attack: str = "alternating"
+    attack: str = "alternating_minimization"
     attack_scale: float = 5.0
+    attack_boost: float = 10.0
+    attack_epochs: int = 10
+    attack_stealth_steps: int = 10
+    attack_distance_weight: float = 1e-4
+    attack_source_label: int = 5
+    attack_target_label: int = 7
+    attack_target_count: int = 1
     attack_start_round: int = 0
     detector_window: int = 3
     z_threshold: float = 3.0
@@ -69,6 +83,8 @@ class RoundRecord:
     true_positive_revocations: int
     false_positive_revocations: int
     krum_selected_client: str
+    attack_target_success_rate: float | None = None
+    attack_target_confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -103,10 +119,21 @@ class ExperimentResult:
     stage_timings: StageTimings = field(default_factory=StageTimings)
 
     def summary_dict(self) -> dict[str, object]:
+        final_record = self.records[-1] if self.records else None
         return {
             **asdict(self.config),
             "final_accuracy": self.final_accuracy,
             "final_error": self.final_error,
+            "final_attack_target_success_rate": (
+                final_record.attack_target_success_rate
+                if final_record is not None
+                else None
+            ),
+            "final_attack_target_confidence": (
+                final_record.attack_target_confidence
+                if final_record is not None
+                else None
+            ),
             "stopped_round": self.stopped_round,
             "malicious_clients": ",".join(self.malicious_clients),
             "blacklisted_clients": ",".join(self.blacklisted_clients),
@@ -163,8 +190,9 @@ def run_experiment(
 ) -> ExperimentResult:
     """运行一个完整联邦学习配置。
 
-    主流程按“客户端本地训练 -> 投毒 -> 密码验证/检测 -> 聚合 -> 评估”推进，
-    StageTimings 对这些阶段分别计时，避免只看到总时长却无法定位瓶颈。
+    主流程按“客户端本地优化/投毒 -> 密码验证/检测 -> 聚合 -> 评估”推进。
+    交替最小化攻击发生在恶意客户端的优化过程中，其余攻击仍是训练后的
+    更新变换；StageTimings 对这些阶段分别计时。
     """
 
     if config.method not in {"sm9rrs", "krum", "ding13", "fedavg"}:
@@ -187,6 +215,43 @@ def run_experiment(
         raise ValueError("batch_size must be at least 1")
     if config.lr <= 0.0 or config.lr_decay <= 0.0:
         raise ValueError("lr and lr_decay must be positive")
+    if config.attack not in {
+        "none",
+        "sign_flip",
+        "gaussian",
+        "alternating",
+        "alternating_minimization",
+    }:
+        raise ValueError(
+            "attack must be one of: none, sign_flip, gaussian, "
+            "alternating_minimization (or legacy alias alternating)"
+        )
+    if not np.isfinite(config.attack_scale) or config.attack_scale <= 0.0:
+        raise ValueError("attack_scale must be finite and positive")
+    if not np.isfinite(config.attack_boost) or config.attack_boost <= 0.0:
+        raise ValueError("attack_boost must be finite and positive")
+    if config.attack_epochs < 1:
+        raise ValueError("attack_epochs must be at least 1")
+    if config.attack_stealth_steps < 1:
+        raise ValueError("attack_stealth_steps must be at least 1")
+    if (
+        not np.isfinite(config.attack_distance_weight)
+        or config.attack_distance_weight < 0.0
+    ):
+        raise ValueError("attack_distance_weight must be finite and non-negative")
+    if config.attack_target_count < 1:
+        raise ValueError("attack_target_count must be at least 1")
+    if not 0 <= config.attack_source_label < dataset.num_classes:
+        raise ValueError("attack_source_label is outside the dataset class range")
+    if not 0 <= config.attack_target_label < dataset.num_classes:
+        raise ValueError("attack_target_label is outside the dataset class range")
+    if (
+        is_alternating_minimization_attack(config.attack)
+        and config.attack_source_label == config.attack_target_label
+    ):
+        raise ValueError(
+            "alternating minimization requires different source and target labels"
+        )
     if config.attack_start_round < 0:
         raise ValueError("attack_start_round must be non-negative")
     if config.partition == "dirichlet" and config.dirichlet_alpha <= 0.0:
@@ -214,6 +279,15 @@ def run_experiment(
     attack_start = config.attack_start_round or (detector_window + 2)
 
     model_spec = model_spec_for_dataset(dataset)
+    attack_target_indices = (
+        _select_attack_target_indices(
+            dataset,
+            config,
+            required=bool(malicious_set),
+        )
+        if is_alternating_minimization_attack(config.attack)
+        else np.empty(0, dtype=np.int64)
+    )
     torch_context = _maybe_torch_context(dataset, client_indices, model_spec, config)
     params = init_params(seed=config.seed, spec=model_spec)
     training_seconds = 0.0
@@ -229,6 +303,17 @@ def run_experiment(
     if resume_state is None:
         evaluation_started = perf_counter()
         initial_accuracy = _evaluate_accuracy(params, dataset, model_spec, config, torch_context)
+        (
+            initial_target_success,
+            initial_target_confidence,
+        ) = _evaluate_attack_target_metrics(
+            params,
+            dataset,
+            attack_target_indices,
+            model_spec,
+            config,
+            torch_context,
+        )
         evaluation_seconds = perf_counter() - evaluation_started
         records = [
             _make_record(
@@ -241,6 +326,8 @@ def run_experiment(
                 tp=0,
                 fp=0,
                 krum_selected="",
+                attack_target_success=initial_target_success,
+                attack_target_confidence=initial_target_confidence,
             )
         ]
     else:
@@ -420,20 +507,36 @@ def run_experiment(
             if identity in blacklisted:
                 continue
             indices = client_indices[client_idx]
-            training_started = perf_counter()
-            delta, stats = _local_train_client_delta(
-                params,
-                dataset,
-                indices,
-                client_idx=client_idx,
-                round_id=round_id,
-                model_spec=model_spec,
-                config=config,
-                torch_context=torch_context,
-            )
-            training_seconds += perf_counter() - training_started
             attack_active = identity in malicious_set and round_id >= attack_start
-            if attack_active:
+            if attack_active and is_alternating_minimization_attack(config.attack):
+                attack_started = perf_counter()
+                delta, stats = _alternating_minimization_client_delta(
+                    params,
+                    dataset,
+                    indices,
+                    attack_target_indices=attack_target_indices,
+                    client_idx=client_idx,
+                    round_id=round_id,
+                    model_spec=model_spec,
+                    config=config,
+                    torch_context=torch_context,
+                )
+                attack_seconds += perf_counter() - attack_started
+            else:
+                training_started = perf_counter()
+                delta, stats = _local_train_client_delta(
+                    params,
+                    dataset,
+                    indices,
+                    client_idx=client_idx,
+                    round_id=round_id,
+                    model_spec=model_spec,
+                    config=config,
+                    torch_context=torch_context,
+                )
+                training_seconds += perf_counter() - training_started
+
+            if attack_active and not is_alternating_minimization_attack(config.attack):
                 attack_started = perf_counter()
                 delta = _poison_client_update(
                     delta,
@@ -650,6 +753,17 @@ def run_experiment(
         if should_evaluate:
             evaluation_started = perf_counter()
             acc = _evaluate_accuracy(params, dataset, model_spec, config, torch_context)
+            (
+                target_success,
+                target_confidence,
+            ) = _evaluate_attack_target_metrics(
+                params,
+                dataset,
+                attack_target_indices,
+                model_spec,
+                config,
+                torch_context,
+            )
             evaluation_seconds += perf_counter() - evaluation_started
             records.append(
                 _make_record(
@@ -662,6 +776,8 @@ def run_experiment(
                     tp=true_positive_revocations,
                     fp=false_positive_revocations,
                     krum_selected=krum_selected,
+                    attack_target_success=target_success,
+                    attack_target_confidence=target_confidence,
                 )
             )
             can_stop = not malicious_clients or round_id >= attack_start
@@ -949,6 +1065,39 @@ def _evaluate_accuracy(params, dataset, model_spec, config: ExperimentConfig, to
     )
 
 
+def _evaluate_attack_target_metrics(
+    params,
+    dataset: ImageDataset,
+    attack_target_indices: np.ndarray,
+    model_spec,
+    config: ExperimentConfig,
+    torch_context,
+) -> tuple[float | None, float | None]:
+    """Evaluate the targeted objective separately from clean test accuracy."""
+
+    if len(attack_target_indices) == 0:
+        return None, None
+    if torch_context is not None:
+        return torch_context.targeted_metrics(
+            params,
+            target_indices=attack_target_indices,
+            target_label=config.attack_target_label,
+        )
+    labels = np.full(
+        len(attack_target_indices),
+        config.attack_target_label,
+        dtype=np.int64,
+    )
+    return targeted_metrics(
+        params,
+        dataset.x_test[attack_target_indices],
+        labels,
+        spec=model_spec,
+        compute_backend=config.compute_backend,
+        device=config.device,
+    )
+
+
 def _params_for_checkpoint(params) -> np.ndarray:
     """把可能驻留 GPU 的全局参数转换为可移植的 float32 检查点。"""
 
@@ -1040,6 +1189,95 @@ def _local_train_client_delta(
         compute_backend=config.compute_backend,
         device=config.device,
     )
+
+
+def _alternating_minimization_client_delta(
+    params: np.ndarray,
+    dataset: ImageDataset,
+    indices: np.ndarray,
+    *,
+    attack_target_indices: np.ndarray,
+    client_idx: int,
+    round_id: int,
+    model_spec,
+    config: ExperimentConfig,
+    torch_context,
+):
+    """Optimize the target and stealth objectives inside malicious training."""
+
+    if len(attack_target_indices) == 0:
+        raise ValueError(
+            "alternating minimization has no selected auxiliary target samples"
+        )
+    seed = config.seed + round_id * 1009 + client_idx
+    lr = config.lr * (config.lr_decay ** (round_id - 1))
+    if torch_context is not None:
+        return torch_context.alternating_minimization_delta_resident(
+            params,
+            client_idx=client_idx,
+            target_indices=attack_target_indices,
+            target_label=config.attack_target_label,
+            lr=lr,
+            attack_epochs=config.attack_epochs,
+            batch_size=config.batch_size,
+            stealth_steps=config.attack_stealth_steps,
+            boost=config.attack_boost,
+            distance_weight=config.attack_distance_weight,
+            seed=seed,
+        )
+
+    target_labels = np.full(
+        len(attack_target_indices),
+        config.attack_target_label,
+        dtype=np.int64,
+    )
+    return alternating_minimization_delta(
+        params,
+        dataset.x_train[indices],
+        dataset.y_train[indices],
+        dataset.x_test[attack_target_indices],
+        target_labels,
+        lr=lr,
+        attack_epochs=config.attack_epochs,
+        batch_size=config.batch_size,
+        stealth_steps=config.attack_stealth_steps,
+        boost=config.attack_boost,
+        distance_weight=config.attack_distance_weight,
+        seed=seed,
+        spec=model_spec,
+    )
+
+
+def _select_attack_target_indices(
+    dataset: ImageDataset,
+    config: ExperimentConfig,
+    *,
+    required: bool = True,
+) -> np.ndarray:
+    """Select deterministic held-out auxiliary samples for attack/evaluation.
+
+    A no-malicious control run records the same targeted metrics whenever its
+    limited test split contains enough source-class samples.  An active attack
+    must have the requested auxiliary set and therefore fails explicitly.
+    """
+
+    labels = np.asarray(dataset.y_test, dtype=np.int64)
+    candidates = np.flatnonzero(labels == config.attack_source_label)
+    if len(candidates) < config.attack_target_count:
+        if not required:
+            return np.empty(0, dtype=np.int64)
+        raise ValueError(
+            "not enough held-out source-label samples for alternating minimization: "
+            f"label={config.attack_source_label}, requested={config.attack_target_count}, "
+            f"available={len(candidates)}"
+        )
+    rng = np.random.default_rng(config.seed + 271_828)
+    chosen = rng.choice(
+        candidates,
+        size=config.attack_target_count,
+        replace=False,
+    )
+    return np.sort(np.asarray(chosen, dtype=np.int64))
 
 
 def _fedavg(
@@ -1172,6 +1410,8 @@ def _make_record(
     tp: int,
     fp: int,
     krum_selected: str,
+    attack_target_success: float | None = None,
+    attack_target_confidence: float | None = None,
 ) -> RoundRecord:
     return RoundRecord(
         method=config.method,
@@ -1185,4 +1425,14 @@ def _make_record(
         true_positive_revocations=tp,
         false_positive_revocations=fp,
         krum_selected_client=krum_selected,
+        attack_target_success_rate=(
+            float(attack_target_success)
+            if attack_target_success is not None
+            else None
+        ),
+        attack_target_confidence=(
+            float(attack_target_confidence)
+            if attack_target_confidence is not None
+            else None
+        ),
     )

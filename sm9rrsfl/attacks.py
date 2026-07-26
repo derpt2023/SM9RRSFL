@@ -5,18 +5,31 @@ from __future__ import annotations
 import numpy as np
 
 
-_ALTERNATING_TRIGGER_SHARDS = 8
-_ALTERNATING_TRIGGER_SEED = 104729
+ALTERNATING_MINIMIZATION_ATTACKS = frozenset(
+    {"alternating", "alternating_minimization"}
+)
+
+
+def is_alternating_minimization_attack(attack: str) -> bool:
+    """Return whether ``attack`` needs the in-training Bhagoji attack path."""
+
+    return str(attack).strip().lower() in ALTERNATING_MINIMIZATION_ATTACKS
 
 
 def poison_update(
     update: np.ndarray,
     *,
-    attack: str = "alternating",
+    attack: str = "none",
     scale: float = 5.0,
     seed: int = 0,
 ) -> np.ndarray:
-    """根据实验配置生成恶意客户端更新，输入原始更新保持不变。"""
+    """Apply attacks that can be expressed as a post-training update transform.
+
+    Bhagoji's alternating-minimization attack is intentionally rejected here:
+    it needs the model, the client's benign data and target-labelled auxiliary
+    samples, so treating it as a vector perturbation would silently implement a
+    different attack.
+    """
 
     if attack == "none":
         return update.astype(np.float32, copy=True)
@@ -29,33 +42,12 @@ def poison_update(
             std = float(np.linalg.norm(update) / max(1, update.size) ** 0.5)
         std = max(std, 1e-3)
         return rng.normal(0.0, scale * std, size=update.shape).astype(np.float32)
-    if attack == "alternating":
-        return _alternating_trigger_poison(update, scale=scale, seed=seed)
-    raise ValueError("attack must be one of: none, sign_flip, gaussian, alternating")
-
-
-def _alternating_trigger_poison(
-    update: np.ndarray,
-    *,
-    scale: float,
-    seed: int,
-) -> np.ndarray:
-    """每次只注入一个触发器分片，并随客户端/轮次种子轮换分片位置。"""
-
-    poisoned = update.astype(np.float32, copy=True)
-    flat = poisoned.reshape(-1)
-    if flat.size == 0:
-        return poisoned
-
-    # 将完整参数向量等分为多个分片，模拟交替式、局部且隐蔽的梯度扰动。
-    shard_count = min(_ALTERNATING_TRIGGER_SHARDS, flat.size)
-    shard_index = seed % shard_count
-    start = flat.size * shard_index // shard_count
-    end = flat.size * (shard_index + 1) // shard_count
-
-    rms = float(np.linalg.norm(flat) / max(1, flat.size) ** 0.5)
-    magnitude = max(rms, 1e-6) * (float(scale) / 100.0)
-    rng = np.random.default_rng(_ALTERNATING_TRIGGER_SEED + shard_index)
-    trigger = rng.choice((-1.0, 1.0), size=end - start).astype(np.float32)
-    flat[start:end] += trigger * magnitude
-    return poisoned
+    if is_alternating_minimization_attack(attack):
+        raise ValueError(
+            "alternating minimization requires model/data-aware local training; "
+            "use the federated experiment attack path instead of poison_update()"
+        )
+    raise ValueError(
+        "attack must be one of: none, sign_flip, gaussian, "
+        "alternating_minimization (or legacy alias alternating)"
+    )

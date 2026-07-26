@@ -445,6 +445,71 @@ def accuracy(
     return correct / len(y)
 
 
+def targeted_metrics(
+    vector: np.ndarray,
+    x: np.ndarray,
+    target_labels: np.ndarray,
+    *,
+    batch_size: int = 512,
+    spec: ModelSpec | None = None,
+    compute_backend: str = "numpy",
+    device: str = "auto",
+) -> tuple[float, float]:
+    """Return targeted success rate and mean target-class confidence."""
+
+    labels = np.asarray(target_labels, dtype=np.int64).reshape(-1)
+    if len(labels) == 0:
+        return 0.0, 0.0
+    if len(x) != len(labels):
+        raise ValueError("x and target_labels must contain the same number of samples")
+    if _should_use_torch(compute_backend, device):
+        from .torch_backend import torch_targeted_metrics
+
+        return torch_targeted_metrics(
+            vector,
+            x,
+            labels,
+            batch_size=batch_size,
+            spec=spec,
+            device=device,
+        )
+
+    model_spec = spec or DEFAULT_SPEC
+    successes = 0
+    confidence_sum = 0.0
+    for start in range(0, len(labels), batch_size):
+        end = start + batch_size
+        if model_spec.architecture == "cifar10":
+            params = _vector_to_cifar_params(vector, spec=model_spec)
+            logits, _ = _forward_cifar_from_params(
+                params,
+                x[start:end],
+                model_spec,
+                cache=False,
+            )
+        else:
+            conv_w, conv_b, dense_w, dense_b = vector_to_params(
+                vector,
+                spec=model_spec,
+            )
+            logits, _ = _forward_from_params(
+                conv_w,
+                conv_b,
+                dense_w,
+                dense_b,
+                x[start:end],
+                model_spec,
+                cache=False,
+            )
+        probs = _softmax(logits)
+        batch_labels = labels[start:end]
+        successes += int(np.sum(np.argmax(probs, axis=1) == batch_labels))
+        confidence_sum += float(
+            np.sum(probs[np.arange(len(batch_labels)), batch_labels])
+        )
+    return successes / len(labels), confidence_sum / len(labels)
+
+
 def local_train_delta(
     global_vector: np.ndarray,
     x: np.ndarray,
@@ -524,6 +589,121 @@ def local_train_delta(
     updated = params_to_vector(conv_w, conv_b, dense_w, dense_b)
     delta = (updated - global_vector).astype(np.float32)
     return delta, TrainStats(loss=float(np.mean(losses)), samples=len(labels))
+
+
+def alternating_minimization_delta(
+    global_vector: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    auxiliary_x: np.ndarray,
+    target_labels: np.ndarray,
+    *,
+    lr: float = 0.05,
+    attack_epochs: int = 10,
+    batch_size: int = 32,
+    stealth_steps: int = 10,
+    boost: float = 10.0,
+    distance_weight: float = 1e-4,
+    seed: int = 0,
+    spec: ModelSpec | None = None,
+) -> tuple[np.ndarray, TrainStats]:
+    """Run Bhagoji-style alternating minimization with a distance constraint.
+
+    A separate benign local optimization first supplies the stealth reference
+    model.  Each alternating block then performs ``stealth_steps`` updates on
+    the client's correctly labelled data under
+
+        CE(D_m; w) + distance_weight / 2 * ||w - w_benign||_2^2
+
+    followed by one target-labelled auxiliary-data step whose displacement is
+    explicitly boosted by ``boost``.  This is a model/data-aware optimization,
+    not a post-hoc perturbation of an already trained update vector.
+    """
+
+    labels = np.asarray(y, dtype=np.int64).reshape(-1)
+    target_array = np.asarray(target_labels, dtype=np.int64).reshape(-1)
+    auxiliary = np.asarray(auxiliary_x, dtype=np.float32)
+    if labels.size == 0:
+        return np.zeros_like(global_vector), TrainStats(loss=0.0, samples=0)
+    if len(auxiliary) == 0 or target_array.size != len(auxiliary):
+        raise ValueError(
+            "alternating minimization requires equally sized non-empty "
+            "auxiliary_x and target_labels"
+        )
+    if attack_epochs < 1:
+        raise ValueError("attack_epochs must be at least 1")
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    if stealth_steps < 1:
+        raise ValueError("stealth_steps must be at least 1")
+    if not np.isfinite(lr) or lr <= 0.0:
+        raise ValueError("lr must be finite and positive")
+    if not np.isfinite(boost) or boost <= 0.0:
+        raise ValueError("boost must be finite and positive")
+    if not np.isfinite(distance_weight) or distance_weight < 0.0:
+        raise ValueError("distance_weight must be finite and non-negative")
+
+    model_spec = spec or DEFAULT_SPEC
+    global_array = np.ascontiguousarray(global_vector, dtype=np.float32)
+    if global_array.shape != (model_spec.parameter_size,):
+        raise ValueError(
+            f"expected parameter vector of length {model_spec.parameter_size}, "
+            f"got shape {global_array.shape}"
+        )
+    if np.any(target_array < 0) or np.any(target_array >= model_spec.num_classes):
+        raise ValueError("target labels are outside the model class range")
+
+    # The official Bhagoji distance-constrained implementation uses an
+    # independently benign-trained local model as its "self" reference.
+    benign_delta, _ = local_train_delta(
+        global_array,
+        x,
+        labels,
+        lr=lr,
+        epochs=attack_epochs,
+        batch_size=batch_size,
+        seed=seed + 1_000_003,
+        spec=model_spec,
+        compute_backend="numpy",
+    )
+    benign_reference = (global_array + benign_delta).astype(np.float32)
+
+    local = global_array.copy()
+    rng = np.random.default_rng(seed)
+    benign_batches: list[np.ndarray] = []
+    for _ in range(attack_epochs):
+        order = rng.permutation(labels.size)
+        benign_batches.extend(
+            order[start : start + batch_size]
+            for start in range(0, len(order), batch_size)
+        )
+
+    losses: list[float] = []
+    for block_start in range(0, len(benign_batches), stealth_steps):
+        for batch_idx in benign_batches[block_start : block_start + stealth_steps]:
+            loss, gradient = _loss_and_gradient(
+                local,
+                np.asarray(x)[batch_idx],
+                labels[batch_idx],
+                model_spec,
+            )
+            gradient += distance_weight * (local - benign_reference)
+            local -= np.float32(lr) * gradient
+            losses.append(loss)
+
+        # Explicit boosting applies only to the adversarial displacement, not
+        # to the benign/stealth portion of the local update.
+        _, adversarial_gradient = _loss_and_gradient(
+            local,
+            auxiliary,
+            target_array,
+            model_spec,
+        )
+        local -= np.float32(lr * boost) * adversarial_gradient
+
+    delta = (local - global_array).astype(np.float32)
+    mean_loss = float(np.mean(losses)) if losses else 0.0
+    return delta, TrainStats(loss=mean_loss, samples=labels.size)
 
 
 def describe_compute_backend(compute_backend: str = "numpy", device: str = "auto") -> str:
@@ -608,6 +788,39 @@ def _local_train_delta_cifar(
     )
     delta = (updated - global_vector).astype(np.float32)
     return delta, TrainStats(loss=float(np.mean(losses)), samples=len(labels))
+
+
+def _loss_and_gradient(
+    vector: np.ndarray,
+    x: np.ndarray,
+    labels: np.ndarray,
+    spec: ModelSpec,
+) -> tuple[float, np.ndarray]:
+    """Return cross-entropy and its flat parameter gradient."""
+
+    label_array = np.asarray(labels, dtype=np.int64).reshape(-1)
+    if len(label_array) == 0:
+        raise ValueError("gradient batches must be non-empty")
+    if spec.architecture == "cifar10":
+        params = _vector_to_cifar_params(vector, spec=spec)
+        _, cache = _forward_cifar_from_params(params, x, spec, cache=True)
+        assert cache is not None
+        grads = _backward_cifar(cache, label_array, params, spec)
+        return _cross_entropy(cache.probs, label_array), params_to_vector(*grads)
+
+    conv_w, conv_b, dense_w, dense_b = vector_to_params(vector, spec=spec)
+    _, cache = _forward_from_params(
+        conv_w,
+        conv_b,
+        dense_w,
+        dense_b,
+        x,
+        spec,
+        cache=True,
+    )
+    assert cache is not None
+    grads = _backward(cache, label_array, conv_w, dense_w, spec)
+    return _cross_entropy(cache.probs, label_array), params_to_vector(*grads)
 
 
 def _forward_from_params(

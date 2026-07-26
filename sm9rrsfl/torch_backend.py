@@ -86,6 +86,60 @@ def torch_accuracy(
     return correct / len(labels)
 
 
+def torch_targeted_metrics(
+    vector: np.ndarray,
+    x: np.ndarray,
+    target_labels: np.ndarray,
+    *,
+    batch_size: int = 512,
+    spec: ModelSpec | None = None,
+    device: str = "auto",
+) -> tuple[float, float]:
+    """Evaluate target-label success and confidence on a PyTorch device."""
+
+    labels_np = np.asarray(target_labels, dtype=np.int64).reshape(-1)
+    if len(labels_np) == 0:
+        return 0.0, 0.0
+    if len(x) != len(labels_np):
+        raise ValueError("x and target_labels must contain the same number of samples")
+    torch = _torch_module()
+    torch_device = _resolve_device(torch, device)
+    model_spec = spec or DEFAULT_SPEC
+    params = _torch_params_from_vector(
+        torch,
+        vector,
+        model_spec,
+        torch_device,
+        requires_grad=False,
+    )
+    successes = 0
+    confidence_sum = 0.0
+    with torch.no_grad():
+        for start in range(0, len(labels_np), batch_size):
+            end = start + batch_size
+            xb = _torch_data(torch, x[start:end], model_spec, torch_device)
+            labels = torch.as_tensor(
+                labels_np[start:end],
+                dtype=torch.long,
+                device=torch_device,
+            )
+            probs = torch.softmax(
+                _torch_forward(torch, params, xb, model_spec),
+                dim=1,
+            )
+            successes += int(
+                (torch.argmax(probs, dim=1) == labels).sum().detach().cpu().item()
+            )
+            confidence_sum += float(
+                probs.gather(1, labels.reshape(-1, 1))
+                .sum()
+                .detach()
+                .cpu()
+                .item()
+            )
+    return successes / len(labels_np), confidence_sum / len(labels_np)
+
+
 def torch_local_train_delta(
     global_vector: np.ndarray,
     x: np.ndarray,
@@ -242,6 +296,64 @@ class TorchTrainingContext:
                 correct += int((self.torch.argmax(logits, dim=1) == self.y_test[start:end]).sum().detach().cpu().item())
         return correct / int(self.y_test.numel())
 
+    def targeted_metrics(
+        self,
+        vector,
+        *,
+        target_indices: np.ndarray,
+        target_label: int,
+    ) -> tuple[float, float]:
+        """Evaluate the configured auxiliary targets without copying the model."""
+
+        target_index_array = np.asarray(target_indices, dtype=np.int64).reshape(-1)
+        if target_index_array.size == 0:
+            return 0.0, 0.0
+        index = self.torch.as_tensor(
+            target_index_array,
+            dtype=self.torch.long,
+            device=self.device,
+        )
+        global_vector = self._ensure_global_vector(vector)
+        params = _torch_params_from_tensor(
+            self.torch,
+            global_vector,
+            self.spec,
+            requires_grad=False,
+            clone=False,
+        )
+        with self.torch.no_grad():
+            probs = self.torch.softmax(
+                _torch_forward(
+                    self.torch,
+                    params,
+                    self.x_test.index_select(0, index),
+                    self.spec,
+                ),
+                dim=1,
+            )
+            labels = self.torch.full(
+                (len(target_index_array),),
+                int(target_label),
+                dtype=self.torch.long,
+                device=self.device,
+            )
+            success = float(
+                (self.torch.argmax(probs, dim=1) == labels)
+                .float()
+                .mean()
+                .detach()
+                .cpu()
+                .item()
+            )
+            confidence = float(
+                probs.gather(1, labels.reshape(-1, 1))
+                .mean()
+                .detach()
+                .cpu()
+                .item()
+            )
+        return success, confidence
+
     def local_train_delta(
         self,
         global_vector: np.ndarray,
@@ -375,6 +487,153 @@ class TorchTrainingContext:
             mean_loss = float((loss_sum / loss_batches).detach().cpu().item())
         return delta, TrainStats(loss=mean_loss, samples=samples)
 
+    def alternating_minimization_delta_resident(
+        self,
+        global_vector,
+        *,
+        client_idx: int,
+        target_indices: np.ndarray,
+        target_label: int,
+        lr: float,
+        attack_epochs: int,
+        batch_size: int,
+        stealth_steps: int,
+        boost: float,
+        distance_weight: float,
+        seed: int,
+    ):
+        """Run the Bhagoji alternating attack while keeping tensors resident."""
+
+        indices = self.client_indices[client_idx]
+        samples = int(indices.numel())
+        global_tensor = self._ensure_global_vector(global_vector)
+        if samples == 0:
+            return self.torch.zeros_like(global_tensor), TrainStats(loss=0.0, samples=0)
+        target_index_array = np.asarray(target_indices, dtype=np.int64).reshape(-1)
+        if target_index_array.size == 0:
+            raise ValueError("alternating minimization requires auxiliary target samples")
+        if attack_epochs < 1 or batch_size < 1 or stealth_steps < 1:
+            raise ValueError(
+                "attack_epochs, batch_size and stealth_steps must be at least 1"
+            )
+        if not np.isfinite(lr) or lr <= 0.0:
+            raise ValueError("lr must be finite and positive")
+        if not np.isfinite(boost) or boost <= 0.0:
+            raise ValueError("boost must be finite and positive")
+        if not np.isfinite(distance_weight) or distance_weight < 0.0:
+            raise ValueError("distance_weight must be finite and non-negative")
+        if target_label < 0 or target_label >= self.spec.num_classes:
+            raise ValueError("target_label is outside the model class range")
+
+        benign_delta, _ = self.local_train_delta_resident(
+            global_vector,
+            client_idx=client_idx,
+            lr=lr,
+            epochs=attack_epochs,
+            batch_size=batch_size,
+            seed=seed + 1_000_003,
+        )
+        benign_reference_vector = global_tensor.add(benign_delta)
+        reference_params = tuple(
+            _torch_params_from_tensor(
+                self.torch,
+                benign_reference_vector,
+                self.spec,
+                requires_grad=False,
+                clone=False,
+            )
+        )
+        params = list(
+            _torch_params_from_tensor(
+                self.torch,
+                global_tensor,
+                self.spec,
+                requires_grad=True,
+                clone=True,
+            )
+        )
+
+        target_index = self.torch.as_tensor(
+            target_index_array,
+            dtype=self.torch.long,
+            device=self.device,
+        )
+        target_features = self.x_test.index_select(0, target_index)
+        target_labels = self.torch.full(
+            (len(target_index_array),),
+            int(target_label),
+            dtype=self.torch.long,
+            device=self.device,
+        )
+
+        rng = np.random.default_rng(seed)
+        benign_batches: list[np.ndarray] = []
+        for _ in range(attack_epochs):
+            order = rng.permutation(samples)
+            benign_batches.extend(
+                order[start : start + batch_size]
+                for start in range(0, len(order), batch_size)
+            )
+
+        loss_sum = None
+        loss_batches = 0
+        for block_start in range(0, len(benign_batches), stealth_steps):
+            for batch_idx in benign_batches[
+                block_start : block_start + stealth_steps
+            ]:
+                local_index = self.torch.as_tensor(
+                    batch_idx,
+                    dtype=self.torch.long,
+                    device=self.device,
+                )
+                batch_index = indices.index_select(0, local_index)
+                logits = _torch_forward(
+                    self.torch,
+                    params,
+                    self.x_train.index_select(0, batch_index),
+                    self.spec,
+                )
+                loss = self.torch.nn.functional.cross_entropy(
+                    logits,
+                    self.y_train.index_select(0, batch_index),
+                )
+                loss.backward()
+                with self.torch.no_grad():
+                    for param, reference in zip(params, reference_params):
+                        if param.grad is not None:
+                            gradient = param.grad.add(
+                                param.sub(reference),
+                                alpha=float(distance_weight),
+                            )
+                            param.add_(gradient, alpha=-float(lr))
+                            param.grad = None
+                detached = loss.detach()
+                loss_sum = detached if loss_sum is None else loss_sum + detached
+                loss_batches += 1
+
+            target_logits = _torch_forward(
+                self.torch,
+                params,
+                target_features,
+                self.spec,
+            )
+            adversarial_loss = self.torch.nn.functional.cross_entropy(
+                target_logits,
+                target_labels,
+            )
+            adversarial_loss.backward()
+            with self.torch.no_grad():
+                for param in params:
+                    if param.grad is not None:
+                        param.add_(param.grad, alpha=-float(lr * boost))
+                        param.grad = None
+
+        delta = _torch_flat_vector_from_params(self.torch, params).sub(global_tensor).detach()
+        mean_loss = 0.0
+        if loss_sum is not None and loss_batches:
+            mean_loss = float((loss_sum / loss_batches).detach().cpu().item())
+        return delta, TrainStats(loss=mean_loss, samples=samples)
+
     def to_numpy(self, tensor) -> np.ndarray:
         """仅在密码摘要或 CPU 检测确实需要时执行设备到主机传输。"""
 
@@ -414,28 +673,17 @@ class TorchTrainingContext:
                 device=update.device,
                 generator=generator,
             ).mul(float(scale) * std)
-        if attack == "alternating":
-            from .attacks import _ALTERNATING_TRIGGER_SEED, _ALTERNATING_TRIGGER_SHARDS
+        from .attacks import is_alternating_minimization_attack
 
-            poisoned = update.clone()
-            size = int(poisoned.numel())
-            if size == 0:
-                return poisoned
-            shard_count = min(_ALTERNATING_TRIGGER_SHARDS, size)
-            shard_index = seed % shard_count
-            start = size * shard_index // shard_count
-            end = size * (shard_index + 1) // shard_count
-            rms = float(self.torch.linalg.vector_norm(poisoned).detach().cpu().item()) / size**0.5
-            magnitude = max(rms, 1e-6) * (float(scale) / 100.0)
-            # 继续使用原实现的固定 NumPy 触发器，保持同一分片的符号模式不变。
-            rng = np.random.default_rng(_ALTERNATING_TRIGGER_SEED + shard_index)
-            trigger = rng.choice((-1.0, 1.0), size=end - start).astype(np.float32)
-            poisoned[start:end].add_(
-                self.torch.from_numpy(trigger).to(device=self.device),
-                alpha=magnitude,
+        if is_alternating_minimization_attack(attack):
+            raise ValueError(
+                "alternating minimization requires model/data-aware local training; "
+                "use alternating_minimization_delta_resident()"
             )
-            return poisoned
-        raise ValueError("attack must be one of: none, sign_flip, gaussian, alternating")
+        raise ValueError(
+            "attack must be one of: none, sign_flip, gaussian, "
+            "alternating_minimization (or legacy alias alternating)"
+        )
 
     def weighted_average(self, updates, weights, sample_counts=None):
         """流式设备端加权聚合，不构造 N×P 的额外堆叠张量。"""

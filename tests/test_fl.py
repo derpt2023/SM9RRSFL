@@ -63,6 +63,7 @@ class FederatedLoopTest(unittest.TestCase):
             rounds=3,
             local_epochs=1,
             batch_size=16,
+            attack="sign_flip",
             attack_start_round=1,
             crypto_mode="simulated",
             early_stop=False,
@@ -88,6 +89,56 @@ class FederatedLoopTest(unittest.TestCase):
             [record.accuracy for record in uninterrupted.records],
         )
         self.assertEqual(resumed.blacklisted_clients, uninterrupted.blacklisted_clients)
+
+    def test_alternating_minimization_runs_inside_local_training(self):
+        from sm9rrsfl import fl as fl_module
+
+        dataset = make_synthetic_mnist_like(
+            train_samples=40,
+            test_samples=100,
+            seed=131,
+        )
+        source_label = int(dataset.y_test[0])
+        target_label = (source_label + 1) % dataset.num_classes
+        config = ExperimentConfig(
+            method="fedavg",
+            malicious_ratio=0.5,
+            num_clients=2,
+            rounds=1,
+            local_epochs=1,
+            batch_size=16,
+            lr=0.005,
+            attack="alternating_minimization",
+            attack_boost=2.0,
+            attack_epochs=1,
+            attack_stealth_steps=1,
+            attack_distance_weight=1e-4,
+            attack_source_label=source_label,
+            attack_target_label=target_label,
+            attack_target_count=1,
+            attack_start_round=1,
+            early_stop=False,
+            seed=131,
+        )
+
+        with mock.patch.object(
+            fl_module,
+            "_poison_client_update",
+            side_effect=AssertionError(
+                "alternating minimization must not use post-hoc vector poisoning"
+            ),
+        ):
+            result = run_experiment(dataset, config)
+
+        self.assertEqual(result.records[-1].accepted_updates, 2)
+        self.assertGreater(result.stage_timings.attack_seconds, 0.0)
+        self.assertTrue(np.isfinite(result.final_accuracy))
+        self.assertIsNotNone(result.records[-1].attack_target_success_rate)
+        self.assertIsNotNone(result.records[-1].attack_target_confidence)
+        self.assertGreaterEqual(result.records[-1].attack_target_success_rate, 0.0)
+        self.assertLessEqual(result.records[-1].attack_target_success_rate, 1.0)
+        self.assertGreaterEqual(result.records[-1].attack_target_confidence, 0.0)
+        self.assertLessEqual(result.records[-1].attack_target_confidence, 1.0)
 
     def test_sm9rrs_zero_malicious_keeps_clients_active(self):
         dataset = make_synthetic_mnist_like(train_samples=80, test_samples=20, seed=10)

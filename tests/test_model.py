@@ -60,6 +60,45 @@ class CIFARModelTest(unittest.TestCase):
             atol=1e-6,
         )
 
+    @unittest.skipIf(importlib.util.find_spec("torch") is None, "torch is not installed")
+    def test_torch_context_runs_resident_alternating_minimization(self):
+        from sm9rrsfl.datasets import make_synthetic_mnist_like
+        from sm9rrsfl.torch_backend import TorchTrainingContext
+
+        dataset = make_synthetic_mnist_like(
+            train_samples=20,
+            test_samples=100,
+            seed=41,
+        )
+        indices = [
+            np.arange(0, 10, dtype=np.int64),
+            np.arange(10, 20, dtype=np.int64),
+        ]
+        context = TorchTrainingContext(dataset, indices, device="cpu")
+        params = init_params(seed=42, spec=context.spec)
+        source_label = int(dataset.y_test[0])
+        target_indices = np.flatnonzero(dataset.y_test == source_label)[:1]
+
+        delta, stats = context.alternating_minimization_delta_resident(
+            params,
+            client_idx=0,
+            target_indices=target_indices,
+            target_label=(source_label + 1) % context.spec.num_classes,
+            lr=0.001,
+            attack_epochs=1,
+            batch_size=5,
+            stealth_steps=1,
+            boost=2.0,
+            distance_weight=1e-4,
+            seed=43,
+        )
+        delta_np = context.to_numpy(delta)
+
+        self.assertEqual(delta_np.shape, params.shape)
+        self.assertEqual(stats.samples, 10)
+        self.assertTrue(np.isfinite(delta_np).all())
+        self.assertGreater(np.count_nonzero(delta_np), 0)
+
     def test_cifar10_uses_dataset_specific_cnn(self):
         rng = np.random.default_rng(7)
         dataset = ImageDataset(

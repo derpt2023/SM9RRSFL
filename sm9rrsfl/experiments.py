@@ -338,8 +338,72 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "or 'auto' to estimate a memory-safe limit."
         ),
     )
-    parser.add_argument("--attack", choices=["none", "sign_flip", "gaussian", "alternating"], default="alternating")
-    parser.add_argument("--attack-scale", type=float, default=5.0)
+    parser.add_argument(
+        "--attack",
+        choices=[
+            "none",
+            "sign_flip",
+            "gaussian",
+            "alternating_minimization",
+            "alternating",
+        ],
+        default="alternating_minimization",
+        help=(
+            "Model-poisoning attack. 'alternating' is a compatibility alias for "
+            "the Bhagoji alternating-minimization implementation."
+        ),
+    )
+    parser.add_argument(
+        "--attack-scale",
+        type=float,
+        default=5.0,
+        help=(
+            "Post-training attack scale: sign-flip multiplier or Gaussian noise "
+            "standard-deviation multiplier. It is not used by alternating minimization."
+        ),
+    )
+    parser.add_argument(
+        "--attack-boost",
+        type=float,
+        default=10.0,
+        help="Bhagoji explicit boosting factor lambda for each adversarial step.",
+    )
+    parser.add_argument(
+        "--attack-epochs",
+        type=int,
+        default=10,
+        help="Number of local benign/stealth epochs used by a malicious client.",
+    )
+    parser.add_argument(
+        "--attack-stealth-steps",
+        type=int,
+        default=10,
+        help="Number of benign-distance steps per adversarial step (Bhagoji ls).",
+    )
+    parser.add_argument(
+        "--attack-distance-weight",
+        type=float,
+        default=1e-4,
+        help="Distance-constraint coefficient rho in the stealth objective.",
+    )
+    parser.add_argument(
+        "--attack-source-label",
+        type=int,
+        default=5,
+        help="True class of held-out auxiliary samples used by the targeted attack.",
+    )
+    parser.add_argument(
+        "--attack-target-label",
+        type=int,
+        default=7,
+        help="Adversarial target class for auxiliary samples.",
+    )
+    parser.add_argument(
+        "--attack-target-count",
+        type=int,
+        default=1,
+        help="Number of deterministic held-out auxiliary targets (Bhagoji r).",
+    )
     parser.add_argument(
         "--attack-start-round",
         type=int,
@@ -404,6 +468,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     raw_args = sys.argv[1:] if argv is None else argv
     args = apply_presets(parser.parse_args(argv), raw_args)
+    if args.attack == "alternating":
+        args.attack = "alternating_minimization"
+    if (
+        args.attack == "alternating_minimization"
+        and _has_any_option(raw_args, "--attack-scale")
+    ):
+        parser.error(
+            "--attack-scale does not control alternating minimization; "
+            "use --attack-boost for lambda"
+        )
     max_clients = max(args.client_counts or [args.num_clients])
     try:
         args.sm9_workers = resolve_sm9_workers(args.sm9_workers, max_clients)
@@ -427,6 +501,41 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         (args.lr_decay > 0.0, "--lr-decay must be positive"),
         (0.0 <= args.target_error <= 1.0, "--target-error must be in [0, 1]"),
         (args.dirichlet_alpha > 0.0, "--dirichlet-alpha must be positive"),
+        (
+            math.isfinite(args.attack_scale) and args.attack_scale > 0.0,
+            "--attack-scale must be finite and positive",
+        ),
+        (
+            math.isfinite(args.attack_boost) and args.attack_boost > 0.0,
+            "--attack-boost must be finite and positive",
+        ),
+        (args.attack_epochs >= 1, "--attack-epochs must be at least 1"),
+        (
+            args.attack_stealth_steps >= 1,
+            "--attack-stealth-steps must be at least 1",
+        ),
+        (
+            math.isfinite(args.attack_distance_weight)
+            and args.attack_distance_weight >= 0.0,
+            "--attack-distance-weight must be finite and non-negative",
+        ),
+        (
+            0 <= args.attack_source_label < 10,
+            "--attack-source-label must be in [0, 10)",
+        ),
+        (
+            0 <= args.attack_target_label < 10,
+            "--attack-target-label must be in [0, 10)",
+        ),
+        (
+            args.attack != "alternating_minimization"
+            or args.attack_source_label != args.attack_target_label,
+            "alternating minimization requires different source and target labels",
+        ),
+        (
+            args.attack_target_count >= 1,
+            "--attack-target-count must be at least 1",
+        ),
         (
             args.attack_start_round >= 0,
             "--attack-start-round must be non-negative",
@@ -481,6 +590,13 @@ def build_experiment_configs(args: argparse.Namespace) -> list[ExperimentConfig]
                             dirichlet_alpha=args.dirichlet_alpha,
                             attack=args.attack,
                             attack_scale=args.attack_scale,
+                            attack_boost=args.attack_boost,
+                            attack_epochs=args.attack_epochs,
+                            attack_stealth_steps=args.attack_stealth_steps,
+                            attack_distance_weight=args.attack_distance_weight,
+                            attack_source_label=args.attack_source_label,
+                            attack_target_label=args.attack_target_label,
+                            attack_target_count=args.attack_target_count,
                             attack_start_round=args.attack_start_round,
                             detector_window=args.detector_window,
                             z_threshold=args.z_threshold,
@@ -1429,6 +1545,12 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
                 true_positive_revocations=int(row["true_positive_revocations"]),
                 false_positive_revocations=int(row["false_positive_revocations"]),
                 krum_selected_client=row["krum_selected_client"],
+                attack_target_success_rate=_parse_optional_float(
+                    row.get("attack_target_success_rate")
+                ),
+                attack_target_confidence=_parse_optional_float(
+                    row.get("attack_target_confidence")
+                ),
             )
         )
 
@@ -1457,6 +1579,15 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             dirichlet_alpha=alpha,
             attack=row["attack"],
             attack_scale=float(row["attack_scale"]),
+            attack_boost=float(row.get("attack_boost") or 10.0),
+            attack_epochs=int(row.get("attack_epochs") or 10),
+            attack_stealth_steps=int(row.get("attack_stealth_steps") or 10),
+            attack_distance_weight=float(
+                row.get("attack_distance_weight") or 1e-4
+            ),
+            attack_source_label=int(row.get("attack_source_label") or 5),
+            attack_target_label=int(row.get("attack_target_label") or 7),
+            attack_target_count=int(row.get("attack_target_count") or 1),
             attack_start_round=int(row["attack_start_round"]),
             detector_window=int(row["detector_window"]),
             z_threshold=float(row["z_threshold"]),
@@ -1510,13 +1641,34 @@ def _parse_bool(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _parse_optional_float(value: str | None) -> float | None:
+    if value is None or not str(value).strip():
+        return None
+    return float(value)
+
+
 def print_summary(results: list[ExperimentResult]) -> None:
     print(
-        "partition clients method ratio final_acc final_error stopped blacklisted "
-        "runtime_s train_s hash_s sign_s verify_s eval_s peak_mem_mb"
+        "partition clients method ratio final_acc final_error target_asr target_conf "
+        "stopped blacklisted runtime_s train_s hash_s sign_s verify_s eval_s peak_mem_mb"
     )
     for result in results:
         timings = result.stage_timings
+        final_record = result.records[-1] if result.records else None
+        target_asr = (
+            final_record.attack_target_success_rate
+            if final_record is not None
+            else None
+        )
+        target_confidence = (
+            final_record.attack_target_confidence
+            if final_record is not None
+            else None
+        )
+        target_asr_text = "-" if target_asr is None else f"{target_asr:0.3f}"
+        target_confidence_text = (
+            "-" if target_confidence is None else f"{target_confidence:0.3f}"
+        )
         print(
             f"{result.config.partition:9s} "
             f"{result.config.num_clients:7d} "
@@ -1524,6 +1676,8 @@ def print_summary(results: list[ExperimentResult]) -> None:
             f"{result.config.malicious_ratio:0.2f} "
             f"{result.final_accuracy:0.4f} "
             f"{result.final_error:0.4f} "
+            f"{target_asr_text:10s} "
+            f"{target_confidence_text:11s} "
             f"{result.stopped_round:3d} "
             f"{len(result.blacklisted_clients):3d} "
             f"{result.runtime_seconds:8.2f} "

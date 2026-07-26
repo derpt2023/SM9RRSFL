@@ -10,6 +10,7 @@
 - SM9-RRS-FL v2 流程：固定任务环、常数大小签名 `σ=(c,A,B,C)`、任务级匿名标签、两个签名验证等式、纵向 SVD 投毒检测、D-KGC 门限追踪、门限 Schnorr 证书确认和任务环更新。
 - 疑似恶意节点处理采用动态降权：单次异常先降低聚合权重，后续正常则恢复权重；同一任务标签连续异常达到阈值后立即拒绝该触发轮梯度并请求追踪，但只在追踪证书验证成功后永久撤销身份。
 - 纵向 SVD 对完整的一维模型更新按 `ceil(|G|/num_classes) × num_classes` 规范成矩阵（末尾补零），前 `K` 次观测建立基线，第 `K+1` 次开始评分；异常特征不进入正常窗口，但仍作为下一轮公式中的相邻 `r-1` 观测。
+- 攻击端实现 Bhagoji 等人的带距离约束交替最小化：恶意客户端在本地训练中交替优化目标误分类损失与正常任务/距离隐蔽损失，并只对目标攻击步进行显式提升；Ding 等人的实验以该攻击为基础。旧版“轮换参数分片并注入随机扰动”的实现已经删除，不再把一般向量噪声称为交替最小化攻击。
 - 联邦学习主流程通过 `ClientSigner`、`ASVerifier` 和 `AuditorService` 角色对象分别调用签名、完整验签和门限追踪。客户端对象只保存本客户端私钥和成员见证；AS 对象保存验签所需公开参数、非公开任务点、TPK、审计台账和独立的审计提交认证密钥，但不含任何客户端签名私钥或 D-KGC 追踪份额。AS 候选状态仅按不透明任务标签索引，不保存标签到真实身份的映射。
 - Krum 与 FedAvg baseline，对照实验使用相同数据划分、恶意比例和攻击方式；FedAvg/加权聚合按客户端本地样本数加权，Krum 保持原始单更新选择语义。
 - 文献 [13] 对照实验：复现其“奇异值轨迹差分 + Isolation Forest + 动态权重惩罚/恢复 + 连续异常剔除”的在线投毒检测流程。
@@ -256,6 +257,14 @@ python -m sm9rrsfl.experiments \
   --batch-size 32 \
   --lr 0.05 \
   --lr-decay 1.0 \
+  --attack alternating_minimization \
+  --attack-boost 10 \
+  --attack-epochs 10 \
+  --attack-stealth-steps 10 \
+  --attack-distance-weight 1e-4 \
+  --attack-source-label 5 \
+  --attack-target-label 7 \
+  --attack-target-count 1 \
   --target-error 0.12 \
   --crypto-mode sm9 \
   --compute-backend auto \
@@ -454,8 +463,15 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 
 #### 攻击、检测、降权与追踪
 
-- `--attack none|sign_flip|gaussian|alternating`：设置投毒方式，默认 `alternating`；交替攻击会将参数向量划分为多个触发器分片，每个恶意客户端在每轮只向其中一个分片注入扰动。
-- `--attack-scale 5.0`：设置投毒强度，默认 `5.0`。对 `alternating`，该数值是相对于本地更新 RMS 的百分数，`5.0` 表示在选中分片注入约 $5\%$ RMS 的扰动；对 `sign_flip` 和 `gaussian`，该数值分别是更新翻转倍数和噪声标准差倍数。
+- `--attack none|sign_flip|gaussian|alternating_minimization`：设置投毒方式，默认 `alternating_minimization`。兼容名称 `alternating` 会在解析后规范为 `alternating_minimization`。该攻击发生在恶意客户端本地优化过程中，不能通过训练完成后修改更新向量来替代。
+- `--attack-scale 5.0`：仅用于训练后攻击。对 `sign_flip` 表示更新翻转倍数，对 `gaussian` 表示噪声标准差倍数；交替最小化命令若显式传入该参数会直接报错，防止把增大向量扰动强度误当成 Bhagoji 攻击，应改用 `--attack-boost`。
+- `--attack-boost 10.0`：交替最小化攻击的显式提升因子 $\lambda$，默认 `10.0`。每个目标攻击步产生的参数位移会乘以 $\lambda$，正常任务和距离隐蔽步骤不提升。
+- `--attack-epochs 10`：恶意客户端每轮用于交替优化的正常任务/隐蔽训练 epoch 数，默认 `10`，对应 Bhagoji 官方实现中的 `mal_E`。这与普通客户端的 `--local-epochs` 相互独立。
+- `--attack-stealth-steps 10`：每个目标攻击步之间执行的正常任务/距离隐蔽优化步数，默认 `10`，对应 Bhagoji 官方实现中的 `ls`。
+- `--attack-distance-weight 1e-4`：隐蔽目标中距离约束的权重 $\rho$，默认 $10^{-4}$。项目先从当前全局模型独立执行一次正常本地训练得到 $w_{\mathrm{ben}}$，再优化
+  $L_{\mathrm{stealth}}(w)=L(D_m;w)+\frac{\rho}{2}\lVert w-w_{\mathrm{ben}}\rVert_2^2$。
+- `--attack-source-label 5` / `--attack-target-label 7`：目标攻击的真实类别和错误目标类别，默认沿用 Bhagoji 实验的类别编号 $5\rightarrow7$。原论文使用 Fashion-MNIST；本项目运行 MNIST 时，这两个编号对应数字类别而非原论文中的鞋类类别。二者必须不同且处于数据集类别范围内。
+- `--attack-target-count 1`：目标辅助样本数 $r$，默认 `1`。程序用随机种子从测试集中真实标签为 `attack-source-label` 的样本中确定性选取，作为威胁模型中的同分布辅助集 $D_{\mathrm{aux}}$；若限定测试集后没有足够样本，程序会在训练前明确失败。
 - `--attack-start-round 0`：设置所有方法共同使用的攻击起始轮。默认 `0` 是特殊值，表示从第 $K+2$ 轮开始，使前 $K$ 轮为无攻击观察期，并保留第 $K+1$ 轮作为首次正常评分；正整数表示绝对通信轮号。
 - `--K 3`：论文 4.3.3 节中的滑动窗口容量和初始观察轮数 $K$，默认 `3` 且不得小于 `2`。前 $K$ 次观测仅建立每个 $Tag_{\pi}$ 的纵向 SVD 基线，第 $K+1$ 次观测首次计算 Z-Score。兼容参数名 `--k` 和 `--detector-window`。
 - `--z-threshold 3.0`：论文中的 Z-Score 容忍阈值 $\theta$，默认 `3.0`，即采用 $3\sigma$ 准则。
@@ -504,8 +520,8 @@ python -m sm9rrsfl.benchmarks.crypto_overhead
 
 默认输出目录按数据集和密码模式区分：MNIST 的 `--crypto-mode sm9` 写入 `outputs/mnist/`，CIFAR-10 的 `--crypto-mode sm9` 写入 `outputs/cifar10/`；模拟模式分别写入 `outputs/mnist_simulated/` 和 `outputs/cifar10_simulated/`；CIFAR-10 干净基线写入 `outputs/cifar10_clean_baseline/`。每个输出目录都会包含：
 
-- `summary.csv`：每个方法和恶意比例的一行摘要，同时包含训练、攻击、摘要、封包、签名、验签、检测、聚合和评估的分阶段耗时。使用多个 `sm9-workers` 时，密码字段是各客户端操作耗时之和，用于判断热点；`runtime_seconds` 才是配置的真实墙钟时间。
-- `rounds.csv`：逐轮准确率、误差、接收/拒绝更新数、黑名单数量、TP/FP 等。
+- `summary.csv`：每个方法和恶意比例的一行摘要，同时包含最终目标攻击成功率 `final_attack_target_success_rate`、平均目标类别置信度 `final_attack_target_confidence`，以及训练、攻击、摘要、封包、签名、验签、检测、聚合和评估的分阶段耗时。使用多个 `sm9-workers` 时，密码字段是各客户端操作耗时之和，用于判断热点；`runtime_seconds` 才是配置的真实墙钟时间。
+- `rounds.csv`：逐轮准确率、误差、目标攻击成功率/置信度、接收/拒绝更新数、黑名单数量、TP/FP 等。交替最小化的无恶意客户端对照组也会在测试集样本充足时记录同一目标指标；非交替最小化配置的目标指标为空值。
 - `summary.json`：与 `summary.csv` 对应的 JSON 结果。
 - `run_manifest.json`：本次数据规模与完整配置指纹，用于确认检查点可以安全复用。
 - `skipped_configs.json`：因算法数学条件不成立而在训练前跳过的配置及具体原因。
@@ -545,3 +561,20 @@ python -m sm9rrsfl.benchmarks.crypto_overhead
 Ding Z, Wang W, Li X, et al. Identifying alternately poisoning attacks in federated learning online using trajectory anomaly detection method. Scientific Reports, 2024, 14: 20269. 论文链接：[Nature Scientific Reports](https://www.nature.com/articles/s41598-024-70375-w)。
 
 本文献方法在每轮联邦学习中记录客户端模型参数轨迹，对参数代表矩阵提取奇异值，并用相邻轮次奇异值差分构造轨迹特征；随后使用 Isolation Forest 判断异常客户端，对异常客户端降低聚合权重，对恢复正常的客户端提升权重，连续异常客户端被移除。项目中的实现位于 `sm9rrsfl/ding13_detector.py`。
+
+Ding 等人在实验部分说明其投毒方法基于参考文献 [8]，并对攻击作交替式修改，但正文没有给出独立的攻击目标函数、伪代码或完整超参数。因此，本项目不声称恢复了未公开的 Ding 攻击源码；攻击端按其引用的 Bhagoji 等人交替最小化目标结构实现，并采用官方代码 `distance-constrained/self-reference` 配置中的距离锚点、交替比例与关键默认系数，作为 Ding 检测实验所针对的交替投毒攻击基础。模型、数据集和优化器仍沿用本项目实验配置，因此这不是原仓库运行环境的逐比特复现：
+
+Bhagoji A N, Chakraborty S, Mittal P, et al. Analyzing Federated Learning through an Adversarial Lens. ICML, 2019: 634-643. 论文及官方代码：[PMLR](https://proceedings.mlr.press/v97/bhagoji19a.html)、[ModelPoisoning](https://github.com/inspire-group/ModelPoisoning)。
+
+Bhagoji 论文第 3.4 节按“目标步骤后接隐蔽步骤”描述单个 epoch，而官方仓库 `alternate_train` 的可执行循环按 `ls` 个正常/距离隐蔽步骤后接一个提升后的目标步骤。本项目明确采用官方可执行实现的顺序；论文实验部分应据此写为“Bhagoji 官方代码的 `distance-constrained/self-reference` 交替最小化变体”，避免声称同时逐行复现两种不同顺序。
+
+对每个交替块，恶意客户端先执行若干正常任务/距离隐蔽步骤，再执行一个目标误分类步骤，并只提升该目标步骤：
+
+$$
+L_{\mathrm{stealth}}(w)
+=L(D_m;w)+\frac{\rho}{2}\lVert w-w_{\mathrm{ben}}\rVert_2^2,
+\qquad
+w\leftarrow w-\lambda\eta\nabla_w L(D_{\mathrm{aux}}^{\tau};w).
+$$
+
+默认参数为 $\lambda=10$、$\rho=10^{-4}$、`attack_epochs=10`、`attack_stealth_steps=10` 和单个 $5\rightarrow7$ 辅助目标。交替攻击由 `sm9rrsfl/model.py` 与 `sm9rrsfl/torch_backend.py` 在本地训练阶段执行；`sm9rrsfl/attacks.py` 会主动拒绝把该攻击当作训练后的更新向量变换。
