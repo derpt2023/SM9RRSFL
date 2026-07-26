@@ -10,6 +10,7 @@ from typing import Iterable
 class WeightUpdateResult:
     weights: dict[str, float]
     suspicious_tags: set[str]
+    count_increment_tags: set[str]
     trace_requested_tags: set[str]
 
 
@@ -55,12 +56,22 @@ class SuspicionWeightManager:
         self,
         active_tags: list[str],
         suspicious_tags: set[str],
+        count_increment_tags: set[str],
     ) -> WeightUpdateResult:
-        """Apply the paper's penalty/recovery/count equations for one round."""
+        """Apply the paper's penalty/recovery/count equations for one round.
+
+        ``suspicious_tags`` contains tags for which either Z-Score exceeded
+        ``theta`` and therefore controls dynamic downweighting.
+        ``count_increment_tags`` is the stricter subset for which both
+        Z-Scores exceeded ``theta`` in the same round and therefore controls
+        the consecutive ``Count_pi`` state used for tracing.
+        """
 
         active = list(dict.fromkeys(active_tags))
         if not active:
-            return WeightUpdateResult(dict(self.weights), set(), set())
+            return WeightUpdateResult(dict(self.weights), set(), set(), set())
+        if not count_increment_tags.issubset(suspicious_tags):
+            raise ValueError("count_increment_tags must be a subset of suspicious_tags")
         uniform_weight = 1.0 / len(active)
         trace_requested: set[str] = set()
 
@@ -72,13 +83,19 @@ class SuspicionWeightManager:
                 continue
             if tag in suspicious_tags:
                 self.weights[tag] *= self.penalty_factor
-                self.consecutive_suspicions[tag] += 1
             else:
                 if self.weights[tag] < uniform_weight:
                     self.weights[tag] = min(
                         self.recovery_factor * self.weights[tag],
                         uniform_weight,
                     )
+
+            if tag in count_increment_tags:
+                self.consecutive_suspicions[tag] += 1
+            else:
+                # Count_pi represents consecutive rounds in which both
+                # indicators exceeded theta.  A normal round or a round with
+                # only one exceeded indicator breaks that consecutive run.
                 self.consecutive_suspicions[tag] = 0
 
             if self.consecutive_suspicions[tag] >= self.remove_after:
@@ -93,6 +110,7 @@ class SuspicionWeightManager:
         return WeightUpdateResult(
             weights=dict(self.weights),
             suspicious_tags=set(suspicious_tags),
+            count_increment_tags=set(count_increment_tags),
             trace_requested_tags=trace_requested,
         )
 

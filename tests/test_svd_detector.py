@@ -35,6 +35,7 @@ class SVDDetectorTest(unittest.TestCase):
         fourth = detector.evaluate("tag-1", _rank_one_update(12.0))
         self.assertFalse(fourth.accepted)
         self.assertEqual(fourth.reason, "z_score_threshold")
+        self.assertFalse(fourth.count_increment)
         self.assertEqual(tuple(state.normal_history), normal_history)
 
         # The rejected feature is still the immediately preceding observation.
@@ -44,6 +45,36 @@ class SVDDetectorTest(unittest.TestCase):
         self.assertTrue(fifth.accepted)
         self.assertEqual(fifth.reason, "accepted")
         self.assertAlmostEqual(fifth.sigma_delta, 1.0, places=6)
+
+    def test_count_advances_only_when_both_z_scores_exceed_threshold(self):
+        detector = LongitudinalSVDDetector(
+            window_size=2,
+            z_threshold=3.0,
+            matrix_offset=0,
+            matrix_shape=(2, 2),
+        )
+
+        detector.evaluate("tag-both", _rank_one_update(1.0))
+        detector.evaluate("tag-both", _rank_one_update(2.0))
+        both = detector.evaluate(
+            "tag-both",
+            np.asarray([0.0, 0.0, 12.0, 0.0], dtype=np.float32),
+        )
+        self.assertFalse(both.accepted)
+        self.assertGreater(both.z_sigma, detector.z_threshold)
+        self.assertGreater(both.z_direction, detector.z_threshold)
+        self.assertTrue(both.count_increment)
+
+        detector.evaluate("tag-direction-only", _rank_one_update(1.0))
+        detector.evaluate("tag-direction-only", _rank_one_update(2.0))
+        direction_only = detector.evaluate(
+            "tag-direction-only",
+            np.asarray([0.0, 0.0, 3.0, 0.0], dtype=np.float32),
+        )
+        self.assertFalse(direction_only.accepted)
+        self.assertLessEqual(direction_only.z_sigma, detector.z_threshold)
+        self.assertGreater(direction_only.z_direction, detector.z_threshold)
+        self.assertFalse(direction_only.count_increment)
 
     def test_default_matrix_uses_the_complete_update_and_zero_padding(self):
         detector = LongitudinalSVDDetector(num_classes=3)

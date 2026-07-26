@@ -15,6 +15,7 @@ from .model import NUM_CLASSES
 class DetectionResult:
     accepted: bool
     reason: str
+    count_increment: bool = False
     z_sigma: float = 0.0
     z_direction: float = 0.0
     sigma_delta: float = 0.0
@@ -144,7 +145,9 @@ class LongitudinalSVDDetector:
             std = np.std(history, axis=0)
             z_sigma = abs(sigma_delta - mu[0]) / max(float(std[0]), self.eps)
             z_direction = abs(cosine - mu[1]) / max(float(std[1]), self.eps)
-            if z_sigma > self.z_threshold or z_direction > self.z_threshold:
+            sigma_exceeded = z_sigma > self.z_threshold
+            direction_exceeded = z_direction > self.z_threshold
+            if sigma_exceeded or direction_exceeded:
                 # Delta/rho are defined against the immediately preceding
                 # communication round.  An anomalous feature is excluded from
                 # the normal-history window, but it is still the r-1 endpoint
@@ -154,6 +157,10 @@ class LongitudinalSVDDetector:
                 return DetectionResult(
                     accepted=False,
                     reason="z_score_threshold",
+                    # A single exceeded indicator is still suspicious and is
+                    # downweighted, but Count_pi advances only when both
+                    # indicators exceed theta in the same round.
+                    count_increment=sigma_exceeded and direction_exceeded,
                     z_sigma=float(z_sigma),
                     z_direction=float(z_direction),
                     sigma_delta=float(sigma_delta),

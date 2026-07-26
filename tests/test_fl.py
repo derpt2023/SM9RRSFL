@@ -250,7 +250,7 @@ class FederatedLoopTest(unittest.TestCase):
             mock.patch.object(
                 fl_module.LongitudinalSVDDetector,
                 "evaluate",
-                return_value=mock.Mock(accepted=False),
+                return_value=mock.Mock(accepted=False, count_increment=True),
             ),
             mock.patch.object(
                 fl_module,
@@ -298,7 +298,7 @@ class FederatedLoopTest(unittest.TestCase):
         with mock.patch.object(
             fl_module.LongitudinalSVDDetector,
             "evaluate",
-            return_value=mock.Mock(accepted=False),
+            return_value=mock.Mock(accepted=False, count_increment=True),
         ):
             result = run_experiment(
                 dataset,
@@ -321,6 +321,35 @@ class FederatedLoopTest(unittest.TestCase):
         terminal = checkpoints[-1]["crypto_state"]
         self.assertIn(dataset.name, terminal.finalized_task_ids)
         self.assertNotIn(dataset.name, {task.task_id for task in terminal.tasks})
+
+    def test_single_indicator_suspicion_does_not_trigger_trace(self):
+        from sm9rrsfl import fl as fl_module
+
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=123)
+        with mock.patch.object(
+            fl_module.LongitudinalSVDDetector,
+            "evaluate",
+            return_value=mock.Mock(accepted=False, count_increment=False),
+        ):
+            result = run_experiment(
+                dataset,
+                ExperimentConfig(
+                    method="sm9rrs",
+                    malicious_ratio=0.0,
+                    num_clients=1,
+                    rounds=2,
+                    local_epochs=1,
+                    batch_size=16,
+                    crypto_mode="simulated",
+                    suspicion_remove_after=1,
+                    early_stop=False,
+                    seed=123,
+                ),
+            )
+
+        self.assertEqual(result.blacklisted_clients, tuple())
+        self.assertEqual(result.records[-1].accepted_updates, 1)
+        self.assertEqual(result.records[-1].rejected_updates, 0)
 
 
 if __name__ == "__main__":

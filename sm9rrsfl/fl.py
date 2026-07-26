@@ -172,6 +172,7 @@ class _SM9ProcessingResult:
     samples: list[int]
     tags: list[str]
     suspicious_tags: set[str]
+    count_increment_tags: set[str]
     candidates_by_tag: dict[str, _VerifiedSM9Candidate]
     rejected: int
     hash_seconds: float
@@ -500,6 +501,7 @@ def run_experiment(
         update_clients: list[str] = []
         sm9_candidates: list[_ClientUpdateCandidate] = []
         suspicious_tags: set[str] = set()
+        count_increment_tags: set[str] = set()
         sm9_candidates_by_tag: dict[str, _VerifiedSM9Candidate] = {}
         rejected = 0
 
@@ -591,6 +593,7 @@ def run_experiment(
             update_samples.extend(sm9_result.samples)
             update_clients.extend(sm9_result.tags)
             suspicious_tags.update(sm9_result.suspicious_tags)
+            count_increment_tags.update(sm9_result.count_increment_tags)
             sm9_candidates_by_tag.update(sm9_result.candidates_by_tag)
             rejected += sm9_result.rejected
             hash_seconds += sm9_result.hash_seconds
@@ -632,6 +635,7 @@ def run_experiment(
                 weight_result = sm9_weight_manager.update(
                     update_clients,
                     suspicious_tags,
+                    count_increment_tags,
                 )
                 accepted_trace_identities: set[str] = set()
                 for tag in weight_result.trace_requested_tags:
@@ -957,6 +961,7 @@ def _process_sm9_candidates(
     samples: list[int] = []
     tags: list[str] = []
     suspicious_tags: set[str] = set()
+    count_increment_tags: set[str] = set()
     candidates_by_tag: dict[str, _VerifiedSM9Candidate] = {}
     rejected = 0
     detection_seconds = 0.0
@@ -983,6 +988,8 @@ def _process_sm9_candidates(
         detection_seconds += perf_counter() - detection_started
         if not decision.accepted:
             suspicious_tags.add(tag)
+            if decision.count_increment:
+                count_increment_tags.add(tag)
         updates.append(candidate.delta)
         samples.append(candidate.samples)
         tags.append(tag)
@@ -992,6 +999,7 @@ def _process_sm9_candidates(
         samples=samples,
         tags=tags,
         suspicious_tags=suspicious_tags,
+        count_increment_tags=count_increment_tags,
         candidates_by_tag=candidates_by_tag,
         rejected=rejected,
         # 多线程时这些值是所有客户端操作耗时之和，用来判断热点而非相加还原墙钟时间。
