@@ -1,4 +1,4 @@
-"""Federated learning experiment loop for SM9-RRS-FL, Krum, and Ding13."""
+"""Federated learning loop for six poisoning-defense comparison methods."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from .crypto import (
 )
 from .ding13_detector import Ding13TrajectoryDetector
 from .datasets import ImageDataset, partition_clients
+from .fedredefense import FedREDefense
 from .model import (
     accuracy,
     alternating_minimization_delta,
@@ -27,7 +28,8 @@ from .model import (
     model_spec_for_dataset,
     targeted_metrics,
 )
-from .svd_detector import LongitudinalSVDDetector
+from .svd_detector import DetectionResult, LongitudinalSVDDetector
+from .vert import VERTDefense
 from .weighting import SuspicionWeightManager
 
 
@@ -67,6 +69,20 @@ class ExperimentConfig:
     suspicion_penalty_factor: float = 0.5
     suspicion_recovery_factor: float = 2.0
     suspicion_remove_after: int = 3
+    vert_history_window: int = 10
+    vert_projection_dim: int = 128
+    vert_predict_epochs: int = 5
+    vert_predict_lr: float = 1e-3
+    vert_top_k: int = 0
+    fedre_threshold: float = 0.6
+    fedre_initial_iterations: int = 800
+    fedre_max_iterations: int = 2000
+    fedre_synthetic_steps: int = 5
+    fedre_images_per_class: int = 1
+    fedre_image_lr: float = 0.5
+    fedre_label_lr: float = 0.2
+    fedre_teacher_lr: float = 0.1
+    fedre_teacher_lr_lr: float = 5e-6
     seed: int = 0
 
 
@@ -85,6 +101,33 @@ class RoundRecord:
     krum_selected_client: str
     attack_target_success_rate: float | None = None
     attack_target_confidence: float | None = None
+
+
+@dataclass(frozen=True)
+class ClientDiagnosticRecord:
+    """Per-client SM9-RRS detector and weighting state for one round."""
+
+    round: int
+    client_id: str
+    task_tag: str
+    is_malicious: bool
+    decision_reason: str
+    z_sigma: float
+    z_direction: float
+    sigma_delta: float
+    cosine_similarity: float
+    sigma_exceeded: bool
+    direction_exceeded: bool
+    suspicious: bool
+    count_increment: bool
+    weight_before: float
+    weight_after_penalty_recovery: float
+    aggregation_weight: float
+    count_before: int
+    count_after: int
+    trace_requested: bool
+    trace_pending: bool
+    revoked: bool
 
 
 @dataclass(frozen=True)
@@ -114,6 +157,7 @@ class ExperimentResult:
     stopped_round: int
     malicious_clients: tuple[str, ...]
     blacklisted_clients: tuple[str, ...]
+    diagnostics: list[ClientDiagnosticRecord] = field(default_factory=list)
     runtime_seconds: float = 0.0
     peak_memory_mb: float = 0.0
     stage_timings: StageTimings = field(default_factory=StageTimings)
@@ -174,6 +218,8 @@ class _SM9ProcessingResult:
     suspicious_tags: set[str]
     count_increment_tags: set[str]
     candidates_by_tag: dict[str, _VerifiedSM9Candidate]
+    decisions_by_tag: dict[str, DetectionResult]
+    client_ids_by_tag: dict[str, str]
     rejected: int
     hash_seconds: float
     packet_build_seconds: float
@@ -196,8 +242,19 @@ def run_experiment(
     更新变换；StageTimings 对这些阶段分别计时。
     """
 
-    if config.method not in {"sm9rrs", "krum", "ding13", "fedavg"}:
-        raise ValueError("method must be one of: sm9rrs, krum, ding13, fedavg")
+    supported_methods = {
+        "sm9rrs",
+        "vert",
+        "fedredefense",
+        "krum",
+        "ding13",
+        "fedavg",
+    }
+    if config.method not in supported_methods:
+        raise ValueError(
+            "method must be one of: sm9rrs, vert, fedredefense, "
+            "krum, ding13, fedavg"
+        )
     if not 0.0 <= config.malicious_ratio < 1.0:
         raise ValueError("malicious_ratio must be in [0, 1)")
     if config.eval_interval < 1:
@@ -255,6 +312,32 @@ def run_experiment(
         )
     if config.attack_start_round < 0:
         raise ValueError("attack_start_round must be non-negative")
+    if config.vert_history_window < 2:
+        raise ValueError("vert_history_window must be at least 2")
+    if config.vert_projection_dim < 2:
+        raise ValueError("vert_projection_dim must be at least 2")
+    if config.vert_predict_epochs < 1:
+        raise ValueError("vert_predict_epochs must be at least 1")
+    if not np.isfinite(config.vert_predict_lr) or config.vert_predict_lr <= 0.0:
+        raise ValueError("vert_predict_lr must be finite and positive")
+    if config.vert_top_k < 0:
+        raise ValueError("vert_top_k must be non-negative")
+    if not np.isfinite(config.fedre_threshold) or config.fedre_threshold <= 0.0:
+        raise ValueError("fedre_threshold must be finite and positive")
+    if config.fedre_initial_iterations < 1 or config.fedre_max_iterations < 1:
+        raise ValueError("FedREDefense iteration counts must be at least 1")
+    if config.fedre_synthetic_steps < 1 or config.fedre_images_per_class < 1:
+        raise ValueError(
+            "FedREDefense synthetic steps and images per class must be at least 1"
+        )
+    for name, value in {
+        "fedre_image_lr": config.fedre_image_lr,
+        "fedre_label_lr": config.fedre_label_lr,
+        "fedre_teacher_lr": config.fedre_teacher_lr,
+        "fedre_teacher_lr_lr": config.fedre_teacher_lr_lr,
+    }.items():
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
     if config.partition == "dirichlet" and config.dirichlet_alpha <= 0.0:
         raise ValueError("dirichlet_alpha must be positive")
     invalid_reason = experiment_config_error(config)
@@ -331,11 +414,13 @@ def run_experiment(
                 attack_target_confidence=initial_target_confidence,
             )
         ]
+        diagnostics: list[ClientDiagnosticRecord] = []
     else:
         # 新方案的 Tag_pi depends on dS_pi and h_t.  The D-KGC shares and task
         # salt are therefore restored together with the longitudinal detector.
         params = np.asarray(resume_state["params"], dtype=np.float32)
         records = list(resume_state["records"])
+        diagnostics = list(resume_state.get("diagnostics", ()))
         start_round = int(resume_state["completed_round"]) + 1
         timings = resume_state.get("timings", {})
         training_seconds = float(timings.get("training_seconds", 0.0))
@@ -362,6 +447,8 @@ def run_experiment(
     auditor: AuditorService | None = None
     detector = None
     ding13_detector = None
+    vert_defense = None
+    fedre_defense = None
     sm9_weight_manager = None
     if config.method == "sm9rrs":
         crypto_state = resume_state.get("crypto_state") if resume_state else None
@@ -410,6 +497,34 @@ def run_experiment(
             compute_backend=config.compute_backend,
             device=config.device,
         )
+    elif config.method == "vert":
+        vert_defense = VERTDefense(
+            client_ids,
+            parameter_size=model_spec.parameter_size,
+            malicious_ratio=config.malicious_ratio,
+            history_window=config.vert_history_window,
+            projection_dim=config.vert_projection_dim,
+            predict_epochs=config.vert_predict_epochs,
+            learning_rate=config.vert_predict_lr,
+            top_k=config.vert_top_k,
+            seed=config.seed,
+        )
+    elif config.method == "fedredefense":
+        fedre_defense = FedREDefense(
+            client_ids,
+            model_spec=model_spec,
+            threshold=config.fedre_threshold,
+            initial_iterations=config.fedre_initial_iterations,
+            max_iterations=config.fedre_max_iterations,
+            synthetic_steps=config.fedre_synthetic_steps,
+            images_per_class=config.fedre_images_per_class,
+            image_lr=config.fedre_image_lr,
+            label_lr=config.fedre_label_lr,
+            teacher_lr=config.fedre_teacher_lr,
+            teacher_lr_lr=config.fedre_teacher_lr_lr,
+            device=config.device,
+            seed=config.seed,
+        )
 
     if resume_state is not None:
         if config.method == "sm9rrs":
@@ -417,6 +532,10 @@ def run_experiment(
             sm9_weight_manager = resume_state["weight_manager"]
         elif config.method == "ding13":
             ding13_detector = resume_state["ding13_detector"]
+        elif config.method == "vert":
+            vert_defense = resume_state["vert_defense"]
+        elif config.method == "fedredefense":
+            fedre_defense = resume_state["fedre_defense"]
 
     task_exhausted = False
     if config.method == "sm9rrs":
@@ -472,12 +591,15 @@ def run_experiment(
                 completed_round=0,
                 params=params,
                 records=records,
+                diagnostics=diagnostics,
                 blacklisted=blacklisted,
                 true_positive_revocations=true_positive_revocations,
                 false_positive_revocations=false_positive_revocations,
                 detector=detector,
                 weight_manager=sm9_weight_manager,
                 ding13_detector=ding13_detector,
+                vert_defense=vert_defense,
+                fedre_defense=fedre_defense,
                 crypto=crypto,
                 training_seconds=training_seconds,
                 attack_seconds=attack_seconds,
@@ -606,7 +728,7 @@ def run_experiment(
         record_accepted = len(updates)
         record_rejected = rejected
         if updates:
-            # 四种方法共享训练结果，只在服务端检测和聚合规则上分支。
+            # 六种方法共享训练结果，只在服务端检测和聚合规则上分支。
             aggregation_started = perf_counter()
             detection_inside_aggregation = 0.0
             aggregate = None
@@ -632,6 +754,17 @@ def run_experiment(
                     and as_verifier is not None
                     and auditor is not None
                 )
+                weight_before_by_tag = {
+                    tag: sm9_weight_manager.weights.get(
+                        tag,
+                        1.0 / len(update_clients),
+                    )
+                    for tag in update_clients
+                }
+                count_before_by_tag = {
+                    tag: sm9_weight_manager.consecutive_suspicions.get(tag, 0)
+                    for tag in update_clients
+                }
                 weight_result = sm9_weight_manager.update(
                     update_clients,
                     suspicious_tags,
@@ -681,6 +814,53 @@ def run_experiment(
                         # stale client/AS material from the previous RID.
                         crypto.finalize_task(dataset.name)
                         task_exhausted = True
+
+                for tag in update_clients:
+                    decision = sm9_result.decisions_by_tag[tag]
+                    identity = sm9_result.client_ids_by_tag[tag]
+                    z_sigma = float(getattr(decision, "z_sigma", 0.0))
+                    z_direction = float(
+                        getattr(decision, "z_direction", 0.0)
+                    )
+                    diagnostics.append(
+                        ClientDiagnosticRecord(
+                            round=round_id,
+                            client_id=identity,
+                            task_tag=tag,
+                            is_malicious=identity in malicious_set,
+                            decision_reason=str(
+                                getattr(decision, "reason", "unknown")
+                            ),
+                            z_sigma=z_sigma,
+                            z_direction=z_direction,
+                            sigma_delta=float(
+                                getattr(decision, "sigma_delta", 0.0)
+                            ),
+                            cosine_similarity=float(
+                                getattr(decision, "cosine_similarity", 0.0)
+                            ),
+                            sigma_exceeded=z_sigma > z_threshold,
+                            direction_exceeded=z_direction > z_threshold,
+                            suspicious=tag in suspicious_tags,
+                            count_increment=tag in count_increment_tags,
+                            weight_before=float(weight_before_by_tag[tag]),
+                            weight_after_penalty_recovery=float(
+                                weight_result.pre_normalization_weights[tag]
+                            ),
+                            aggregation_weight=float(
+                                sm9_weight_manager.weights[tag]
+                            ),
+                            count_before=int(count_before_by_tag[tag]),
+                            count_after=int(
+                                sm9_weight_manager.consecutive_suspicions[tag]
+                            ),
+                            trace_requested=(
+                                tag in weight_result.trace_requested_tags
+                            ),
+                            trace_pending=tag in sm9_weight_manager.pending_trace,
+                            revoked=tag in sm9_weight_manager.revoked,
+                        )
+                    )
 
                 # The manager contains the final zero/non-zero decision for
                 # every C_tol trigger and any successfully revoked tag.
@@ -736,6 +916,91 @@ def run_experiment(
                     1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
                 )
                 record_rejected = rejected + len(ding13_result.outliers)
+            elif config.method == "vert":
+                assert vert_defense is not None
+                cpu_update_by_client = _cpu_updates_by_client(
+                    update_clients,
+                    updates,
+                    torch_context,
+                )
+                detection_started = perf_counter()
+                vert_result = vert_defense.evaluate_round(
+                    cpu_update_by_client,
+                    round_id=round_id,
+                )
+                detection_elapsed = perf_counter() - detection_started
+                detection_seconds += detection_elapsed
+                detection_inside_aggregation += detection_elapsed
+                selected_set = set(vert_result.selected_clients)
+                selected_indices = [
+                    index
+                    for index, identity in enumerate(update_clients)
+                    if identity in selected_set
+                ]
+                selected_updates = [updates[index] for index in selected_indices]
+                selected_weights = [
+                    vert_result.weights[update_clients[index]]
+                    for index in selected_indices
+                ]
+                aggregate = _weighted_fedavg(
+                    selected_updates,
+                    selected_weights,
+                    sample_counts=None,
+                    config=config,
+                    torch_context=torch_context,
+                )
+                detection_started = perf_counter()
+                vert_defense.finalize_round(
+                    cpu_update_by_client,
+                    (
+                        torch_context.to_numpy(aggregate)
+                        if torch_context is not None
+                        else np.asarray(aggregate, dtype=np.float32)
+                    ),
+                    vert_result,
+                )
+                detection_elapsed = perf_counter() - detection_started
+                detection_seconds += detection_elapsed
+                detection_inside_aggregation += detection_elapsed
+                record_accepted = len(selected_indices)
+                record_rejected = rejected + len(vert_result.rejected_clients)
+            elif config.method == "fedredefense":
+                assert fedre_defense is not None
+                cpu_update_by_client = _cpu_updates_by_client(
+                    update_clients,
+                    updates,
+                    torch_context,
+                )
+                detection_started = perf_counter()
+                fedre_result = fedre_defense.evaluate_round(
+                    _params_for_checkpoint(params),
+                    cpu_update_by_client,
+                    round_id=round_id,
+                )
+                detection_elapsed = perf_counter() - detection_started
+                detection_seconds += detection_elapsed
+                detection_inside_aggregation += detection_elapsed
+                newly_removed = set(fedre_result.rejected_clients) - blacklisted
+                blacklisted.update(newly_removed)
+                true_positive_revocations += len(newly_removed & malicious_set)
+                false_positive_revocations += len(newly_removed - malicious_set)
+                accepted_set = set(fedre_result.accepted_clients)
+                accepted_indices = [
+                    index
+                    for index, identity in enumerate(update_clients)
+                    if identity in accepted_set
+                ]
+                if accepted_indices:
+                    # The official FedREDefense path applies equal-client
+                    # FedAvg after filtering rather than reusing sample counts.
+                    aggregate = _fedavg(
+                        [updates[index] for index in accepted_indices],
+                        None,
+                        config=config,
+                        torch_context=torch_context,
+                    )
+                record_accepted = len(accepted_indices)
+                record_rejected = rejected + len(fedre_result.rejected_clients)
             else:
                 aggregate = _fedavg(
                     updates,
@@ -795,12 +1060,15 @@ def run_experiment(
                     completed_round=round_id,
                     params=params,
                     records=records,
+                    diagnostics=diagnostics,
                     blacklisted=blacklisted,
                     true_positive_revocations=true_positive_revocations,
                     false_positive_revocations=false_positive_revocations,
                     detector=detector,
                     weight_manager=sm9_weight_manager,
                     ding13_detector=ding13_detector,
+                    vert_defense=vert_defense,
+                    fedre_defense=fedre_defense,
                     crypto=crypto,
                     training_seconds=training_seconds,
                     attack_seconds=attack_seconds,
@@ -834,12 +1102,15 @@ def run_experiment(
                     completed_round=records[-1].round,
                     params=params,
                     records=records,
+                    diagnostics=diagnostics,
                     blacklisted=blacklisted,
                     true_positive_revocations=true_positive_revocations,
                     false_positive_revocations=false_positive_revocations,
                     detector=detector,
                     weight_manager=sm9_weight_manager,
                     ding13_detector=ding13_detector,
+                    vert_defense=vert_defense,
+                    fedre_defense=fedre_defense,
                     crypto=crypto,
                     training_seconds=training_seconds,
                     attack_seconds=attack_seconds,
@@ -857,6 +1128,7 @@ def run_experiment(
     return ExperimentResult(
         config=config,
         records=records,
+        diagnostics=diagnostics,
         final_accuracy=final.accuracy,
         final_error=final.error,
         stopped_round=final.round,
@@ -963,9 +1235,11 @@ def _process_sm9_candidates(
     suspicious_tags: set[str] = set()
     count_increment_tags: set[str] = set()
     candidates_by_tag: dict[str, _VerifiedSM9Candidate] = {}
+    decisions_by_tag: dict[str, DetectionResult] = {}
+    client_ids_by_tag: dict[str, str] = {}
     rejected = 0
     detection_seconds = 0.0
-    for candidate in verified_candidates:
+    for source_candidate, candidate in zip(candidates, verified_candidates):
         if not candidate.verified:
             rejected += 1
             continue
@@ -994,6 +1268,8 @@ def _process_sm9_candidates(
         samples.append(candidate.samples)
         tags.append(tag)
         candidates_by_tag[tag] = candidate
+        decisions_by_tag[tag] = decision
+        client_ids_by_tag[tag] = source_candidate.identity
     return _SM9ProcessingResult(
         updates=updates,
         samples=samples,
@@ -1001,6 +1277,8 @@ def _process_sm9_candidates(
         suspicious_tags=suspicious_tags,
         count_increment_tags=count_increment_tags,
         candidates_by_tag=candidates_by_tag,
+        decisions_by_tag=decisions_by_tag,
+        client_ids_by_tag=client_ids_by_tag,
         rejected=rejected,
         # 多线程时这些值是所有客户端操作耗时之和，用来判断热点而非相加还原墙钟时间。
         hash_seconds=sum(candidate.hash_seconds for candidate in verified_candidates),
@@ -1114,17 +1392,39 @@ def _params_for_checkpoint(params) -> np.ndarray:
     return np.asarray(params, dtype=np.float32).copy()
 
 
+def _cpu_updates_by_client(
+    client_ids: list[str],
+    updates: list[Any],
+    torch_context,
+) -> dict[str, np.ndarray]:
+    """Materialize one CPU copy only for defenses that inspect full updates."""
+
+    if len(client_ids) != len(updates):
+        raise ValueError("client_ids and updates must have the same length")
+    return {
+        client_id: (
+            torch_context.to_numpy(update).copy()
+            if torch_context is not None
+            else np.asarray(update, dtype=np.float32).copy()
+        )
+        for client_id, update in zip(client_ids, updates)
+    }
+
+
 def _build_checkpoint_state(
     *,
     completed_round: int,
     params,
     records: list[RoundRecord],
+    diagnostics: list[ClientDiagnosticRecord],
     blacklisted: set[str],
     true_positive_revocations: int,
     false_positive_revocations: int,
     detector,
     weight_manager,
     ding13_detector,
+    vert_defense,
+    fedre_defense,
     crypto: SM9RRSContext | None,
     training_seconds: float,
     attack_seconds: float,
@@ -1142,12 +1442,15 @@ def _build_checkpoint_state(
         "completed_round": completed_round,
         "params": _params_for_checkpoint(params),
         "records": list(records),
+        "diagnostics": list(diagnostics),
         "blacklisted": tuple(sorted(blacklisted)),
         "true_positive_revocations": true_positive_revocations,
         "false_positive_revocations": false_positive_revocations,
         "detector": detector,
         "weight_manager": weight_manager,
         "ding13_detector": ding13_detector,
+        "vert_defense": vert_defense,
+        "fedre_defense": fedre_defense,
         "crypto_state": crypto.export_state() if crypto is not None else None,
         "timings": {
             "training_seconds": training_seconds,
@@ -1290,15 +1593,20 @@ def _select_attack_target_indices(
 
 def _fedavg(
     updates: list[Any],
-    sample_counts: list[int],
+    sample_counts: list[int] | None,
     *,
     config: ExperimentConfig,
     torch_context=None,
 ):
+    weights = (
+        np.ones(len(updates), dtype=np.float64)
+        if sample_counts is None
+        else sample_counts
+    )
     if torch_context is not None:
-        return torch_context.weighted_average(updates, sample_counts)
+        return torch_context.weighted_average(updates, weights)
     if _can_use_torch_ops(config):
-        return torch_weighted_fedavg(updates, sample_counts, device=config.device)
+        return torch_weighted_fedavg(updates, weights, device=config.device)
     return fedavg(updates, sample_counts)
 
 

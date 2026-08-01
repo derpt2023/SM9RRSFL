@@ -10,6 +10,8 @@ class VisualizationTest(unittest.TestCase):
     def test_generates_dashboard_and_svg_files(self):
         results = [
             _fake_result("sm9rrs", 0.0, 1.2, 3.4),
+            _fake_result("vert", 0.0, 1.1, 3.0),
+            _fake_result("fedredefense", 0.0, 2.0, 4.0),
             _fake_result("krum", 0.0, 0.8, 2.1),
             _fake_result("ding13", 0.1, 0.6, 1.9),
         ]
@@ -19,6 +21,18 @@ class VisualizationTest(unittest.TestCase):
             self.assertTrue((Path(tmp) / "plots" / "accuracy_baseline.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "runtime_overhead.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "memory_overhead.svg").exists())
+            baseline = (
+                Path(tmp) / "plots" / "accuracy_baseline.svg"
+            ).read_text(encoding="utf-8")
+            self.assertIn(">Ours<", baseline)
+            self.assertIn(">VERT<", baseline)
+            self.assertIn(">FedREDefense<", baseline)
+            runtime = (
+                Path(tmp) / "plots" / "runtime_overhead.svg"
+            ).read_text(encoding="utf-8")
+            self.assertIn(">TAD<", runtime)
+            self.assertNotIn("文献 [13]", runtime)
+            self.assertNotIn(">SM9-RRS-FL<", baseline)
 
     def test_generates_partition_specific_files_for_multiple_scenarios(self):
         results = [

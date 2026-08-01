@@ -7,11 +7,13 @@ __all__ = [
     "crypto",
     "datasets",
     "ding13_detector",
+    "fedredefense",
     "fl",
     "mnist",
     "model",
     "sm9_backend",
     "svd_detector",
     "threshold",
+    "vert",
     "weighting",
 ]

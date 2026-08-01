@@ -5,6 +5,7 @@ import numpy as np
 
 from sm9rrsfl.datasets import make_synthetic_mnist_like
 from sm9rrsfl.fl import ExperimentConfig, run_experiment
+from sm9rrsfl.svd_detector import DetectionResult
 
 
 class FederatedLoopTest(unittest.TestCase):
@@ -89,6 +90,7 @@ class FederatedLoopTest(unittest.TestCase):
             [record.accuracy for record in uninterrupted.records],
         )
         self.assertEqual(resumed.blacklisted_clients, uninterrupted.blacklisted_clients)
+        self.assertEqual(resumed.diagnostics, uninterrupted.diagnostics)
 
     def test_alternating_minimization_runs_inside_local_training(self):
         from sm9rrsfl import fl as fl_module
@@ -250,7 +252,13 @@ class FederatedLoopTest(unittest.TestCase):
             mock.patch.object(
                 fl_module.LongitudinalSVDDetector,
                 "evaluate",
-                return_value=mock.Mock(accepted=False, count_increment=True),
+                return_value=DetectionResult(
+                    accepted=False,
+                    reason="z_score_threshold",
+                    count_increment=True,
+                    z_sigma=4.0,
+                    z_direction=5.0,
+                ),
             ),
             mock.patch.object(
                 fl_module,
@@ -298,7 +306,13 @@ class FederatedLoopTest(unittest.TestCase):
         with mock.patch.object(
             fl_module.LongitudinalSVDDetector,
             "evaluate",
-            return_value=mock.Mock(accepted=False, count_increment=True),
+            return_value=DetectionResult(
+                accepted=False,
+                reason="z_score_threshold",
+                count_increment=True,
+                z_sigma=4.0,
+                z_direction=5.0,
+            ),
         ):
             result = run_experiment(
                 dataset,
@@ -329,7 +343,13 @@ class FederatedLoopTest(unittest.TestCase):
         with mock.patch.object(
             fl_module.LongitudinalSVDDetector,
             "evaluate",
-            return_value=mock.Mock(accepted=False, count_increment=False),
+            return_value=DetectionResult(
+                accepted=False,
+                reason="z_score_threshold",
+                count_increment=False,
+                z_sigma=4.0,
+                z_direction=1.0,
+            ),
         ):
             result = run_experiment(
                 dataset,
@@ -350,6 +370,84 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertEqual(result.blacklisted_clients, tuple())
         self.assertEqual(result.records[-1].accepted_updates, 1)
         self.assertEqual(result.records[-1].rejected_updates, 0)
+        self.assertEqual(len(result.diagnostics), 2)
+        diagnostic = result.diagnostics[-1]
+        self.assertEqual(diagnostic.z_sigma, 4.0)
+        self.assertEqual(diagnostic.z_direction, 1.0)
+        self.assertTrue(diagnostic.sigma_exceeded)
+        self.assertFalse(diagnostic.direction_exceeded)
+        self.assertTrue(diagnostic.suspicious)
+        self.assertFalse(diagnostic.count_increment)
+        self.assertEqual(diagnostic.count_after, 0)
+        self.assertAlmostEqual(
+            diagnostic.weight_after_penalty_recovery,
+            0.5,
+        )
+        # A single remaining client is normalized back to aggregate weight 1;
+        # retaining the pre-normalization value makes this visible.
+        self.assertAlmostEqual(diagnostic.aggregation_weight, 1.0)
+
+    def test_vert_uses_two_bootstrap_rounds_then_filters(self):
+        dataset = make_synthetic_mnist_like(
+            train_samples=40,
+            test_samples=10,
+            seed=124,
+        )
+        result = run_experiment(
+            dataset,
+            ExperimentConfig(
+                method="vert",
+                malicious_ratio=0.5,
+                num_clients=4,
+                rounds=3,
+                local_epochs=1,
+                batch_size=8,
+                attack="none",
+                compute_backend="numpy",
+                vert_projection_dim=16,
+                vert_predict_epochs=1,
+                early_stop=False,
+                seed=124,
+            ),
+        )
+
+        self.assertEqual(result.records[1].accepted_updates, 4)
+        self.assertEqual(result.records[2].accepted_updates, 4)
+        self.assertEqual(result.records[3].accepted_updates, 1)
+        self.assertEqual(result.records[3].rejected_updates, 3)
+        self.assertEqual(result.blacklisted_clients, tuple())
+
+    def test_fedredefense_runs_reconstruction_and_keeps_state_checkpointable(self):
+        dataset = make_synthetic_mnist_like(
+            train_samples=20,
+            test_samples=10,
+            seed=125,
+        )
+        checkpoints = []
+        result = run_experiment(
+            dataset,
+            ExperimentConfig(
+                method="fedredefense",
+                malicious_ratio=0.0,
+                num_clients=2,
+                rounds=1,
+                local_epochs=1,
+                batch_size=8,
+                attack="none",
+                compute_backend="numpy",
+                fedre_threshold=100.0,
+                fedre_initial_iterations=1,
+                fedre_max_iterations=1,
+                fedre_synthetic_steps=1,
+                early_stop=False,
+                seed=125,
+            ),
+            checkpoint_callback=checkpoints.append,
+        )
+
+        self.assertEqual(result.records[-1].accepted_updates, 2)
+        self.assertEqual(result.records[-1].rejected_updates, 0)
+        self.assertIsNotNone(checkpoints[-1]["fedre_defense"])
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import csv
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 import ctypes
 from datetime import datetime, timezone
 import hashlib
@@ -22,6 +22,7 @@ import traceback
 from .datasets import load_image_dataset
 from .crypto import rrs_backend_name, sm3_backend_name
 from .fl import (
+    ClientDiagnosticRecord,
     ExperimentConfig,
     ExperimentResult,
     RoundRecord,
@@ -40,7 +41,7 @@ PROGRESS_BAR_WIDTH = 28
 _WORKER_DATASET = None
 _WORKER_CHECKPOINT_DIR = None
 _WORKER_RUN_FINGERPRINT = None
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 3
 COMPLETED_RESULTS_SNAPSHOT = ".completed_results.pickle"
 DATASET_TRAINING_PRESETS = {
     "mnist": {
@@ -241,6 +242,7 @@ def main() -> None:
 
     summary_path = output_dir / "summary.csv"
     rounds_path = output_dir / "rounds.csv"
+    diagnostics_path = output_dir / "sm9rrs_diagnostics.csv"
     json_path = output_dir / "summary.json"
     write_result_files(output_dir, results)
     visualization_path = None
@@ -251,6 +253,7 @@ def main() -> None:
     print_summary(results)
     print(f"wrote {summary_path}")
     print(f"wrote {rounds_path}")
+    print(f"wrote {diagnostics_path}")
     print(f"wrote {json_path}")
     if visualization_path is not None:
         print(f"wrote {visualization_path}")
@@ -283,8 +286,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        choices=["sm9rrs", "krum", "ding13", "fedavg"],
-        default=["sm9rrs", "krum", "ding13", "fedavg"],
+        choices=[
+            "sm9rrs",
+            "vert",
+            "fedredefense",
+            "krum",
+            "ding13",
+            "fedavg",
+        ],
+        default=[
+            "sm9rrs",
+            "vert",
+            "fedredefense",
+            "krum",
+            "ding13",
+            "fedavg",
+        ],
     )
     parser.add_argument("--ratios", nargs="+", type=float, default=list(DEFAULT_RATIOS))
     parser.add_argument("--num-clients", type=int, default=20)
@@ -455,6 +472,73 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "required before threshold trace and revocation are requested."
         ),
     )
+    parser.add_argument(
+        "--vert-history-window",
+        type=int,
+        default=10,
+        help="VERT historical projected-gradient window H (paper default: 10).",
+    )
+    parser.add_argument(
+        "--vert-projection-dim",
+        type=int,
+        default=128,
+        help="VERT low-dimensional projector output size for MNIST.",
+    )
+    parser.add_argument(
+        "--vert-predict-epochs",
+        type=int,
+        default=5,
+        help="VERT predictor/coefficient Adam epochs per client and round.",
+    )
+    parser.add_argument(
+        "--vert-predict-lr",
+        type=float,
+        default=1e-3,
+        help="VERT predictor/coefficient Adam learning rate.",
+    )
+    parser.add_argument(
+        "--vert-top-k",
+        type=int,
+        default=0,
+        help=(
+            "VERT aggregation client count. 0 follows the paper's experiment "
+            "rule: expected honest active clients minus one; ratio 0 keeps all."
+        ),
+    )
+    parser.add_argument(
+        "--fedre-threshold",
+        type=float,
+        default=0.6,
+        help="FedREDefense normalized reconstruction-error threshold.",
+    )
+    parser.add_argument(
+        "--fedre-initial-iterations",
+        type=int,
+        default=800,
+        help="FedREDefense synthesis iterations for a client's first observation.",
+    )
+    parser.add_argument(
+        "--fedre-max-iterations",
+        type=int,
+        default=2000,
+        help="FedREDefense synthesis iterations after the first observation.",
+    )
+    parser.add_argument(
+        "--fedre-synthetic-steps",
+        type=int,
+        default=5,
+        help="Differentiable synthetic SGD steps per reconstruction iteration.",
+    )
+    parser.add_argument(
+        "--fedre-images-per-class",
+        type=int,
+        default=1,
+        help="FedREDefense persistent synthetic images per class.",
+    )
+    parser.add_argument("--fedre-image-lr", type=float, default=0.5)
+    parser.add_argument("--fedre-label-lr", type=float, default=0.2)
+    parser.add_argument("--fedre-teacher-lr", type=float, default=0.1)
+    parser.add_argument("--fedre-teacher-lr-lr", type=float, default=5e-6)
     parser.add_argument("--no-visualizations", action="store_true")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress and ETA output.")
     parser.add_argument(
@@ -547,6 +631,61 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         ),
         (args.suspicion_remove_after >= 1, "--C_tol must be at least 1"),
         (
+            args.vert_history_window >= 2,
+            "--vert-history-window must be at least 2",
+        ),
+        (
+            args.vert_projection_dim >= 2,
+            "--vert-projection-dim must be at least 2",
+        ),
+        (
+            args.vert_predict_epochs >= 1,
+            "--vert-predict-epochs must be at least 1",
+        ),
+        (
+            math.isfinite(args.vert_predict_lr) and args.vert_predict_lr > 0.0,
+            "--vert-predict-lr must be finite and positive",
+        ),
+        (args.vert_top_k >= 0, "--vert-top-k must be non-negative"),
+        (
+            math.isfinite(args.fedre_threshold) and args.fedre_threshold > 0.0,
+            "--fedre-threshold must be finite and positive",
+        ),
+        (
+            args.fedre_initial_iterations >= 1,
+            "--fedre-initial-iterations must be at least 1",
+        ),
+        (
+            args.fedre_max_iterations >= 1,
+            "--fedre-max-iterations must be at least 1",
+        ),
+        (
+            args.fedre_synthetic_steps >= 1,
+            "--fedre-synthetic-steps must be at least 1",
+        ),
+        (
+            args.fedre_images_per_class >= 1,
+            "--fedre-images-per-class must be at least 1",
+        ),
+        (
+            math.isfinite(args.fedre_image_lr) and args.fedre_image_lr > 0.0,
+            "--fedre-image-lr must be finite and positive",
+        ),
+        (
+            math.isfinite(args.fedre_label_lr) and args.fedre_label_lr > 0.0,
+            "--fedre-label-lr must be finite and positive",
+        ),
+        (
+            math.isfinite(args.fedre_teacher_lr)
+            and args.fedre_teacher_lr > 0.0,
+            "--fedre-teacher-lr must be finite and positive",
+        ),
+        (
+            math.isfinite(args.fedre_teacher_lr_lr)
+            and args.fedre_teacher_lr_lr > 0.0,
+            "--fedre-teacher-lr-lr must be finite and positive",
+        ),
+        (
             1 <= args.dkg_threshold <= args.dkg_nodes,
             "--dkg-threshold must satisfy 1 <= threshold <= --dkg-nodes",
         ),
@@ -609,6 +748,20 @@ def build_experiment_configs(args: argparse.Namespace) -> list[ExperimentConfig]
                             suspicion_penalty_factor=args.suspicion_penalty_factor,
                             suspicion_recovery_factor=args.suspicion_recovery_factor,
                             suspicion_remove_after=args.suspicion_remove_after,
+                            vert_history_window=args.vert_history_window,
+                            vert_projection_dim=args.vert_projection_dim,
+                            vert_predict_epochs=args.vert_predict_epochs,
+                            vert_predict_lr=args.vert_predict_lr,
+                            vert_top_k=args.vert_top_k,
+                            fedre_threshold=args.fedre_threshold,
+                            fedre_initial_iterations=args.fedre_initial_iterations,
+                            fedre_max_iterations=args.fedre_max_iterations,
+                            fedre_synthetic_steps=args.fedre_synthetic_steps,
+                            fedre_images_per_class=args.fedre_images_per_class,
+                            fedre_image_lr=args.fedre_image_lr,
+                            fedre_label_lr=args.fedre_label_lr,
+                            fedre_teacher_lr=args.fedre_teacher_lr,
+                            fedre_teacher_lr_lr=args.fedre_teacher_lr_lr,
                             seed=args.seed,
                         )
                     )
@@ -1019,6 +1172,7 @@ def archive_stale_results(
         for path in (
             output_dir / "summary.csv",
             output_dir / "rounds.csv",
+            output_dir / "sm9rrs_diagnostics.csv",
             output_dir / "summary.json",
             output_dir / "skipped_configs.json",
             output_dir / "last_failure.json",
@@ -1477,6 +1631,7 @@ def write_result_files(output_dir: Path, results: list[ExperimentResult]) -> Non
     targets = {
         "summary": output_dir / "summary.csv",
         "rounds": output_dir / "rounds.csv",
+        "diagnostics": output_dir / "sm9rrs_diagnostics.csv",
         "json": output_dir / "summary.json",
     }
     temporary = {
@@ -1484,6 +1639,7 @@ def write_result_files(output_dir: Path, results: list[ExperimentResult]) -> Non
     }
     write_summary(temporary["summary"], results)
     write_rounds(temporary["rounds"], results)
+    write_diagnostics(temporary["diagnostics"], results)
     with temporary["json"].open("w", encoding="utf-8") as handle:
         json.dump([result.summary_dict() for result in results], handle, indent=2)
     for name, target in targets.items():
@@ -1515,6 +1671,39 @@ def write_rounds(path: Path, results: list[ExperimentResult]) -> None:
         return
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_diagnostics(path: Path, results: list[ExperimentResult]) -> None:
+    """Write per-client SM9-RRS detector/weight state for every active round."""
+
+    prefix_fields = [
+        "partition",
+        "dirichlet_alpha",
+        "num_clients",
+        "method",
+        "malicious_ratio",
+    ]
+    diagnostic_fields = [item.name for item in fields(ClientDiagnosticRecord)]
+    rows = []
+    for result in results:
+        for record in getattr(result, "diagnostics", ()):
+            rows.append(
+                {
+                    "partition": result.config.partition,
+                    "dirichlet_alpha": result.config.dirichlet_alpha,
+                    "num_clients": result.config.num_clients,
+                    "method": result.config.method,
+                    "malicious_ratio": result.config.malicious_ratio,
+                    **asdict(record),
+                }
+            )
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=prefix_fields + diagnostic_fields,
+        )
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1600,6 +1789,26 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             suspicion_penalty_factor=float(row.get("suspicion_penalty_factor") or 0.5),
             suspicion_recovery_factor=float(row.get("suspicion_recovery_factor") or 2.0),
             suspicion_remove_after=int(row.get("suspicion_remove_after") or 3),
+            vert_history_window=int(row.get("vert_history_window") or 10),
+            vert_projection_dim=int(row.get("vert_projection_dim") or 128),
+            vert_predict_epochs=int(row.get("vert_predict_epochs") or 5),
+            vert_predict_lr=float(row.get("vert_predict_lr") or 1e-3),
+            vert_top_k=int(row.get("vert_top_k") or 0),
+            fedre_threshold=float(row.get("fedre_threshold") or 0.6),
+            fedre_initial_iterations=int(
+                row.get("fedre_initial_iterations") or 800
+            ),
+            fedre_max_iterations=int(row.get("fedre_max_iterations") or 2000),
+            fedre_synthetic_steps=int(row.get("fedre_synthetic_steps") or 5),
+            fedre_images_per_class=int(
+                row.get("fedre_images_per_class") or 1
+            ),
+            fedre_image_lr=float(row.get("fedre_image_lr") or 0.5),
+            fedre_label_lr=float(row.get("fedre_label_lr") or 0.2),
+            fedre_teacher_lr=float(row.get("fedre_teacher_lr") or 0.1),
+            fedre_teacher_lr_lr=float(
+                row.get("fedre_teacher_lr_lr") or 5e-6
+            ),
             seed=int(row["seed"]),
         )
         record_key = (partition, alpha, num_clients, row["method"], ratio)
@@ -1672,7 +1881,7 @@ def print_summary(results: list[ExperimentResult]) -> None:
         print(
             f"{result.config.partition:9s} "
             f"{result.config.num_clients:7d} "
-            f"{result.config.method:7s} "
+            f"{result.config.method:13s} "
             f"{result.config.malicious_ratio:0.2f} "
             f"{result.final_accuracy:0.4f} "
             f"{result.final_error:0.4f} "

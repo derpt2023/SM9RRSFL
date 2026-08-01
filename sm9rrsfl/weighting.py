@@ -9,6 +9,7 @@ from typing import Iterable
 @dataclass(frozen=True)
 class WeightUpdateResult:
     weights: dict[str, float]
+    pre_normalization_weights: dict[str, float]
     suspicious_tags: set[str]
     count_increment_tags: set[str]
     trace_requested_tags: set[str]
@@ -69,7 +70,13 @@ class SuspicionWeightManager:
 
         active = list(dict.fromkeys(active_tags))
         if not active:
-            return WeightUpdateResult(dict(self.weights), set(), set(), set())
+            return WeightUpdateResult(
+                dict(self.weights),
+                dict(self.weights),
+                set(),
+                set(),
+                set(),
+            )
         if not count_increment_tags.issubset(suspicious_tags):
             raise ValueError("count_increment_tags must be a subset of suspicious_tags")
         uniform_weight = 1.0 / len(active)
@@ -106,9 +113,13 @@ class SuspicionWeightManager:
                 # pending, but this is not yet a permanent revocation.
                 self.weights[tag] = 0.0
 
+        pre_normalization_weights = {
+            tag: self.weights.get(tag, 0.0) for tag in active
+        }
         self._renormalize(active)
         return WeightUpdateResult(
             weights=dict(self.weights),
+            pre_normalization_weights=pre_normalization_weights,
             suspicious_tags=set(suspicious_tags),
             count_increment_tags=set(count_increment_tags),
             trace_requested_tags=trace_requested,

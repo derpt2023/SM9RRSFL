@@ -13,8 +13,8 @@
 - 攻击端实现 Bhagoji 等人的带距离约束交替最小化：恶意客户端在本地训练中交替优化目标误分类损失与正常任务/距离隐蔽损失，并只对目标攻击步进行显式提升；Ding 等人的实验以该攻击为基础。旧版“轮换参数分片并注入随机扰动”的实现已经删除，不再把一般向量噪声称为交替最小化攻击。
 - 联邦学习主流程通过 `ClientSigner`、`ASVerifier` 和 `AuditorService` 角色对象分别调用签名、完整验签和门限追踪。客户端对象只保存本客户端私钥和成员见证；AS 对象保存验签所需公开参数、非公开任务点、TPK、审计台账和独立的审计提交认证密钥，但不含任何客户端签名私钥或 D-KGC 追踪份额。AS 候选状态仅按不透明任务标签索引，不保存标签到真实身份的映射。
 - Krum 与 FedAvg baseline，对照实验使用相同数据划分、恶意比例和攻击方式；FedAvg/加权聚合按客户端本地样本数加权，Krum 保持原始单更新选择语义。
-- 文献 [13] 对照实验：复现其“奇异值轨迹差分 + Isolation Forest + 动态权重惩罚/恢复 + 连续异常剔除”的在线投毒检测流程。
-- 输出 `summary.csv`、`rounds.csv`、`summary.json`，并自动生成 HTML/SVG 可视化图表，便于后续绘图和论文表格整理。
+- TAD（Trajectory Anomaly Detection，文献 [13]）对照实验：复现其“奇异值轨迹差分 + Isolation Forest + 动态权重惩罚/恢复 + 连续异常剔除”的在线投毒检测流程。
+- 输出 `summary.csv`、`rounds.csv`、`sm9rrs_diagnostics.csv`、`summary.json`，并自动生成 HTML/SVG 可视化图表，便于后续绘图、检测诊断和论文表格整理。
 
 当前协议版本为 v2。任务公共环由 `RID`、`ACC` 和成员见证 `W_π` 表示；客户端生成任务级标签 `Tag_π` 与承诺 `R_tag`，AS 通过两个验证等式同时检查环签名及标签归属。同一标签连续异常达到阈值后，AS 先用独立控制面 Schnorr 票据认证其提交的精确证据；每个参与 D-KGC 逻辑端点验证该票据后，再对 `TaskID、RID、H5(E_π)` 和一次性会话标识生成独立批准。只有至少 `t` 份有效批准才能启动门限追踪并生成 `τ_trace`，节点名称或整数编号本身不构成授权。该票据用于实现论文所假设的 AS→Auditor/D-KGC 认证信道，不进入 `E_π`、`H5(E_π)` 或环签名公式。AS 仅在验证追踪证据与门限 Schnorr 证书后更新黑名单和任务环。协议中不存在加密身份陷门，也不存在独立的非交互式零知识证明对象；Fiat-Shamir 哈希挑战 `c` 是环签名本身的一部分。
 
@@ -30,6 +30,7 @@ AS 创建追踪证据时会把完整不可变证据、摘要和控制面授权�
 - `sm9rrsfl/sm9_backend.py`、`sm9rrsfl/_native_sm9.c`：定长字节接口和基于 GmSSL 的国标 SM9 `G1/G2/GT`、配对及 `H_v` 原生桥。
 - `sm9rrsfl/_native_sm3.c`：大更新 SM3 摘要的可选原生加速器。`_native_rrs.c` 是已停用的 v1 源码，不参与 v2 构建或运行。
 - `sm9rrsfl/fl.py`、`sm9rrsfl/experiments.py`：联邦训练主流程和 MNIST/CIFAR-10 对比实验入口。
+- `sm9rrsfl/vert.py`、`sm9rrsfl/fedredefense.py`：VERT 纵向历史梯度预测基线和 FedREDefense 更新重构误差基线。
 - `sm9rrsfl/benchmarks/`：独立微基准实验入口，不混入 CNN 训练时间；目前包含签名与验签开销测试。
 - `gmssl/`：历史 Python 兼容代码；v2 的真实 SM9 群运算不使用其中的旧双线性曲线，而由 `_native_sm9` 调用用户提供的 GmSSL C 源码。
 - `tests/`：单元测试与流程自检。
@@ -53,7 +54,7 @@ python -m pip install -r requirements.txt
 python setup.py build_ext --inplace
 ```
 
-基础运行不强制依赖 PyTorch、torchvision 或 scikit-learn；文献 [13] 的 Isolation Forest 已用纯 NumPy 实现。`simulated` 模式无需 GmSSL 原生扩展；真实 `sm9` 模式需要用户提供的 GmSSL C 源码和成功构建的 `_native_sm9` 扩展。
+基础运行不强制依赖 PyTorch、torchvision 或 scikit-learn；TAD 的 Isolation Forest 已用纯 NumPy 实现。`FedREDefense` 的服务端更新重构依赖 PyTorch 高阶自动微分，因此即使客户端训练选择 `--compute-backend numpy`，运行该方法也必须安装 PyTorch；按论文默认迭代数执行时，其运行时间会显著长于其余方法。`simulated` 模式无需 GmSSL 原生扩展；真实 `sm9` 模式需要用户提供的 GmSSL C 源码和成功构建的 `_native_sm9` 扩展。
 
 `setup.py` 优先使用显式的 `GMSSL_SOURCE=/绝对路径/GmSSL-master`；否则读取 `GMSSL_ARCHIVE` 指定的压缩包，未指定时使用 `~/Downloads/GmSSL-master.zip`。默认归档固定为 GmSSL `3.3.0-dev.1183`，构建前校验 SHA-256，按摘要隔离缓存并执行受限解压；源码存在时 `_native_sm9` 编译失败会直接终止。真实模式启动时应输出 `rrs_backend=gmssl-sm9-native-v2`。若该桥未构建，`crypto_mode="sm9"` 会明确报错，不会静默退回非国标参考曲线；`simulated` 模式仍可运行。`_native_sm3` 构建失败时，更新摘要会回退到 OpenSSL 或 Python SM3。
 
@@ -102,7 +103,10 @@ python -m sm9rrsfl.experiments \
   --rounds 7 \
   --train-samples 800 \
   --test-samples 200 \
-  --methods sm9rrs krum ding13 fedavg
+  --methods sm9rrs vert fedredefense krum ding13 fedavg \
+  --fedre-initial-iterations 2 \
+  --fedre-max-iterations 2 \
+  --fedre-synthetic-steps 1
 ```
 
 真实 SM9 模式也可以运行；大规模重复实验建议先使用 `--crypto-mode simulated`，确认参数后再切换到 `--crypto-mode sm9`。
@@ -172,9 +176,9 @@ python -m sm9rrsfl.benchmarks.crypto_overhead \
 
 主实验使用统一的模型接口，并分别在 MNIST 和 CIFAR-10 上运行。MNIST 仍使用轻量 compact CNN；CIFAR-10 会自动切换到更适合该数据集的 `Conv-Conv-FC-FC-Logits` CNN，并对 CIFAR-10 图像执行通道标准化。本项目不会在一个命令中同时跑两个数据集：每次启动只选择一个 `--dataset`，默认输出目录也按数据集隔离，避免 CIFAR-10 影响 MNIST 的复现实验速度。
 
-两组主实验均对比本方案、Krum、文献 [13] 和 FedAvg，并保留原有实验变量：恶意节点比例、IID/Dirichlet 数据分布、Dirichlet 参数、客户端数量、训练轮次和目标误差阈值。
+两组主实验均对比本方案、VERT、FedREDefense、Krum、TAD 和 FedAvg，并保留原有实验变量：恶意节点比例、IID/Dirichlet 数据分布、Dirichlet 参数、客户端数量、训练轮次和目标误差阈值。
 
-论文实验配置原则：先用 `0%` 恶意节点的 FedAvg/干净训练确认数据集和 CNN 能正常收敛，然后固定同一套模型结构、`E`、`B`、`lr`、`lr_decay` 和 `rounds`，再比较 SM9-RRS-FL、FedAvg、Krum 和文献 [13] 在攻击场景下的鲁棒性。不要为某个防御方法单独调整 CNN 或训练超参。
+论文实验配置原则：先用 `0%` 恶意节点的 FedAvg/干净训练确认数据集和 CNN 能正常收敛，然后固定同一套模型结构、`E`、`B`、`lr`、`lr_decay` 和 `rounds`，再比较 SM9-RRS-FL、VERT、FedREDefense、FedAvg、Krum 和 TAD 在攻击场景下的鲁棒性。各防御算法自身的论文参数单独记录，但不要为某个方法调整共享 CNN 或客户端训练超参。
 
 ### 数据集模型与训练协议
 
@@ -188,13 +192,15 @@ python -m sm9rrsfl.benchmarks.crypto_overhead \
 联邦聚合口径：
 
 - FedAvg 使用各客户端本地样本数作为聚合权重；在 Dirichlet 非 IID 划分下，样本更多的客户端对全局更新贡献更大。
-- SM9-RRS-FL 严格使用第 4.3.3 节归一化后的动态权重 `w_i`，不再二次乘本地样本数；文献 [13] 对照实现仍保持其原实验聚合口径。
+- SM9-RRS-FL 严格使用第 4.3.3 节归一化后的动态权重 `w_i`，不再二次乘本地样本数；TAD 对照实现仍保持其原实验聚合口径。
 - Krum 保持原始算法语义：每轮选择一个更新，不在 `0%` 恶意节点时自动退化为 FedAvg。
+- VERT 前两轮使用 FedAvg 建立纵向历史，此后训练低维投影空间中的三层预测器与两个集成系数，按预测/实际更新余弦相似度选择 Top-k 并进行相似度加权聚合。
+- FedREDefense 为每个客户端维护合成图像、软标签和合成学习率，以归一化模型更新重构误差过滤客户端；被判为恶意的客户端沿用官方实现语义，在后续轮次不再参与。
 - SM9-RRS-FL 对所有通过密码验证的更新统一执行相同的纵向 SVD 检测；代码不读取“是否恶意”的实验真值来改变判定，也不按数据集暗改窗口或阈值。
 
 ## simulated 模式快速实验
 
-如果只是想先确认 CNN 训练流程、四组方法对比、IID/Dirichlet 划分和可视化是否能正常跑通，可以先使用 `--crypto-mode simulated` 做小规模快速实验。下面两条命令分别运行 MNIST 和 CIFAR-10，不会互相影响，也不会覆盖正式主实验输出。
+如果只是想先确认 CNN 训练流程、六组方法对比、IID/Dirichlet 划分和可视化是否能正常跑通，可以先使用 `--crypto-mode simulated` 做小规模快速实验。下面的快速命令把 FedREDefense 的合成优化迭代数临时降到 `2`，只用于检查流程，不能作为论文结果。
 
 MNIST 快速实验：
 
@@ -203,7 +209,7 @@ python -m sm9rrsfl.experiments \
   --dataset mnist \
   --download \
   --data-dir data/mnist \
-  --methods sm9rrs krum ding13 fedavg \
+  --methods sm9rrs vert fedredefense krum ding13 fedavg \
   --ratios 0.00 0.20 0.40 \
   --partitions iid dirichlet \
   --dirichlet-alpha 0.5 \
@@ -212,6 +218,9 @@ python -m sm9rrsfl.experiments \
   --train-samples 2000 \
   --test-samples 500 \
   --target-error 0.12 \
+  --fedre-initial-iterations 2 \
+  --fedre-max-iterations 2 \
+  --fedre-synthetic-steps 1 \
   --crypto-mode simulated \
   --output-dir outputs/quick_mnist_simulated
 ```
@@ -223,7 +232,7 @@ python -m sm9rrsfl.experiments \
   --dataset cifar10 \
   --download \
   --data-dir data/cifar10 \
-  --methods sm9rrs krum ding13 fedavg \
+  --methods sm9rrs vert fedredefense krum ding13 fedavg \
   --ratios 0.00 0.20 0.40 \
   --partitions iid dirichlet \
   --dirichlet-alpha 0.5 \
@@ -232,6 +241,9 @@ python -m sm9rrsfl.experiments \
   --train-samples 3000 \
   --test-samples 500 \
   --target-error 0.12 \
+  --fedre-initial-iterations 2 \
+  --fedre-max-iterations 2 \
+  --fedre-synthetic-steps 1 \
   --crypto-mode simulated \
   --output-dir outputs/quick_cifar10_simulated
 ```
@@ -240,14 +252,14 @@ python -m sm9rrsfl.experiments \
 
 ## MNIST 主实验
 
-运行本方案、Krum、文献 [13] 和 FedAvg 四组对照：
+运行本方案、VERT、FedREDefense、Krum、TAD 和 FedAvg 六组对照：
 
 ```bash
 python -m sm9rrsfl.experiments \
   --dataset mnist \
   --download \
   --data-dir data/mnist \
-  --methods sm9rrs krum ding13 fedavg \
+  --methods sm9rrs vert fedredefense krum ding13 fedavg \
   --ratios 0.00 0.10 0.20 0.40 0.45 0.60 0.80 \
   --partitions iid dirichlet \
   --dirichlet-alpha 0.5 \
@@ -290,14 +302,14 @@ python -m sm9rrsfl.experiments \
 
 ## CIFAR-10 主实验
 
-CIFAR-10 使用相同四组方法和相同实验变量，但单独启动：
+CIFAR-10 使用相同六组方法和相同实验变量，但单独启动：
 
 ```bash
 python -m sm9rrsfl.experiments \
   --dataset cifar10 \
   --download \
   --data-dir data/cifar10 \
-  --methods sm9rrs krum ding13 fedavg \
+  --methods sm9rrs vert fedredefense krum ding13 fedavg \
   --ratios 0.00 0.10 0.20 0.40 0.45 0.60 0.80 \
   --partitions iid dirichlet \
   --dirichlet-alpha 0.5 \
@@ -403,7 +415,7 @@ python -m sm9rrsfl.experiments \
   --visualize-only
 ```
 
-如果要更贴近文献 [13] 的公开实验比例，可以额外运行：
+如果要更贴近 TAD（文献 [13]）的公开实验比例，可以额外运行：
 
 ```bash
 python -m sm9rrsfl.experiments \
@@ -438,7 +450,7 @@ python -m sm9rrsfl.experiments
 - `--data-dir data/mnist|data/cifar10`：数据集目录；未指定时会按 `--dataset` 自动选择默认目录。
 - `--download`：在本地文件缺失时下载 MNIST 或 CIFAR-10；已存在的文件不会重复下载。`synthetic` 不需要该参数。
 - `--train-samples 10000` / `--test-samples 2000`：对 MNIST/CIFAR-10 限制载入的训练集/测试集样本数，对 `synthetic` 指定生成的样本数；真实数据集不传时使用完整数据。
-- `--methods sm9rrs krum ding13 fedavg`：选择一个或多个实验方法，默认运行全部四种方法。
+- `--methods sm9rrs vert fedredefense krum ding13 fedavg`：选择一个或多个实验方法，默认运行全部六种方法。结果文件保留稳定的内部标识；可视化图例将 `sm9rrs` 显示为 `Ours`，将 `ding13` 显示为 `TAD`。
 - `--ratios 0.00 0.10 0.20 0.40 0.45 0.60 0.80`：设置一个或多个恶意节点比例，取值范围为 $[0,1)$；建议保留 `0.00` 用于生成无恶意节点基线图。
 - `--num-clients 20`：设置单个客户端数量，默认 `20`；当没有传 `--client-counts` 时生效。
 - `--client-counts 20 50 100`：一次运行多个客户端数量，并生成客户端数量横向对比图；该参数优先于 `--num-clients`。兼容旧参数名 `--num-clients-list`。
@@ -478,6 +490,17 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 - `--suspicion-penalty-factor 0.5`：SM9RRS 中疑似节点的聚合权重惩罚因子，默认 `0.5`。
 - `--suspicion-recovery-factor 2.0`：疑似节点后续恢复正常时的权重恢复倍数，默认 `2.0`。
 - `--C_tol 3`：论文中的连续双指标异常阈值 $C_{\mathrm{tol}}$，默认 `3`。只有 $z_{\sigma}>\theta$ 与 $z_{\rho}>\theta$ 在同一轮同时成立时，`Count` 才增加；单指标越界仅触发动态降权并将连续计数清零。同一任务标签连续双指标共同越界达到该次数后，SM9RRS 请求门限追踪；只有追踪证书通过后才撤销身份并剔除。该参数不控制 Ding13，兼容参数名 `--c-tol` 和 `--suspicion-remove-after`。
+
+#### VERT 与 FedREDefense 参数
+
+- `--vert-history-window 10`：VERT 使用的历史投影更新轮数 $H$，默认采用论文设置 `10`。前两轮只建立历史并执行 FedAvg，从第 3 轮开始训练预测器和筛选更新。
+- `--vert-projection-dim 128`：MNIST 低维投影输出长度，默认采用论文设置 `128`。MNIST 使用固定随机全连接投影器；若模型对应的稠密投影矩阵超过 `256 MiB`，实现会切换到固定稀疏符号哈希投影，以避免 CIFAR 大模型出现不可执行的内存占用，该工程适配必须在论文复现说明中披露。
+- `--vert-predict-epochs 5` / `--vert-predict-lr 0.001`：VERT 每轮对共享三层预测器以及两个逐元素集成系数执行的 Adam 训练轮数和学习率，默认采用论文设置。
+- `--vert-top-k 0`：VERT 每轮进入聚合的客户端数量。正整数表示显式 $k$；默认 `0` 按原论文实验表中的规则取“配置恶意比例下的预期诚实活跃客户端数减一”，在 `0%` 恶意比例时保留全部客户端。由于该自动规则会使用实验配置中的恶意比例，论文应与同样需要 $f$ 的 Krum 一并说明；若要测试不依赖比例先验的固定部署，可显式设置统一的正整数。
+- `--fedre-threshold 0.6`：FedREDefense 的归一化更新重构误差阈值，默认采用官方实现的 `0.6`；超过阈值的客户端被过滤，并按官方 `clients_flags` 语义在后续轮次保持不可用。
+- `--fedre-initial-iterations 800` / `--fedre-max-iterations 2000`：每个客户端第一次和后续轮次优化持久合成数据的最大迭代次数，默认采用官方 Fashion-MNIST 配置。FedREDefense 本身计算开销很大，不应为了缩短论文主实验时间而无说明地降低该参数。
+- `--fedre-synthetic-steps 5` / `--fedre-images-per-class 1`：每次重构的可微合成 SGD 步数，以及每类持久合成图像数，默认采用官方配置。
+- `--fedre-image-lr 0.5`、`--fedre-label-lr 0.2`、`--fedre-teacher-lr 0.1`、`--fedre-teacher-lr-lr 5e-6`：合成图像、软标签、初始合成训练步长及该步长自身的优化学习率，默认采用官方 Fashion-MNIST 配置。
 
 #### 密码、计算后端与并发
 
@@ -522,11 +545,14 @@ python -m sm9rrsfl.benchmarks.crypto_overhead
 
 - `summary.csv`：每个方法和恶意比例的一行摘要，同时包含最终目标攻击成功率 `final_attack_target_success_rate`、平均目标类别置信度 `final_attack_target_confidence`，以及训练、攻击、摘要、封包、签名、验签、检测、聚合和评估的分阶段耗时。使用多个 `sm9-workers` 时，密码字段是各客户端操作耗时之和，用于判断热点；`runtime_seconds` 才是配置的真实墙钟时间。
 - `rounds.csv`：逐轮准确率、误差、目标攻击成功率/置信度、接收/拒绝更新数、黑名单数量、TP/FP 等。交替最小化的无恶意客户端对照组也会在测试集样本充足时记录同一目标指标；非交替最小化配置的目标指标为空值。
+- `sm9rrs_diagnostics.csv`：Ours 的逐客户端逐轮诊断记录，包括两个 Z-Score、对应阈值条件、奇异值变化、方向余弦、异常原因、惩罚/恢复前权重、归一化前权重、实际聚合权重、`Count` 前后值以及追踪、待处理和撤销状态。`client_id` 与 `is_malicious` 仅作为实验真值写入结果，不参与服务器检测或聚合；客户端被撤销后不再提交更新，因此后续轮次不会再产生新的 Z-Score 行。
 - `summary.json`：与 `summary.csv` 对应的 JSON 结果。
 - `run_manifest.json`：本次数据规模与完整配置指纹，用于确认检查点可以安全复用。
 - `skipped_configs.json`：因算法数学条件不成立而在训练前跳过的配置及具体原因。
 - `.completed_results.pickle`：已完成配置的事务式权威快照；即使断电发生在多个 CSV 替换之间，也能据此恢复并重新生成表格。
 - `last_failure.json`：最近一次未预料异常、完整堆栈、出错配置和最后完成轮次；该配置后来成功完成时会标记为 `resolved`。
+
+诊断记录随逐轮检查点一起保存和恢复。已有实验结果是在该字段加入前生成的，不能事后恢复当时未保存的客户端 Z-Score；需要诊断旧配置时必须使用新的输出目录，或明确加入 `--no-resume` 从第 0 轮重跑。
 - `.checkpoints/*.pickle`：当前未完成配置的逐轮状态，配置成功完成后自动删除。
 - `.checkpoints/discarded/*.pickle`：用户在断点询问中选择 `N` 后保留的旧断点备份，不参与自动续跑。
 - `visualizations.html`：自动生成的可视化总览页面。
@@ -554,9 +580,25 @@ python -m sm9rrsfl.benchmarks.crypto_overhead
 
 注意：Krum 在实现上需要满足 `n - f - 2 >= 1`，其中 `n` 为当前参与客户端数，`f` 为恶意客户端数。默认 `20/50/100` 客户端数量下，`80%` 恶意节点仍可运行；如果把客户端数改得很小，`60%` 或 `80%` 可能会使 Krum 无法计算。即使在 `0%` 恶意节点下，Krum 也保持“每轮选择一个更新”的原始语义，不自动替换为 FedAvg。
 
-## 文献 [13] 复现说明
+## VERT 与 FedREDefense 复现说明
 
-文献 [13] 为：
+VERT 文献与官方实现：
+
+Wang J, Wang R, Zhang F. How to Defend Against Large-Scale Model Poisoning Attacks in Federated Learning: A Vertical Solution. IEEE Transactions on Dependable and Secure Computing, 2026. 论文与代码：[arXiv](https://arxiv.org/abs/2411.10673)、[VERT](https://github.com/bo-lab520/VERT)。
+
+本项目的 VERT 位于 `sm9rrsfl/vert.py`，保留官方实现的两轮历史建立、固定随机投影器、三层预测器、两个可训练集成系数、余弦相似度 Top-k 和相似度归一化聚合。MNIST 参数向量规模允许直接使用固定随机全连接投影；只有预计稠密投影器超过 `256 MiB` 时才使用稀疏符号哈希投影。所有被 VERT 排除的客户端仅在当前轮不聚合，其更新历史由本轮全局更新替换，不会像 FedREDefense 一样永久进入黑名单。
+
+FedREDefense 文献与官方实现：
+
+Xie Y, Fang M, Gong N Z. FedREDefense: Defending against Model Poisoning Attacks for Federated Learning using Model Update Reconstruction Error. ICML, 2024: 54460-54474. 论文与代码：[PMLR](https://proceedings.mlr.press/v235/xie24c.html)、[FedREDefense](https://github.com/xyq7/FedREDefense)。
+
+本项目的 FedREDefense 位于 `sm9rrsfl/fedredefense.py`，按照官方 `image_synthesizer.py` 为每个客户端持续维护合成图像、软标签和可训练合成步长，从当前全局参数出发执行可微 SGD，使用“重构参数平方误差 / 实际客户端更新平方范数”作为归一化重构误差，并采用阈值 `0.6`。通过筛选的客户端执行官方等客户端 FedAvg；超过阈值的客户端在后续轮次保持屏蔽。
+
+官方仓库公开的是 Fashion-MNIST、CIFAR-10 和 CINIC-10 脚本，没有单独的 MNIST 参数文件。本项目在 MNIST 上沿用 Fashion-MNIST 的同形状配置，因此论文应写成“基于官方代码迁移到 MNIST”，而不是声称运行了作者发布的 MNIST 脚本。FedREDefense 论文的核心可分性针对“真实本地训练更新与手工构造模型投毒更新”；当前交替最小化攻击本身也通过训练过程生成，所以它可能得到较低重构误差。这属于威胁模型匹配结果，不应通过读取恶意客户端真值或修改阈值来人为强化。
+
+## TAD（文献 [13]）复现说明
+
+TAD 指本文复现的 Trajectory Anomaly Detection 方法，对应文献 [13]：
 
 Ding Z, Wang W, Li X, et al. Identifying alternately poisoning attacks in federated learning online using trajectory anomaly detection method. Scientific Reports, 2024, 14: 20269. 论文链接：[Nature Scientific Reports](https://www.nature.com/articles/s41598-024-70375-w)。
 

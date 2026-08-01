@@ -10,25 +10,31 @@ from .fl import ExperimentResult
 
 
 METHOD_LABELS = {
-    "sm9rrs": "SM9-RRS-FL",
+    "sm9rrs": "Ours",
+    "vert": "VERT",
+    "fedredefense": "FedREDefense",
     "krum": "Krum",
-    "ding13": "文献 [13]",
+    "ding13": "TAD",
     "fedavg": "FedAvg",
 }
 
 METHOD_COLORS = {
     "sm9rrs": "#2563eb",
+    "vert": "#ea580c",
+    "fedredefense": "#0891b2",
     "krum": "#dc2626",
     "ding13": "#16a34a",
     "fedavg": "#7c3aed",
 }
 
-METHOD_ORDER = ["sm9rrs", "krum", "ding13", "fedavg"]
+METHOD_ORDER = ["sm9rrs", "vert", "fedredefense", "ding13", "krum", "fedavg"]
 
 LINE_STYLES = {
-    "SM9-RRS-FL": "",
+    "Ours": "",
+    "VERT": "7 3",
+    "FedREDefense": "2 3",
     "Krum": "8 4",
-    "文献 [13]": "3 4",
+    "TAD": "3 4",
     "FedAvg": "10 3 3 3",
 }
 
@@ -400,7 +406,7 @@ def _dashboard_html(generated: list[tuple[str, str]], *, has_baseline: bool) -> 
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>SM9-RRS-FL 实验可视化</title>
+  <title>联邦学习防御实验可视化</title>
   <style>
     body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #0f172a; background: #f8fafc; }}
     main {{ max-width: 1040px; margin: 0 auto; padding: 32px 24px 56px; }}
@@ -415,7 +421,7 @@ def _dashboard_html(generated: list[tuple[str, str]], *, has_baseline: bool) -> 
 </head>
 <body>
 <main>
-  <h1>SM9-RRS-FL 实验可视化</h1>
+  <h1>联邦学习防御实验可视化</h1>
   <p>本页面由实验脚本自动生成，数据来自同目录下的 <code>summary.csv</code> 与 <code>rounds.csv</code>。</p>
   {note}
   {figures}
@@ -543,7 +549,22 @@ def _split_padded_points(
 
 def _marker(label: str, x: float, y: float, color: str, *, filled: bool) -> str:
     fill = color if filled else "white"
-    if label == "文献 [13]":
+    if label == "VERT":
+        points = (
+            f"{x:.1f},{y - 4.2:.1f} {x + 4.2:.1f},{y:.1f} "
+            f"{x:.1f},{y + 4.2:.1f} {x - 4.2:.1f},{y:.1f}"
+        )
+        return (
+            f'<polygon points="{points}" fill="{fill}" stroke="{color}" '
+            'stroke-width="1.4"/>'
+        )
+    if label == "FedREDefense":
+        return (
+            f'<path d="M {x - 4:.1f} {y:.1f} H {x + 4:.1f} '
+            f'M {x:.1f} {y - 4:.1f} V {y + 4:.1f}" '
+            f'stroke="{color}" stroke-width="1.8"/>'
+        )
+    if label == "TAD":
         return (
             f'<rect x="{x - 3.5:.1f}" y="{y - 3.5:.1f}" width="7" height="7" '
             f'fill="{fill}" stroke="{color}" stroke-width="1.4"/>'

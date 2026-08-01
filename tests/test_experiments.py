@@ -176,6 +176,20 @@ class ExperimentOutputDirTest(unittest.TestCase):
             ["--attack-start-round", "-1"],
             ["--K", "1"],
             ["--C_tol", "0"],
+            ["--vert-history-window", "1"],
+            ["--vert-projection-dim", "1"],
+            ["--vert-predict-epochs", "0"],
+            ["--vert-predict-lr", "0"],
+            ["--vert-top-k", "-1"],
+            ["--fedre-threshold", "0"],
+            ["--fedre-initial-iterations", "0"],
+            ["--fedre-max-iterations", "0"],
+            ["--fedre-synthetic-steps", "0"],
+            ["--fedre-images-per-class", "0"],
+            ["--fedre-image-lr", "0"],
+            ["--fedre-label-lr", "0"],
+            ["--fedre-teacher-lr", "0"],
+            ["--fedre-teacher-lr-lr", "0"],
         )
         for command in invalid_commands:
             with self.subTest(command=command):
@@ -283,6 +297,17 @@ class ExperimentOutputDirTest(unittest.TestCase):
     def test_compute_backend_defaults_to_auto(self):
         args = parse_args([])
 
+        self.assertEqual(
+            args.methods,
+            [
+                "sm9rrs",
+                "vert",
+                "fedredefense",
+                "krum",
+                "ding13",
+                "fedavg",
+            ],
+        )
         self.assertEqual(args.compute_backend, "auto")
         self.assertEqual(args.device, "auto")
         self.assertEqual(args.rounds, 30)
@@ -298,6 +323,15 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(args.attack_source_label, 5)
         self.assertEqual(args.attack_target_label, 7)
         self.assertEqual(args.attack_target_count, 1)
+        self.assertEqual(args.vert_history_window, 10)
+        self.assertEqual(args.vert_projection_dim, 128)
+        self.assertEqual(args.vert_predict_epochs, 5)
+        self.assertEqual(args.vert_predict_lr, 1e-3)
+        self.assertEqual(args.vert_top_k, 0)
+        self.assertEqual(args.fedre_threshold, 0.6)
+        self.assertEqual(args.fedre_initial_iterations, 800)
+        self.assertEqual(args.fedre_max_iterations, 2000)
+        self.assertEqual(args.fedre_synthetic_steps, 5)
 
     def test_alternating_alias_and_parameters_map_to_config(self):
         args = parse_args(
@@ -477,6 +511,47 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(len(snapshot), 1)
         self.assertIn("training_seconds", row)
         self.assertGreaterEqual(restored[0].stage_timings.training_seconds, 0.0)
+
+    def test_sm9rrs_client_diagnostics_are_written(self):
+        dataset = make_synthetic_mnist_like(
+            train_samples=40,
+            test_samples=10,
+            seed=44,
+        )
+        result = run_experiment(
+            dataset,
+            ExperimentConfig(
+                method="sm9rrs",
+                malicious_ratio=0.0,
+                num_clients=2,
+                rounds=2,
+                local_epochs=1,
+                batch_size=8,
+                crypto_mode="simulated",
+                early_stop=False,
+                seed=44,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            write_result_files(output_dir, [result])
+            with (output_dir / "sm9rrs_diagnostics.csv").open(
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({row["method"] for row in rows}, {"sm9rrs"})
+        self.assertIn("z_sigma", rows[0])
+        self.assertIn("z_direction", rows[0])
+        self.assertIn("weight_after_penalty_recovery", rows[0])
+        self.assertIn("aggregation_weight", rows[0])
+        self.assertIn("count_after", rows[0])
+        self.assertEqual(
+            {row["client_id"] for row in rows},
+            {"client-0", "client-1"},
+        )
 
     def test_unexpected_second_round_failure_resumes_from_atomic_checkpoint(self):
         from sm9rrsfl import fl as fl_module
