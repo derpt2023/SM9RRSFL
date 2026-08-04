@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "name": "mnist-6-methods-teacher5-fair-version",
-  "description": "Restored from outputs/mnist_6fangan_teacher5_fairVersion/run_manifest.json.",
+  "name": "cifar10-6-methods-30-rounds",
+  "description": "Equivalent JSON configuration for the CIFAR-10 six-method command.",
   "parameters": {
-    "dataset": "mnist",
+    "dataset": "cifar10",
     "download": true,
-    "data_dir": "data/mnist",
-    "output_dir": "outputs/mnist_6fangan_50rounds",
+    "data_dir": "data/cifar10",
+    "output_dir": "outputs/cifar10_6fangan_30rounds",
     "methods": ["sm9rrs", "vert", "fedredefense", "krum", "ding13", "fedavg"],
     "ratios": [0.0, 0.2, 0.4, 0.6, 0.8],
     "partitions": ["iid", "dirichlet"],

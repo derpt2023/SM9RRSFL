@@ -42,6 +42,31 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertEqual(result.records[-1].rejected_updates, 1)
         self.assertTrue(np.isfinite(result.final_accuracy))
 
+    def test_vert_torch_backend_runs_on_cpu_when_no_accelerator_is_requested(self):
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("PyTorch is not installed")
+        dataset = make_synthetic_mnist_like(train_samples=80, test_samples=20, seed=211)
+        config = ExperimentConfig(
+            method="vert",
+            malicious_ratio=0.0,
+            num_clients=4,
+            rounds=3,
+            local_epochs=1,
+            batch_size=16,
+            compute_backend="torch",
+            device="cpu",
+            crypto_mode="simulated",
+            early_stop=False,
+            seed=211,
+        )
+
+        result = run_experiment(dataset, config)
+
+        self.assertEqual(result.records[-1].round, 3)
+        self.assertTrue(np.isfinite(result.final_accuracy))
+
     def test_invalid_krum_config_fails_before_training(self):
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=14)
         config = ExperimentConfig(

@@ -631,6 +631,8 @@ Wang J, Wang R, Zhang F. How to Defend Against Large-Scale Model Poisoning Attac
 
 本项目的 VERT 位于 `sm9rrsfl/vert.py`，保留两轮历史建立、冻结的随机线性投影、每个全局轮次重新初始化并按客户端顺序训练的共享三层预测器与集成系数、原始线性投影特征、余弦相似度排序、被排除更新以全局更新替换历史，以及入选更新等权 FedAvg 的语义。默认的无先验模式仅把论文已知 $k$ 的 Top-k 选择替换为论文提出的 `K=2` K-means 高相似度簇选择；显式 `--vert-use-ratio-prior` 和正整数 `--vert-top-k` 与它共用同一评分核心。MNIST 参数向量规模允许直接使用固定随机全连接投影；只有预计稠密投影器超过 `256 MiB` 时才使用稀疏符号哈希投影，该路径是面向大模型内存约束的工程适配。所有被 VERT 排除的客户端仅在当前轮不聚合，其更新历史由本轮全局更新替换，不会像 FedREDefense 一样永久进入黑名单。
 
+当 `--compute-backend torch --device cuda`（或可用的 `auto`）启用时，VERT 的固定投影、三层预测器、集成系数训练和余弦评分会使用 Torch 设备张量；历史记录和检查点仍为可移植的 NumPy 数据。无 CUDA/MPS、未安装 Torch 或显式 `--compute-backend numpy` 时，自动保持原有 NumPy 实现，因此 Mac CPU 环境可正常运行。SM9 签名验签仍为 CPU 原生密码学计算。
+
 FedREDefense 文献与官方实现：
 
 Xie Y, Fang M, Gong N Z. FedREDefense: Defending against Model Poisoning Attacks for Federated Learning using Model Update Reconstruction Error. ICML, 2024: 54460-54474. 论文与代码：[PMLR](https://proceedings.mlr.press/v235/xie24c.html)、[FedREDefense](https://github.com/xyq7/FedREDefense)。

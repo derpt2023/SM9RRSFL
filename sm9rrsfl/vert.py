@@ -45,6 +45,8 @@ class VERTDefense:
         learning_rate: float = 1e-2,
         top_k: int = 0,
         malicious_ratio_prior: float | None = None,
+        compute_backend: str = "numpy",
+        device: str = "auto",
         seed: int = 0,
         eps: float = 1e-12,
     ) -> None:
@@ -85,6 +87,8 @@ class VERTDefense:
         )
         self.seed = int(seed)
         self.eps = float(eps)
+        self.compute_backend = str(compute_backend)
+        self.device = str(device)
 
         rng = np.random.default_rng(self.seed + 71_003)
         dense_elements = self.parameter_size * self.projection_dim
@@ -125,6 +129,16 @@ class VERTDefense:
 
         self._client_history: list[dict[str, np.ndarray]] = []
         self._global_history: list[np.ndarray] = []
+        # Device state is intentionally lazy and excluded from checkpoints.
+        # Histories stay as NumPy arrays so checkpoint files remain portable
+        # between CUDA, MPS, and CPU-only hosts.
+        self._torch_checked = False
+        self._torch = None
+        self._torch_device = None
+        self._torch_dense_projection = None
+        self._torch_projection_bias = None
+        self._torch_projection_bucket = None
+        self._torch_projection_sign = None
 
     def evaluate_round(
         self,
@@ -151,6 +165,9 @@ class VERTDefense:
                 weights={client_id: uniform for client_id in selected},
                 scores={client_id: 1.0 for client_id in selected},
             )
+
+        if self._ensure_torch_backend():
+            return self._evaluate_round_torch(features, round_id=round_id)
 
         parameters = self._initialize_trainable_parameters(round_id=round_id)
         moment1 = {
@@ -218,6 +235,290 @@ class VERTDefense:
             self._client_history.pop(0)
         self._global_history.append(global_feature)
         self._client_history.append(current_history)
+
+    def __getstate__(self):
+        """Persist portable NumPy state, never process-local device tensors."""
+
+        state = dict(self.__dict__)
+        for name in (
+            "_torch",
+            "_torch_device",
+            "_torch_dense_projection",
+            "_torch_projection_bias",
+            "_torch_projection_bucket",
+            "_torch_projection_sign",
+        ):
+            state[name] = None
+        state["_torch_checked"] = False
+        return state
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+        self._torch_checked = False
+        self._torch = None
+        self._torch_device = None
+        self._torch_dense_projection = None
+        self._torch_projection_bias = None
+        self._torch_projection_bucket = None
+        self._torch_projection_sign = None
+
+    def _ensure_torch_backend(self) -> bool:
+        """Lazily construct the optional device-resident VERT projector."""
+
+        if self._torch_checked:
+            return self._torch is not None
+        self._torch_checked = True
+        try:
+            from .torch_backend import _resolve_device, _torch_module, should_use_torch
+
+            if not should_use_torch(self.compute_backend, self.device):
+                return False
+            torch = _torch_module()
+            torch_device = _resolve_device(torch, self.device)
+        except RuntimeError:
+            # ``auto`` must preserve the portable NumPy fallback on hosts
+            # without PyTorch or an accelerator.
+            if self.compute_backend.strip().lower() == "auto":
+                return False
+            raise
+
+        self._torch = torch
+        self._torch_device = torch_device
+        if self._dense_projection is not None:
+            self._torch_dense_projection = torch.as_tensor(
+                self._dense_projection,
+                dtype=torch.float32,
+                device=torch_device,
+            )
+            self._torch_projection_bias = torch.as_tensor(
+                self._projection_bias,
+                dtype=torch.float32,
+                device=torch_device,
+            )
+        else:
+            assert self._projection_bucket is not None
+            assert self._projection_sign is not None
+            self._torch_projection_bucket = torch.as_tensor(
+                self._projection_bucket,
+                dtype=torch.long,
+                device=torch_device,
+            )
+            self._torch_projection_sign = torch.as_tensor(
+                self._projection_sign,
+                dtype=torch.float32,
+                device=torch_device,
+            )
+            self._torch_projection_bias = torch.as_tensor(
+                self._projection_bias,
+                dtype=torch.float32,
+                device=torch_device,
+            )
+        return True
+
+    def _evaluate_round_torch(
+        self,
+        features: dict[str, np.ndarray],
+        *,
+        round_id: int,
+    ) -> VERTResult:
+        """Run VERT's unchanged predictor math with Torch device kernels."""
+
+        assert self._torch is not None
+        parameters = self._initialize_torch_trainable_parameters(round_id=round_id)
+        moment1 = {
+            name: self._torch.zeros_like(value)
+            for name, value in parameters.items()
+        }
+        moment2 = {
+            name: self._torch.zeros_like(value)
+            for name, value in parameters.items()
+        }
+        optimizer_step = 0
+        score_tensors: dict[str, object] = {}
+        last_global = self._global_history[-1]
+        last_clients = self._client_history[-1]
+        for client_id in sorted(features):
+            optimizer_step = self._train_predictor_torch(
+                client_id,
+                parameters,
+                moment1,
+                moment2,
+                optimizer_step,
+            )
+            last_local = last_clients.get(client_id, last_global)
+            integrated = (
+                parameters["a"] * self._torch_feature(last_local)
+                + parameters["b"] * self._torch_feature(last_global)
+            )
+            predicted = self._predict_torch(
+                self._project_history_feature_torch(integrated),
+                parameters,
+            )
+            score_tensors[client_id] = self._torch_cosine(
+                predicted,
+                self._project_history_feature_torch(
+                    self._torch_feature(features[client_id])
+                ),
+            )
+
+        ordered_ids = sorted(score_tensors)
+        score_values = self._torch.stack(
+            [score_tensors[client_id] for client_id in ordered_ids]
+        ).detach().cpu().tolist()
+        scores = {
+            client_id: float(score)
+            for client_id, score in zip(ordered_ids, score_values)
+        }
+        ranked = sorted(scores, key=lambda item: (-scores[item], item))
+        top_k = self._effective_top_k(
+            [scores[client_id] for client_id in ranked]
+        )
+        selected = tuple(ranked[:top_k])
+        rejected = tuple(ranked[top_k:])
+        uniform = 1.0 / len(selected)
+        return VERTResult(
+            selected,
+            rejected,
+            {client_id: uniform for client_id in selected},
+            scores,
+        )
+
+    def _initialize_torch_trainable_parameters(
+        self,
+        *,
+        round_id: int,
+    ) -> dict[str, object]:
+        assert self._torch is not None and self._torch_device is not None
+        numpy_parameters = self._initialize_trainable_parameters(round_id=round_id)
+        return {
+            name: self._torch.as_tensor(
+                value,
+                dtype=self._torch.float32,
+                device=self._torch_device,
+            )
+            .clone()
+            .requires_grad_(True)
+            for name, value in numpy_parameters.items()
+        }
+
+    def _torch_feature(self, feature: np.ndarray):
+        assert self._torch is not None and self._torch_device is not None
+        return self._torch.as_tensor(
+            feature,
+            dtype=self._torch.float32,
+            device=self._torch_device,
+        )
+
+    def _project_history_feature_torch(self, feature):
+        assert self._torch is not None
+        if self._dense_projection is not None:
+            assert self._torch_dense_projection is not None
+            assert self._torch_projection_bias is not None
+            return self._torch.matmul(self._torch_dense_projection, feature) + self._torch_projection_bias
+        return feature
+
+    def _train_predictor_torch(
+        self,
+        client_id: str,
+        parameters: dict[str, object],
+        moment1: dict[str, object],
+        moment2: dict[str, object],
+        step: int,
+    ) -> int:
+        assert self._torch is not None
+        transition_count = len(self._global_history) - 1
+        if transition_count < 1:
+            return step
+        first_transition = max(0, transition_count - self.history_window + 1)
+        parameter_values = tuple(parameters.values())
+        for _epoch in range(self.predict_epochs):
+            gradients = {
+                name: self._torch.zeros_like(value)
+                for name, value in parameters.items()
+            }
+            samples = 0
+            for index in range(first_transition, transition_count):
+                local = self._client_history[index].get(
+                    client_id,
+                    self._global_history[index],
+                )
+                global_feature = self._global_history[index]
+                target = self._client_history[index + 1].get(
+                    client_id,
+                    self._global_history[index + 1],
+                )
+                integrated = (
+                    parameters["a"] * self._torch_feature(local)
+                    + parameters["b"] * self._torch_feature(global_feature)
+                )
+                predicted = self._predict_torch(
+                    self._project_history_feature_torch(integrated),
+                    parameters,
+                )
+                difference = predicted - self._project_history_feature_torch(
+                    self._torch_feature(target)
+                )
+                # The NumPy implementation back-propagates difference / ||difference||.
+                # This is precisely the gradient of the Euclidean norm here.
+                loss = self._torch.linalg.vector_norm(difference)
+                values = self._torch.autograd.grad(
+                    loss,
+                    parameter_values,
+                    retain_graph=False,
+                    create_graph=False,
+                )
+                for name, gradient in zip(parameters, values):
+                    gradients[name].add_(gradient)
+                samples += 1
+            if not samples:
+                continue
+            step += 1
+            self._torch_adam_step(parameters, gradients, moment1, moment2, step)
+        return step
+
+    def _predict_torch(self, value, parameters: dict[str, object]):
+        assert self._torch is not None
+        hidden1 = self._torch.relu(parameters["w1"] @ value + parameters["b1"])
+        hidden2 = self._torch.relu(parameters["w2"] @ hidden1 + parameters["b2"])
+        return parameters["w3"] @ hidden2 + parameters["b3"]
+
+    def _torch_adam_step(
+        self,
+        parameters: dict[str, object],
+        gradients: dict[str, object],
+        moment1: dict[str, object],
+        moment2: dict[str, object],
+        step: int,
+    ) -> None:
+        assert self._torch is not None
+        beta1, beta2 = 0.9, 0.999
+        with self._torch.no_grad():
+            for name, parameter in parameters.items():
+                gradient = gradients[name]
+                moment1[name].mul_(beta1).add_(gradient, alpha=1.0 - beta1)
+                moment2[name].mul_(beta2).addcmul_(
+                    gradient,
+                    gradient,
+                    value=1.0 - beta2,
+                )
+                corrected1 = moment1[name] / (1.0 - beta1**step)
+                corrected2 = moment2[name] / (1.0 - beta2**step)
+                parameter.addcdiv_(
+                    corrected1,
+                    self._torch.sqrt(corrected2).add_(1e-8),
+                    value=-self.learning_rate,
+                )
+
+    def _torch_cosine(self, left, right):
+        assert self._torch is not None
+        denominator = self._torch.linalg.vector_norm(left) * self._torch.linalg.vector_norm(right)
+        safe_denominator = self._torch.clamp(denominator, min=self.eps)
+        score = self._torch.sum(left * right) / safe_denominator
+        return self._torch.where(
+            denominator <= self.eps,
+            self._torch.zeros_like(score),
+            self._torch.clamp(score, -1.0, 1.0),
+        )
 
     def _effective_top_k(self, ranked_scores: list[float]) -> int:
         """Choose a fixed, ratio-prior, or predictor-only selection size."""

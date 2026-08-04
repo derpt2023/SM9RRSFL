@@ -516,6 +516,8 @@ def run_experiment(
                 if config.vert_use_ratio_prior
                 else None
             ),
+            compute_backend=config.compute_backend,
+            device=config.device,
             seed=config.seed,
         )
     elif config.method == "fedredefense":

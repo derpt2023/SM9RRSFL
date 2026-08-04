@@ -69,6 +69,57 @@ class VERTDefenseTest(unittest.TestCase):
         )
         self.assertEqual(result.selected_clients, ("client-0", "client-1"))
 
+    def test_torch_cpu_path_preserves_numpy_scores_and_checkpoint_portability(self):
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("PyTorch is not installed")
+
+        clients = [f"client-{index}" for index in range(3)]
+        common = dict(
+            parameter_size=8,
+            history_window=3,
+            projection_dim=4,
+            predict_epochs=1,
+            learning_rate=1e-3,
+            top_k=2,
+            seed=29,
+        )
+        numpy_defense = VERTDefense(clients, **common)
+        torch_defense = VERTDefense(
+            clients,
+            compute_backend="torch",
+            device="cpu",
+            **common,
+        )
+        rounds = [
+            {
+                client: np.linspace(index, index + 1.0, 8, dtype=np.float32)
+                for index, client in enumerate(clients)
+            },
+            {
+                client: np.linspace(index + 0.2, index + 1.2, 8, dtype=np.float32)
+                for index, client in enumerate(clients)
+            },
+        ]
+        for round_id, updates in enumerate(rounds, start=1):
+            aggregate = np.mean(list(updates.values()), axis=0)
+            for defense in (numpy_defense, torch_defense):
+                result = defense.evaluate_round(updates, round_id=round_id)
+                defense.finalize_round(updates, aggregate, result)
+
+        current = dict(rounds[-1])
+        current["client-2"] = -current["client-2"]
+        expected = numpy_defense.evaluate_round(current, round_id=3)
+        actual = torch_defense.evaluate_round(current, round_id=3)
+        self.assertEqual(actual.selected_clients, expected.selected_clients)
+        for client in clients:
+            self.assertAlmostEqual(actual.scores[client], expected.scores[client], places=5)
+
+        restored = pickle.loads(pickle.dumps(torch_defense))
+        self.assertFalse(restored._torch_checked)
+        self.assertEqual(restored.compute_backend, "torch")
+
     def test_default_selection_uses_kmeans_without_ratio(self):
         defense = VERTDefense(
             [f"client-{index}" for index in range(5)],
