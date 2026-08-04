@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from threading import Lock
 import weakref
 import numpy as np
 
@@ -18,6 +19,7 @@ SUPPORTED_BACKENDS = {"numpy", "auto", "torch"}
 SUPPORTED_DEVICES = {"auto", "cpu", "cuda", "mps"}
 _STREAMING_TORCH_AVERAGE_THRESHOLD_BYTES = 256 * 1024 * 1024
 _DATASET_TENSOR_CACHE: dict[tuple[int, str, ModelSpec], tuple[object, ...]] = {}
+_DATASET_TENSOR_CACHE_LOCK = Lock()
 
 
 @lru_cache(maxsize=1)
@@ -196,34 +198,36 @@ def _resident_dataset_tensors(torch, dataset, spec: ModelSpec, device) -> tuple[
     """跨配置复用同一数据集的设备张量，避免反复上传完整 CIFAR-10。"""
 
     key = (id(dataset), str(device), spec)
-    cached = _DATASET_TENSOR_CACHE.get(key)
-    if cached is not None and cached[0]() is dataset:
-        return cached[1:]
+    with _DATASET_TENSOR_CACHE_LOCK:
+        cached = _DATASET_TENSOR_CACHE.get(key)
+        if cached is not None and cached[0]() is dataset:
+            return cached[1:]
 
-    x_train = _torch_data(torch, dataset.x_train, spec, device)
-    y_train = torch.as_tensor(
-        np.asarray(dataset.y_train, dtype=np.int64),
-        dtype=torch.long,
-        device=device,
-    )
-    x_test = _torch_data(torch, dataset.x_test, spec, device)
-    y_test = torch.as_tensor(
-        np.asarray(dataset.y_test, dtype=np.int64),
-        dtype=torch.long,
-        device=device,
-    )
+        x_train = _torch_data(torch, dataset.x_train, spec, device)
+        y_train = torch.as_tensor(
+            np.asarray(dataset.y_train, dtype=np.int64),
+            dtype=torch.long,
+            device=device,
+        )
+        x_test = _torch_data(torch, dataset.x_test, spec, device)
+        y_test = torch.as_tensor(
+            np.asarray(dataset.y_test, dtype=np.int64),
+            dtype=torch.long,
+            device=device,
+        )
 
-    def clear_cache(_reference, cache_key=key):
-        _DATASET_TENSOR_CACHE.pop(cache_key, None)
+        def clear_cache(_reference, cache_key=key):
+            with _DATASET_TENSOR_CACHE_LOCK:
+                _DATASET_TENSOR_CACHE.pop(cache_key, None)
 
-    _DATASET_TENSOR_CACHE[key] = (
-        weakref.ref(dataset, clear_cache),
-        x_train,
-        y_train,
-        x_test,
-        y_test,
-    )
-    return x_train, y_train, x_test, y_test
+        _DATASET_TENSOR_CACHE[key] = (
+            weakref.ref(dataset, clear_cache),
+            x_train,
+            y_train,
+            x_test,
+            y_test,
+        )
+        return x_train, y_train, x_test, y_test
 
 
 class TorchTrainingContext:

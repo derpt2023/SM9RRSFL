@@ -1,12 +1,16 @@
 """VERT: vertical historical-gradient prediction for robust FL aggregation.
 
 This is a repository-native implementation of Wang et al.'s VERT baseline.
-The original implementation keeps a fixed random projector, trains a shared
-three-layer predictor plus two integration coefficients with Adam, scores
-clients by cosine similarity, and aggregates the top-k updates by normalized
-similarity.  MNIST uses the paper's fixed dense linear projector.  When that
-matrix would exceed 256 MiB, the same fixed-linear-projector role is implemented
-with a sparse signed feature hash so CIFAR experiments remain memory bounded.
+The paper uses a fixed random projector, retrains a shared three-layer
+predictor plus two integration coefficients in every global round, scores users
+by cosine similarity, and applies FedAvg uniformly to the selected updates.
+Only the final selection policy varies here: a positive ``top_k`` fixes the
+paper's Top-k value, ``malicious_ratio_prior`` enables the legacy automatic
+known-ratio rule, and the default clusters scores with K-means (K=2) and keeps
+the higher-similarity cluster without reading the experiment's malicious ratio.
+MNIST uses the paper's fixed dense linear projector.  When that matrix would
+exceed 256 MiB, the same fixed-linear-projector role is implemented with a
+sparse signed feature hash so CIFAR experiments remain memory bounded.
 """
 
 from __future__ import annotations
@@ -35,12 +39,12 @@ class VERTDefense:
         client_ids: list[str],
         *,
         parameter_size: int,
-        malicious_ratio: float,
         history_window: int = 10,
         projection_dim: int = 128,
         predict_epochs: int = 5,
-        learning_rate: float = 1e-3,
+        learning_rate: float = 1e-2,
         top_k: int = 0,
+        malicious_ratio_prior: float | None = None,
         seed: int = 0,
         eps: float = 1e-12,
     ) -> None:
@@ -48,8 +52,6 @@ class VERTDefense:
             raise ValueError("VERT requires at least one client")
         if parameter_size < 1:
             raise ValueError("parameter_size must be at least 1")
-        if not 0.0 <= malicious_ratio < 1.0:
-            raise ValueError("malicious_ratio must be in [0, 1)")
         if history_window < 2:
             raise ValueError("VERT history_window must be at least 2")
         if projection_dim < 2:
@@ -60,15 +62,27 @@ class VERTDefense:
             raise ValueError("VERT learning_rate must be finite and positive")
         if top_k < 0:
             raise ValueError("VERT top_k must be non-negative")
+        if malicious_ratio_prior is not None and not (
+            0.0 <= malicious_ratio_prior < 1.0
+        ):
+            raise ValueError("VERT malicious_ratio_prior must be in [0, 1)")
+        if top_k > 0 and malicious_ratio_prior is not None:
+            raise ValueError(
+                "VERT fixed top_k and malicious_ratio_prior are mutually exclusive"
+            )
 
         self.client_ids = tuple(client_ids)
         self.parameter_size = int(parameter_size)
-        self.malicious_ratio = float(malicious_ratio)
         self.history_window = int(history_window)
         self.projection_dim = min(int(projection_dim), self.parameter_size)
         self.predict_epochs = int(predict_epochs)
         self.learning_rate = float(learning_rate)
         self.top_k = int(top_k)
+        self.malicious_ratio_prior = (
+            None
+            if malicious_ratio_prior is None
+            else float(malicious_ratio_prior)
+        )
         self.seed = int(seed)
         self.eps = float(eps)
 
@@ -109,31 +123,6 @@ class VERTDefense:
                 math.sqrt(self.projection_dim / self.parameter_size)
             )
 
-        dimension = self.projection_dim
-        coefficient_dimension = (
-            self.parameter_size
-            if self._dense_projection is not None
-            else self.projection_dim
-        )
-        bound = 1.0 / math.sqrt(dimension)
-        self._parameters = {
-            "w1": rng.uniform(-bound, bound, size=(dimension, dimension)).astype(
-                np.float32
-            ),
-            "b1": rng.uniform(-bound, bound, size=dimension).astype(np.float32),
-            "w2": rng.uniform(-bound, bound, size=(dimension, dimension)).astype(
-                np.float32
-            ),
-            "b2": rng.uniform(-bound, bound, size=dimension).astype(np.float32),
-            "w3": rng.uniform(-bound, bound, size=(dimension, dimension)).astype(
-                np.float32
-            ),
-            "b3": rng.uniform(-bound, bound, size=dimension).astype(np.float32),
-            # The official code initializes both element-wise coefficients at
-            # zero and optimizes them together with the predictor.
-            "a": np.zeros(coefficient_dimension, dtype=np.float32),
-            "b": np.zeros(coefficient_dimension, dtype=np.float32),
-        }
         self._client_history: list[dict[str, np.ndarray]] = []
         self._global_history: list[np.ndarray] = []
 
@@ -143,9 +132,8 @@ class VERTDefense:
         *,
         round_id: int,
     ) -> VERTResult:
-        """Score current updates and return the paper's top-k selection."""
+        """Score current updates, then apply the configured selection policy."""
 
-        del round_id
         if not update_by_client:
             return VERTResult(tuple(), tuple(), {}, {})
         features = {
@@ -164,41 +152,48 @@ class VERTDefense:
                 scores={client_id: 1.0 for client_id in selected},
             )
 
-        self._train_predictor(tuple(sorted(features)))
+        parameters = self._initialize_trainable_parameters(round_id=round_id)
+        moment1 = {
+            name: np.zeros_like(value) for name, value in parameters.items()
+        }
+        moment2 = {
+            name: np.zeros_like(value) for name, value in parameters.items()
+        }
+        optimizer_step = 0
         scores: dict[str, float] = {}
         last_global = self._global_history[-1]
         last_clients = self._client_history[-1]
-        for client_id, current_feature in features.items():
+        for client_id in sorted(features):
+            current_feature = features[client_id]
+            optimizer_step = self._train_predictor(
+                client_id,
+                parameters,
+                moment1,
+                moment2,
+                optimizer_step,
+            )
             last_local = last_clients.get(client_id, last_global)
             integrated = (
-                self._parameters["a"] * last_local
-                + self._parameters["b"] * last_global
+                parameters["a"] * last_local
+                + parameters["b"] * last_global
             )
             predicted, _cache = self._predict(
-                self._project_history_feature(integrated)
+                self._project_history_feature(integrated),
+                parameters,
             )
             scores[client_id] = self._cosine(
                 predicted,
                 self._project_history_feature(current_feature),
             )
 
-        top_k = self._effective_top_k(len(scores))
         ranked = sorted(scores, key=lambda item: (-scores[item], item))
+        top_k = self._effective_top_k(
+            [scores[client_id] for client_id in ranked]
+        )
         selected = tuple(ranked[:top_k])
         rejected = tuple(ranked[top_k:])
-        positive = np.asarray(
-            [max(scores[client_id], 0.0) for client_id in selected],
-            dtype=np.float64,
-        )
-        total = float(np.sum(positive))
-        if total <= self.eps:
-            positive.fill(1.0 / len(selected))
-        else:
-            positive /= total
-        weights = {
-            client_id: float(weight)
-            for client_id, weight in zip(selected, positive)
-        }
+        uniform = 1.0 / len(selected)
+        weights = {client_id: uniform for client_id in selected}
         return VERTResult(selected, rejected, weights, scores)
 
     def finalize_round(
@@ -224,16 +219,122 @@ class VERTDefense:
         self._global_history.append(global_feature)
         self._client_history.append(current_history)
 
-    def _effective_top_k(self, active_count: int) -> int:
+    def _effective_top_k(self, ranked_scores: list[float]) -> int:
+        """Choose a fixed, ratio-prior, or predictor-only selection size."""
+
+        active_count = len(ranked_scores)
+        if active_count == 0:
+            return 0
         if self.top_k:
             return min(self.top_k, active_count)
-        if self.malicious_ratio <= 0.0:
+        if self.malicious_ratio_prior is not None:
+            if self.malicious_ratio_prior <= 0.0:
+                return active_count
+            expected_honest = int(
+                math.ceil(
+                    (1.0 - self.malicious_ratio_prior) * active_count
+                )
+            )
+            return min(active_count, max(1, expected_honest - 1))
+        return self._high_similarity_cluster_size(ranked_scores)
+
+    def _high_similarity_cluster_size(self, ranked_scores: list[float]) -> int:
+        """Run deterministic one-dimensional K-means and keep the high cluster.
+
+        Section VI-C3 of the VERT paper removes the Top-k poisoning-rate prior
+        by clustering cosine similarities with K=2.  Initializing the two
+        centers at the observed extrema makes the otherwise random clustering
+        reproducible.  Equal or non-finite scores are treated as an
+        uninformative round and all active clients are retained.
+        """
+
+        active_count = len(ranked_scores)
+        if active_count < 2:
             return active_count
-        # The VERT experiments use k=15 for 80 selected clients at 80%
-        # poisoning and k=8 for 90 selected clients at 90% poisoning: one
-        # fewer than the expected number of honest selected clients.
-        expected_honest = int(math.ceil((1.0 - self.malicious_ratio) * active_count))
-        return min(active_count, max(1, expected_honest - 1))
+
+        values = np.asarray(ranked_scores, dtype=np.float64)
+        if not np.isfinite(values).all():
+            return active_count
+        low_center = float(np.min(values))
+        high_center = float(np.max(values))
+        if high_center - low_center <= self.eps:
+            return active_count
+
+        high_cluster = np.zeros(active_count, dtype=bool)
+        for _iteration in range(100):
+            updated_cluster = (
+                np.abs(values - high_center) <= np.abs(values - low_center)
+            )
+            if updated_cluster.all() or not updated_cluster.any():
+                return active_count
+            updated_high = float(np.mean(values[updated_cluster]))
+            updated_low = float(np.mean(values[~updated_cluster]))
+            high_cluster = updated_cluster
+            if (
+                abs(updated_high - high_center) <= self.eps
+                and abs(updated_low - low_center) <= self.eps
+            ):
+                break
+            high_center = updated_high
+            low_center = updated_low
+
+        return int(np.count_nonzero(high_cluster))
+
+    def _initialize_trainable_parameters(
+        self,
+        *,
+        round_id: int,
+    ) -> dict[str, np.ndarray]:
+        """Create the shared predictor and coefficients for one global round."""
+
+        rng = np.random.default_rng(
+            self.seed
+            + 97_003
+            + int(round_id) * 1_000_003
+        )
+        dimension = self.projection_dim
+        coefficient_dimension = (
+            self.parameter_size
+            if self._dense_projection is not None
+            else self.projection_dim
+        )
+        predictor_bound = 1.0 / math.sqrt(dimension)
+        return {
+            "w1": rng.uniform(
+                -predictor_bound,
+                predictor_bound,
+                size=(dimension, dimension),
+            ).astype(np.float32),
+            "b1": rng.uniform(
+                -predictor_bound,
+                predictor_bound,
+                size=dimension,
+            ).astype(np.float32),
+            "w2": rng.uniform(
+                -predictor_bound,
+                predictor_bound,
+                size=(dimension, dimension),
+            ).astype(np.float32),
+            "b2": rng.uniform(
+                -predictor_bound,
+                predictor_bound,
+                size=dimension,
+            ).astype(np.float32),
+            "w3": rng.uniform(
+                -predictor_bound,
+                predictor_bound,
+                size=(dimension, dimension),
+            ).astype(np.float32),
+            "b3": rng.uniform(
+                -predictor_bound,
+                predictor_bound,
+                size=dimension,
+            ).astype(np.float32),
+            # The released VERT implementation initializes both element-wise
+            # coefficient vectors from its saved all-ones templates each round.
+            "a": np.ones(coefficient_dimension, dtype=np.float32),
+            "b": np.ones(coefficient_dimension, dtype=np.float32),
+        }
 
     def _history_feature(self, update: np.ndarray) -> np.ndarray:
         vector = np.asarray(update, dtype=np.float32).reshape(-1)
@@ -265,83 +366,78 @@ class VERTDefense:
 
     def _project_history_feature(self, feature: np.ndarray) -> np.ndarray:
         if self._dense_projection is not None:
-            return self._softmax(self._linear_project(feature))
-        return self._softmax(feature)
+            return self._linear_project(feature)
+        return np.asarray(feature, dtype=np.float32)
 
-    def _train_predictor(self, active_clients: tuple[str, ...]) -> None:
+    def _train_predictor(
+        self,
+        client_id: str,
+        parameters: dict[str, np.ndarray],
+        moment1: dict[str, np.ndarray],
+        moment2: dict[str, np.ndarray],
+        step: int,
+    ) -> int:
         transition_count = len(self._global_history) - 1
         if transition_count < 1:
-            return
+            return step
         first_transition = max(0, transition_count - self.history_window + 1)
-        moment1 = {
-            name: np.zeros_like(value) for name, value in self._parameters.items()
-        }
-        moment2 = {
-            name: np.zeros_like(value) for name, value in self._parameters.items()
-        }
-        step = 0
-        for client_id in active_clients:
-            for _epoch in range(self.predict_epochs):
-                gradients = {
-                    name: np.zeros_like(value)
-                    for name, value in self._parameters.items()
-                }
-                samples = 0
-                for index in range(first_transition, transition_count):
-                    local = self._client_history[index].get(
-                        client_id,
-                        self._global_history[index],
-                    )
-                    global_feature = self._global_history[index]
-                    target = self._client_history[index + 1].get(
-                        client_id,
-                        self._global_history[index + 1],
-                    )
-                    self._accumulate_training_gradient(
-                        local,
-                        global_feature,
-                        self._project_history_feature(target),
-                        gradients,
-                    )
-                    samples += 1
-                if not samples:
-                    continue
-                for gradient in gradients.values():
-                    gradient /= samples
-                    np.clip(gradient, -10.0, 10.0, out=gradient)
-                step += 1
-                self._adam_step(gradients, moment1, moment2, step)
+        for _epoch in range(self.predict_epochs):
+            gradients = {
+                name: np.zeros_like(value) for name, value in parameters.items()
+            }
+            samples = 0
+            for index in range(first_transition, transition_count):
+                local = self._client_history[index].get(
+                    client_id,
+                    self._global_history[index],
+                )
+                global_feature = self._global_history[index]
+                target = self._client_history[index + 1].get(
+                    client_id,
+                    self._global_history[index + 1],
+                )
+                self._accumulate_training_gradient(
+                    local,
+                    global_feature,
+                    self._project_history_feature(target),
+                    parameters,
+                    gradients,
+                )
+                samples += 1
+            if not samples:
+                continue
+            step += 1
+            self._adam_step(parameters, gradients, moment1, moment2, step)
+        return step
 
     def _accumulate_training_gradient(
         self,
         local: np.ndarray,
         global_feature: np.ndarray,
         target: np.ndarray,
+        parameters: dict[str, np.ndarray],
         gradients: dict[str, np.ndarray],
     ) -> None:
         integrated = (
-            self._parameters["a"] * local
-            + self._parameters["b"] * global_feature
+            parameters["a"] * local
+            + parameters["b"] * global_feature
         )
         predictor_input = self._project_history_feature(integrated)
-        predicted, cache = self._predict(predictor_input)
+        predicted, cache = self._predict(predictor_input, parameters)
         difference = predicted - target
         norm = max(float(np.linalg.norm(difference)), self.eps)
         output_gradient = difference / norm
         input_gradient, parameter_gradients = self._predict_backward(
             output_gradient,
             cache,
+            parameters,
         )
         for name, value in parameter_gradients.items():
             gradients[name] += value
-        projected_gradient = self._softmax_backward(
-            predictor_input,
-            input_gradient,
-        )
         integration_gradient = (
-            self._dense_projection.T @ projected_gradient
+            self._dense_projection.T @ input_gradient
             if self._dense_projection is not None
-            else projected_gradient
+            else input_gradient
         )
         gradients["a"] += integration_gradient * local
         gradients["b"] += integration_gradient * global_feature
@@ -349,48 +445,51 @@ class VERTDefense:
     def _predict(
         self,
         value: np.ndarray,
+        parameters: dict[str, np.ndarray],
     ) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
-        w1, b1 = self._parameters["w1"], self._parameters["b1"]
-        w2, b2 = self._parameters["w2"], self._parameters["b2"]
-        w3, b3 = self._parameters["w3"], self._parameters["b3"]
+        w1, b1 = parameters["w1"], parameters["b1"]
+        w2, b2 = parameters["w2"], parameters["b2"]
+        w3, b3 = parameters["w3"], parameters["b3"]
         pre1 = w1 @ value + b1
         hidden1 = np.maximum(pre1, 0.0)
         pre2 = w2 @ hidden1 + b2
         hidden2 = np.maximum(pre2, 0.0)
-        output = self._softmax(w3 @ hidden2 + b3)
-        return output, (value, pre1, hidden1, pre2, hidden2, output)
+        pre3 = w3 @ hidden2 + b3
+        return pre3, (value, pre1, hidden1, pre2, hidden2)
 
     def _predict_backward(
         self,
         output_gradient: np.ndarray,
         cache: tuple[np.ndarray, ...],
+        parameters: dict[str, np.ndarray],
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        value, pre1, hidden1, pre2, hidden2, output = cache
-        logits_gradient = self._softmax_backward(output, output_gradient)
+        value, pre1, hidden1, pre2, hidden2 = cache
+        pre3_gradient = output_gradient
         gradients = {
-            "w3": np.outer(logits_gradient, hidden2).astype(np.float32),
-            "b3": logits_gradient.astype(np.float32),
+            "w3": np.outer(pre3_gradient, hidden2).astype(np.float32),
+            "b3": pre3_gradient.astype(np.float32),
         }
-        hidden2_gradient = self._parameters["w3"].T @ logits_gradient
+        hidden2_gradient = parameters["w3"].T @ pre3_gradient
         pre2_gradient = hidden2_gradient * (pre2 > 0.0)
         gradients["w2"] = np.outer(pre2_gradient, hidden1).astype(np.float32)
         gradients["b2"] = pre2_gradient.astype(np.float32)
-        hidden1_gradient = self._parameters["w2"].T @ pre2_gradient
+        hidden1_gradient = parameters["w2"].T @ pre2_gradient
         pre1_gradient = hidden1_gradient * (pre1 > 0.0)
         gradients["w1"] = np.outer(pre1_gradient, value).astype(np.float32)
         gradients["b1"] = pre1_gradient.astype(np.float32)
-        input_gradient = self._parameters["w1"].T @ pre1_gradient
+        input_gradient = parameters["w1"].T @ pre1_gradient
         return input_gradient.astype(np.float32), gradients
 
     def _adam_step(
         self,
+        parameters: dict[str, np.ndarray],
         gradients: dict[str, np.ndarray],
         moment1: dict[str, np.ndarray],
         moment2: dict[str, np.ndarray],
         step: int,
     ) -> None:
         beta1, beta2 = 0.9, 0.999
-        for name, parameter in self._parameters.items():
+        for name, parameter in parameters.items():
             gradient = gradients[name]
             moment1[name] *= beta1
             moment1[name] += (1.0 - beta1) * gradient
@@ -401,16 +500,6 @@ class VERTDefense:
             parameter -= self.learning_rate * corrected1 / (
                 np.sqrt(corrected2) + 1e-8
             )
-
-    @staticmethod
-    def _softmax(value: np.ndarray) -> np.ndarray:
-        shifted = np.asarray(value, dtype=np.float32) - float(np.max(value))
-        exponential = np.exp(shifted).astype(np.float32)
-        return exponential / max(float(np.sum(exponential)), 1e-12)
-
-    @staticmethod
-    def _softmax_backward(output: np.ndarray, gradient: np.ndarray) -> np.ndarray:
-        return output * (gradient - float(np.dot(gradient, output)))
 
     def _cosine(self, left: np.ndarray, right: np.ndarray) -> float:
         denominator = float(np.linalg.norm(left) * np.linalg.norm(right))

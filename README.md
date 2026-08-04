@@ -8,7 +8,7 @@
 - 默认基于 NumPy 的卷积神经网络（CNN）联邦训练，并提供可选 PyTorch 后端用于 GPU 加速：MNIST 使用轻量 compact CNN，CIFAR-10 使用参考 FedAvg/CIFAR-10 经验配置的 `Conv-Conv-FC-FC-Logits` CNN 与按通道标准化输入；支持单个客户端数量或 `20/50/100` 等多客户端数量对比、本地训练轮次、批大小、学习率、学习率衰减、IID 独立同分布/Dirichlet 非 IID 划分和误差阈值早停。
 - 默认实验比例：`0%`、`10%`、`20%`、`40%`、`45%`、`60%`、`80%`，其中 `0%` 用于无恶意节点收敛对比。
 - SM9-RRS-FL v2 流程：固定任务环、常数大小签名 `σ=(c,A,B,C)`、任务级匿名标签、两个签名验证等式、纵向 SVD 投毒检测、D-KGC 门限追踪、门限 Schnorr 证书确认和任务环更新。
-- 疑似恶意节点处理采用动态降权：任一 Z-Score 越界时先降低聚合权重，后续正常则恢复权重；只有奇异值变化与方向变化两个 Z-Score 在同一轮同时越界时，连续异常计数 `Count` 才增加，否则 `Count` 清零。同一任务标签连续双指标共同越界达到阈值后，AS 立即拒绝该触发轮梯度并请求追踪，但只在追踪证书验证成功后永久撤销身份。
+- 疑似恶意节点处理采用动态降权：任一 Z-Score 越界时先降低聚合权重，后续正常则恢复权重；只有奇异值变化与方向变化两个 Z-Score 在同一轮同时越界时，异常证据计数 `Count` 才增加 `1`。两项均正常时 `Count` 衰减为 `floor(Count / 2)`，只有单指标越界时仍属于疑似节点、执行降权且保持 `Count` 不变。`Count` 达到阈值后，AS 立即拒绝该触发轮梯度并请求追踪，但只在追踪证书验证成功后永久撤销身份。
 - 纵向 SVD 对完整的一维模型更新按 `ceil(|G|/num_classes) × num_classes` 规范成矩阵（末尾补零），前 `K` 次观测建立基线，第 `K+1` 次开始评分；异常特征不进入正常窗口，但仍作为下一轮公式中的相邻 `r-1` 观测。单指标越界仍属于本轮疑似异常并触发降权，但不会累计到追踪阈值。
 - 攻击端实现 Bhagoji 等人的带距离约束交替最小化：恶意客户端在本地训练中交替优化目标误分类损失与正常任务/距离隐蔽损失，并只对目标攻击步进行显式提升；Ding 等人的实验以该攻击为基础。旧版“轮换参数分片并注入随机扰动”的实现已经删除，不再把一般向量噪声称为交替最小化攻击。
 - 联邦学习主流程通过 `ClientSigner`、`ASVerifier` 和 `AuditorService` 角色对象分别调用签名、完整验签和门限追踪。客户端对象只保存本客户端私钥和成员见证；AS 对象保存验签所需公开参数、非公开任务点、TPK、审计台账和独立的审计提交认证密钥，但不含任何客户端签名私钥或 D-KGC 追踪份额。AS 候选状态仅按不透明任务标签索引，不保存标签到真实身份的映射。
@@ -35,6 +35,8 @@ AS 创建追踪证据时会把完整不可变证据、摘要和控制面授权�
 - `gmssl/`：历史 Python 兼容代码；v2 的真实 SM9 群运算不使用其中的旧双线性曲线，而由 `_native_sm9` 调用用户提供的 GmSSL C 源码。
 - `tests/`：单元测试与流程自检。
 - `docs/`：论文补充说明和机制设计材料。
+- `configs/experiment.json`：可直接编辑的 JSON 实验参数配置。
+- `run_experiments_from_config.py`：读取默认 JSON 配置并启动实验的入口文件。
 - `outputs/`：实验输出目录，默认由启动命令自动创建。
 
 ## 环境说明
@@ -110,6 +112,46 @@ python -m sm9rrsfl.experiments \
 ```
 
 真实 SM9 模式也可以运行；大规模重复实验建议先使用 `--crypto-mode simulated`，确认参数后再切换到 `--crypto-mode sm9`。
+
+## 使用配置文件启动实验
+
+项目提供了示例配置 `configs/experiment.json`。修改其中 `parameters` 对象后，可以通过以下两种方式启动同一组实验。
+
+方式一：直接执行项目根目录的启动文件：
+
+```bash
+./run_experiments_from_config.py
+```
+
+启动文件会优先自动使用项目 `.venv` 中的 Python；如果当前系统没有把该文件作为可执行脚本处理，也可以使用：
+
+```bash
+python run_experiments_from_config.py
+```
+
+方式二：在终端中显式指定任意配置文件：
+
+```bash
+python -m sm9rrsfl.config_runner --config configs/experiment.json
+```
+
+正式启动前，建议先进行只校验、不训练的预检查。它会打印转换后的原始实验命令和最终生效参数：
+
+```bash
+python -m sm9rrsfl.config_runner \
+  --config configs/experiment.json \
+  --dry-run
+```
+
+配置文件规则：
+
+- 顶层必须包含 `"schema_version": 1` 和 `"parameters": { ... }`。
+- 参数名对应主实验长参数去掉 `--` 后将连字符改成下划线，例如 `--vert-top-k` 写成 `"vert_top_k"`，`--client-counts` 写成 `"client_counts"`。
+- `methods`、`ratios`、`client_counts`、`partitions` 使用 JSON 数组；普通数值和字符串直接填写。
+- 布尔参数可直接填写 `true/false`。配置入口额外支持较直观的 `early_stop`、`visualizations`、`progress` 和 `resume`；例如 `"early_stop": false` 等价于命令行 `--no-early-stop`。
+- 未填写的参数继续使用原命令行默认值和数据集训练预设；未知参数、空数组、非法取值或冲突组合会在加载数据和开始训练前报错。
+
+配置入口最终仍调用 `sm9rrsfl.experiments`，因此命令行模式原有的参数校验、数据集预设、并行执行、断点恢复、可视化和输出格式全部保持一致。每次实际生效的完整参数仍会写入输出目录的 `run_manifest.json`、`summary.csv` 和 `summary.json`。
 
 ## 签名与验签开销实验
 
@@ -194,7 +236,7 @@ python -m sm9rrsfl.benchmarks.crypto_overhead \
 - FedAvg 使用各客户端本地样本数作为聚合权重；在 Dirichlet 非 IID 划分下，样本更多的客户端对全局更新贡献更大。
 - SM9-RRS-FL 严格使用第 4.3.3 节归一化后的动态权重 `w_i`，不再二次乘本地样本数；TAD 对照实现仍保持其原实验聚合口径。
 - Krum 保持原始算法语义：每轮选择一个更新，不在 `0%` 恶意节点时自动退化为 FedAvg。
-- VERT 前两轮使用 FedAvg 建立纵向历史，此后训练低维投影空间中的三层预测器与两个集成系数，按预测/实际更新余弦相似度选择 Top-k 并进行相似度加权聚合。
+- VERT 前两轮使用 FedAvg 建立纵向历史，此后在每个全局轮次重新初始化共享三层预测器与两个集成系数，按客户端历史依次训练并计算预测/实际更新余弦相似度，最后对入选更新执行等权 FedAvg。默认按论文的无先验策略对当轮相似度执行 `K=2` 的 K-means 并选择高相似度簇，不读取实验配置中的恶意节点比例；`--vert-use-ratio-prior` 可显式复现项目旧版的已知比例自动规则，也可用正整数 `--vert-top-k` 固定保留人数。
 - FedREDefense 为每个客户端维护合成图像、软标签和合成学习率，以归一化模型更新重构误差过滤客户端；被判为恶意的客户端沿用官方实现语义，在后续轮次不再参与。
 - SM9-RRS-FL 对所有通过密码验证的更新统一执行相同的纵向 SVD 检测；代码不读取“是否恶意”的实验真值来改变判定，也不按数据集暗改窗口或阈值。
 
@@ -330,15 +372,15 @@ python -m sm9rrsfl.experiments \
 
 真实 SM9 CIFAR-10 主实验默认写入 `outputs/cifar10/`；模拟模式默认写入 `outputs/cifar10_simulated/`。
 
-上面的 `--jobs auto` 会根据系统物理内存和当前实验规模估算外层实验配置并发数；检测到单个 MPS/CUDA GPU 时自动固定为 `1`，避免配置争抢显存以及 CUDA fork 初始化错误。`--jobs 1` 只关闭配置级并发，单个配置仍使用 GPU。只有确认多 GPU 且已配置进程到设备的映射后，才建议显式提高并发数。
+`--jobs` 现在默认使用 `auto`，会根据系统物理内存、CPU 逻辑核数、模型参数量和待运行配置数估算并发数。例如实验网格包含 `60` 个配置、自动值为 `8` 时，执行器会维护 `8` 个 worker，并在每个配置完成后继续领取剩余配置。`--jobs 1` 可显式恢复完全串行；`--jobs N` 则强制请求最多 `N` 个并发配置。
 
-外层并发默认优先使用进程池，让不同实验配置互相隔离；如果当前运行环境限制系统 semaphore 或进程池初始化，程序会提示 `process_pool_unavailable=...` 并自动回退到线程池继续执行。
+NumPy及 CPU 后端优先使用多进程，使独立配置能够占用多个 CPU 核；如果当前运行环境禁止系统 semaphore 或进程池初始化，会提示 `process_pool_unavailable=...` 并回退到线程池。CUDA/MPS 后端不再被强制降为 `1`，而是在同一进程中使用线程队列共享设备和驻留数据集，避免 CUDA fork/MPS 子进程初始化问题；`auto` 对单设备默认最多并发 `2` 个配置，显式 `--jobs N` 可以提高。单块 GPU/MPS 的算子仍可能由设备串行化，而且并发会增加显存或统一内存压力，因此若出现内存不足，应降低到 `--jobs 1` 或 `2`。
 
 `--eval-interval 5` 表示每 5 轮评估一次测试集准确率，最后一轮始终评估。它不改变训练、投毒、防御、聚合和最终评估公式，但启用早停时判断粒度会变粗，可能多运行到下一个评估点；如果论文图表需要完整逐轮曲线，可改回 `--eval-interval 1`。
 
 `--sm9-workers auto`（默认）会用最多 8 个线程调度每轮中相互独立的封包、签名和验签。GmSSL v2 原生桥在点乘、配对和目标群运算期间释放 GIL；实际加速比仍取决于 CPU 核数和配对开销。SVD 轨迹检测按任务标签的稳定顺序更新状态，因此并行不会改变追踪、降权和异常判定语义。
 
-主实验运行时会显示配置级进度条和预计剩余时间，例如 `42/168 25.0% elapsed=... eta=...`。串行模式下会显示当前正在运行的配置；并发模式下会在每个配置完成后更新总进度。ETA 基于已经完成配置的平均耗时估算，前几个配置完成前会显示 `eta=estimating`。
+主实验运行时会显示配置级进度条和预计剩余时间，例如 `42/168 25.0% elapsed=... eta=...`。交互式终端中的独立刷新线程每秒重绘一次，因此即使尚未完成新配置，`elapsed` 和已有估计的 `eta` 也会实时变化；第一个配置完成前仍显示 `eta=estimating`，之后根据本次运行已完成配置的吞吐量建立并持续倒计时。串行模式显示当前配置，并发模式显示待运行配置数和 worker 数。
 
 在本机 Mac 上启用 PyTorch MPS 后端，可以在命令末尾额外加入：
 
@@ -489,14 +531,15 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 - `--z-threshold 3.0`：论文中的 Z-Score 容忍阈值 $\theta$，默认 `3.0`，即采用 $3\sigma$ 准则。
 - `--suspicion-penalty-factor 0.5`：SM9RRS 中疑似节点的聚合权重惩罚因子，默认 `0.5`。
 - `--suspicion-recovery-factor 2.0`：疑似节点后续恢复正常时的权重恢复倍数，默认 `2.0`。
-- `--C_tol 3`：论文中的连续双指标异常阈值 $C_{\mathrm{tol}}$，默认 `3`。只有 $z_{\sigma}>\theta$ 与 $z_{\rho}>\theta$ 在同一轮同时成立时，`Count` 才增加；单指标越界仅触发动态降权并将连续计数清零。同一任务标签连续双指标共同越界达到该次数后，SM9RRS 请求门限追踪；只有追踪证书通过后才撤销身份并剔除。该参数不控制 Ding13，兼容参数名 `--c-tol` 和 `--suspicion-remove-after`。
+- `--C_tol 3`：论文中的异常证据阈值 $C_{\mathrm{tol}}$，默认 `3`。当 $z_{\sigma}>\theta$ 与 $z_{\rho}>\theta$ 在同一轮同时成立时，`Count` 增加 `1`；两项均未越界、节点被判正常时，`Count` 更新为 `floor(Count / 2)`，例如 `1→0`、`3→1`、`5→2`；仅单指标越界时只触发动态降权并保持 `Count` 不变。`Count` 始终为非负整数，达到阈值后 SM9RRS 请求门限追踪；只有追踪证书通过后才撤销身份并剔除。该参数不控制 Ding13，兼容参数名 `--c-tol` 和 `--suspicion-remove-after`。
 
 #### VERT 与 FedREDefense 参数
 
 - `--vert-history-window 10`：VERT 使用的历史投影更新轮数 $H$，默认采用论文设置 `10`。前两轮只建立历史并执行 FedAvg，从第 3 轮开始训练预测器和筛选更新。
 - `--vert-projection-dim 128`：MNIST 低维投影输出长度，默认采用论文设置 `128`。MNIST 使用固定随机全连接投影器；若模型对应的稠密投影矩阵超过 `256 MiB`，实现会切换到固定稀疏符号哈希投影，以避免 CIFAR 大模型出现不可执行的内存占用，该工程适配必须在论文复现说明中披露。
-- `--vert-predict-epochs 5` / `--vert-predict-lr 0.001`：VERT 每轮对共享三层预测器以及两个逐元素集成系数执行的 Adam 训练轮数和学习率，默认采用论文设置。
-- `--vert-top-k 0`：VERT 每轮进入聚合的客户端数量。正整数表示显式 $k$；默认 `0` 按原论文实验表中的规则取“配置恶意比例下的预期诚实活跃客户端数减一”，在 `0%` 恶意比例时保留全部客户端。由于该自动规则会使用实验配置中的恶意比例，论文应与同样需要 $f$ 的 Krum 一并说明；若要测试不依赖比例先验的固定部署，可显式设置统一的正整数。
+- `--vert-predict-epochs 5` / `--vert-predict-lr 0.01`：VERT 每个全局轮次重新初始化共享三层预测器和两个逐元素集成系数，再按客户端历史依次执行 Adam 训练；轮数和学习率默认采用论文设置。固定线性投影的输出和预测器最后一层均不施加 Softmax，预测器只在前两层线性层后使用 ReLU。
+- `--vert-top-k 0`：VERT 每轮进入聚合的客户端选择策略。正整数表示与恶意比例无关的显式 $k$；默认 `0` 对当轮预测余弦相似度执行论文第 VI-C3 节的 K-means（$K=2$），保留中心值较高的簇。相似度完全相同等无法形成两个有效簇时保留全部客户端。该规则不读取真实恶意节点比例。
+- `--vert-use-ratio-prior`：显式启用项目旧版的 VERT 恶意比例先验自动接口。每个配置会自动使用自己的恶意比例 $r$ 和当轮活跃客户端数 $n$；$r=0$ 时保留全部客户端，否则取 $k=\max(1,\lceil(1-r)n\rceil-1)$。该开关可直接配合多个 `--ratios` 和 `--client-counts`，无需逐项手算 $k$；不能与正整数 `--vert-top-k` 同时使用。论文主实验使用的是若干显式 $k$ 值，并非这个自动公式；若要逐项精确复现论文表格，应使用正整数 `--vert-top-k`。三种选择模式共用完全相同的投影、历史替换、预测器训练、余弦评分和等权 FedAvg 代码，只在获得相似度分数后分叉。
 - `--fedre-threshold 0.6`：FedREDefense 的归一化更新重构误差阈值，默认采用官方实现的 `0.6`；超过阈值的客户端被过滤，并按官方 `clients_flags` 语义在后续轮次保持不可用。
 - `--fedre-initial-iterations 800` / `--fedre-max-iterations 2000`：每个客户端第一次和后续轮次优化持久合成数据的最大迭代次数，默认采用官方 Fashion-MNIST 配置。FedREDefense 本身计算开销很大，不应为了缩短论文主实验时间而无说明地降低该参数。
 - `--fedre-synthetic-steps 5` / `--fedre-images-per-class 1`：每次重构的可微合成 SGD 步数，以及每类持久合成图像数，默认采用官方配置。
@@ -509,13 +552,13 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 - `--dkg-nodes 3`：D-KGC 节点总数，默认 `3`；门限至少为 $1$，且不得大于节点总数。
 - `--compute-backend numpy|auto|torch`：CNN 本地训练/评估后端，默认 `auto`；有 CUDA/MPS 时自动使用 PyTorch GPU，否则回落到 NumPy，`numpy` 和 `torch` 可强制指定实现。
 - `--device auto|cpu|cuda|mps`：PyTorch 设备，默认 `auto`；Mac Apple Silicon 可用 `mps`，Windows/Linux NVIDIA 可用 `cuda`，`auto` 优先 CUDA、其次 MPS。
-- `--jobs 1|auto|N`：外层实验配置并发数，默认 `1`。`auto` 会按系统物理内存和实验规模估算上限；当前 CUDA/MPS 后端会保守限制为 `1`。该参数只改变当前实验网格中各配置的调度和总墙钟时间，不改变单个配置的实验变量。
+- `--jobs 1|auto|N`：外层实验配置并发数，默认 `auto`。CPU/NumPy 使用多进程，CUDA/MPS 使用共享单设备的线程队列；加速器自动值最多为 `2`，显式 `N` 可提高。该参数只改变实验网格的调度和总墙钟时间，不改变单个配置的实验变量；显存或统一内存不足时应降低并发数。
 - `--sm9-workers 1|auto|N`：单个 SM9RRS 配置每轮内部的摘要、构包、签名和验签线程数，默认 `auto`；自动值不超过 `8`、CPU 逻辑核数和最大客户端数。SVD 检测器状态仍按客户端稳定顺序更新，不改变检测、降权或撤销规则。
 
 #### 断点、进度与可视化
 
 - `--no-resume`：忽略输出目录中的已完成配置和逐轮检查点，从零开始本次实验；默认会安全断点续跑。
-- `--no-progress`：关闭终端进度条和 ETA 输出；训练、结果文件和可视化生成不受影响。
+- `--no-progress`：关闭每秒实时刷新的终端进度条和 ETA 输出；训练、结果文件和可视化生成不受影响。
 - `--no-visualizations`：只输出 CSV/JSON，不生成 HTML/SVG 图表。
 - `--visualize-only`：不重新训练，只读取输出目录中的 `summary.csv` 和 `rounds.csv` 重新生成图表。
 
@@ -584,9 +627,9 @@ python -m sm9rrsfl.benchmarks.crypto_overhead
 
 VERT 文献与官方实现：
 
-Wang J, Wang R, Zhang F. How to Defend Against Large-Scale Model Poisoning Attacks in Federated Learning: A Vertical Solution. IEEE Transactions on Dependable and Secure Computing, 2026. 论文与代码：[arXiv](https://arxiv.org/abs/2411.10673)、[VERT](https://github.com/bo-lab520/VERT)。
+Wang J, Wang R, Zhang F. How to Defend Against Large-Scale Model Poisoning Attacks in Federated Learning: A Vertical Solution. IEEE Transactions on Dependable and Secure Computing, 2026. 论文与代码：[arXiv](https://arxiv.org/abs/2411.10673)、[VERT](https://github.com/mylab426/VERT)。
 
-本项目的 VERT 位于 `sm9rrsfl/vert.py`，保留官方实现的两轮历史建立、固定随机投影器、三层预测器、两个可训练集成系数、余弦相似度 Top-k 和相似度归一化聚合。MNIST 参数向量规模允许直接使用固定随机全连接投影；只有预计稠密投影器超过 `256 MiB` 时才使用稀疏符号哈希投影。所有被 VERT 排除的客户端仅在当前轮不聚合，其更新历史由本轮全局更新替换，不会像 FedREDefense 一样永久进入黑名单。
+本项目的 VERT 位于 `sm9rrsfl/vert.py`，保留两轮历史建立、冻结的随机线性投影、每个全局轮次重新初始化并按客户端顺序训练的共享三层预测器与集成系数、原始线性投影特征、余弦相似度排序、被排除更新以全局更新替换历史，以及入选更新等权 FedAvg 的语义。默认的无先验模式仅把论文已知 $k$ 的 Top-k 选择替换为论文提出的 `K=2` K-means 高相似度簇选择；显式 `--vert-use-ratio-prior` 和正整数 `--vert-top-k` 与它共用同一评分核心。MNIST 参数向量规模允许直接使用固定随机全连接投影；只有预计稠密投影器超过 `256 MiB` 时才使用稀疏符号哈希投影，该路径是面向大模型内存约束的工程适配。所有被 VERT 排除的客户端仅在当前轮不聚合，其更新历史由本轮全局更新替换，不会像 FedREDefense 一样永久进入黑名单。
 
 FedREDefense 文献与官方实现：
 

@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tempfile
+from threading import Event
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,6 +19,7 @@ from sm9rrsfl.experiments import (
     load_archived_results,
     load_completed_results_snapshot,
     parse_args,
+    parallel_executor_kind,
     read_results,
     resolve_parallel_jobs,
     resolve_output_dir,
@@ -181,6 +183,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
             ["--vert-predict-epochs", "0"],
             ["--vert-predict-lr", "0"],
             ["--vert-top-k", "-1"],
+            ["--vert-use-ratio-prior", "--vert-top-k", "1"],
             ["--fedre-threshold", "0"],
             ["--fedre-initial-iterations", "0"],
             ["--fedre-max-iterations", "0"],
@@ -310,6 +313,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
         )
         self.assertEqual(args.compute_backend, "auto")
         self.assertEqual(args.device, "auto")
+        self.assertEqual(args.jobs, "auto")
         self.assertEqual(args.rounds, 30)
         self.assertEqual(args.local_epochs, 1)
         self.assertEqual(args.batch_size, 32)
@@ -326,8 +330,9 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(args.vert_history_window, 10)
         self.assertEqual(args.vert_projection_dim, 128)
         self.assertEqual(args.vert_predict_epochs, 5)
-        self.assertEqual(args.vert_predict_lr, 1e-3)
+        self.assertEqual(args.vert_predict_lr, 1e-2)
         self.assertEqual(args.vert_top_k, 0)
+        self.assertFalse(args.vert_use_ratio_prior)
         self.assertEqual(args.fedre_threshold, 0.6)
         self.assertEqual(args.fedre_initial_iterations, 800)
         self.assertEqual(args.fedre_max_iterations, 2000)
@@ -451,6 +456,26 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(lowercase.detector_window, 7)
         self.assertEqual(lowercase.suspicion_remove_after, 4)
 
+    def test_vert_ratio_prior_flag_maps_to_every_experiment_config(self):
+        args = parse_args(
+            [
+                "--methods",
+                "vert",
+                "--ratios",
+                "0.2",
+                "0.6",
+                "--client-counts",
+                "20",
+                "100",
+                "--vert-use-ratio-prior",
+            ]
+        )
+        configs = build_experiment_configs(args)
+
+        self.assertEqual(len(configs), 4)
+        self.assertTrue(all(config.vert_use_ratio_prior for config in configs))
+        self.assertTrue(all(config.vert_top_k == 0 for config in configs))
+
     def test_sm9_workers_auto_is_bounded_by_client_count(self):
         args = parse_args(["--num-clients", "4", "--sm9-workers", "auto"])
 
@@ -462,7 +487,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
         self.assertEqual(resolve_parallel_jobs(args.jobs, object(), [object(), object()], args), 2)
 
-    def test_auto_jobs_uses_one_worker_for_single_gpu(self):
+    def test_auto_jobs_uses_two_thread_workers_for_single_gpu(self):
         args = parse_args(["--jobs", "auto"])
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=2)
         configs = [ExperimentConfig(), ExperimentConfig(method="fedavg")]
@@ -473,9 +498,10 @@ class ExperimentOutputDirTest(unittest.TestCase):
         ):
             jobs = resolve_parallel_jobs("auto", dataset, configs, args)
 
-        self.assertEqual(jobs, 1)
+        self.assertEqual(jobs, 2)
+        self.assertEqual(parallel_executor_kind("torch:cuda", jobs), "thread")
 
-    def test_explicit_jobs_is_also_capped_without_gpu_mapping(self):
+    def test_explicit_jobs_is_honored_on_mps_and_uses_threads(self):
         args = parse_args(["--jobs", "4"])
         configs = [ExperimentConfig(), ExperimentConfig(method="fedavg")]
         with mock.patch(
@@ -484,7 +510,13 @@ class ExperimentOutputDirTest(unittest.TestCase):
         ):
             jobs = resolve_parallel_jobs("4", object(), configs, args)
 
-        self.assertEqual(jobs, 1)
+        self.assertEqual(jobs, 2)
+        self.assertEqual(parallel_executor_kind("torch:mps", jobs), "thread")
+
+    def test_cpu_parallel_jobs_use_processes(self):
+        self.assertEqual(parallel_executor_kind("numpy", 4), "process")
+        self.assertEqual(parallel_executor_kind("torch:cpu", 2), "process")
+        self.assertEqual(parallel_executor_kind("numpy", 1), "serial")
 
     def test_incremental_checkpoint_round_trip_includes_stage_timings(self):
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=4)
@@ -627,6 +659,40 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertIn("1/2", output)
         self.assertIn("eta=", output)
         self.assertIn("complete", output)
+
+    def test_tty_progress_refreshes_without_a_completed_configuration(self):
+        refreshed = Event()
+
+        class TTYStream(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.refresh_count = 0
+
+            def isatty(self):
+                return True
+
+            def write(self, value):
+                if value.startswith("\r"):
+                    self.refresh_count += 1
+                    if self.refresh_count >= 2:
+                        refreshed.set()
+                return super().write(value)
+
+        stream = TTYStream()
+        progress = ProgressReporter(
+            total=2,
+            stream=stream,
+            refresh_interval=0.01,
+        )
+        try:
+            self.assertTrue(refreshed.wait(0.5))
+            progress.start_parallel(2, 2)
+        finally:
+            progress.close()
+
+        self.assertGreaterEqual(stream.refresh_count, 3)
+        self.assertIn("running 2 configurations with 2 workers", stream.getvalue())
+        self.assertFalse(progress._refresh_thread.is_alive())
 
     def test_format_duration(self):
         self.assertEqual(_format_duration(5), "5s")

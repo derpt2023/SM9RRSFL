@@ -49,6 +49,10 @@ class SuspicionWeightManager:
         self.remove_after = remove_after
         initial_weight = 1.0 / participant_count
         self.weights = {tag: initial_weight for tag in initial}
+        # Keep the historical attribute name for checkpoint compatibility.
+        # Values are non-negative integer anomaly-evidence scores:
+        # dual-indicator rounds add one, while fully normal rounds retain the
+        # floor of half the accumulated evidence.
         self.consecutive_suspicions = {tag: 0 for tag in initial}
         self.pending_trace: set[str] = set()
         self.revoked: set[str] = set()
@@ -64,8 +68,10 @@ class SuspicionWeightManager:
         ``suspicious_tags`` contains tags for which either Z-Score exceeded
         ``theta`` and therefore controls dynamic downweighting.
         ``count_increment_tags`` is the stricter subset for which both
-        Z-Scores exceeded ``theta`` in the same round and therefore controls
-        the consecutive ``Count_pi`` state used for tracing.
+        Z-Scores exceeded ``theta`` in the same round.  Such a round adds one
+        to ``Count_pi``; a fully normal round replaces ``Count_pi`` with
+        ``floor(Count_pi / 2)``; a single-indicator suspicious round leaves it
+        unchanged.
         """
 
         active = list(dict.fromkeys(active_tags))
@@ -99,11 +105,12 @@ class SuspicionWeightManager:
 
             if tag in count_increment_tags:
                 self.consecutive_suspicions[tag] += 1
-            else:
-                # Count_pi represents consecutive rounds in which both
-                # indicators exceeded theta.  A normal round or a round with
-                # only one exceeded indicator breaks that consecutive run.
-                self.consecutive_suspicions[tag] = 0
+            elif tag not in suspicious_tags:
+                # A fully normal round weakens rather than erases historical
+                # anomaly evidence.  Single-indicator suspicious rounds are
+                # not normal, so they neither add dual-indicator evidence nor
+                # decay the existing score.
+                self.consecutive_suspicions[tag] //= 2
 
             if self.consecutive_suspicions[tag] >= self.remove_after:
                 if tag not in self.pending_trace:

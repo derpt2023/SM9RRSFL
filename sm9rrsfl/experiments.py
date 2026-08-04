@@ -16,6 +16,7 @@ from pathlib import Path
 import pickle
 import resource
 import sys
+from threading import Event, Lock, Thread
 from time import perf_counter
 import traceback
 
@@ -41,7 +42,7 @@ PROGRESS_BAR_WIDTH = 28
 _WORKER_DATASET = None
 _WORKER_CHECKPOINT_DIR = None
 _WORKER_RUN_FINGERPRINT = None
-CHECKPOINT_SCHEMA_VERSION = 3
+CHECKPOINT_SCHEMA_VERSION = 8
 COMPLETED_RESULTS_SNAPSHOT = ".completed_results.pickle"
 DATASET_TRAINING_PRESETS = {
     "mnist": {
@@ -68,8 +69,10 @@ DATASET_TRAINING_PRESETS = {
 }
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    """Run experiments from explicit CLI arguments or the process command line."""
+
+    args = parse_args(argv)
     output_dir = resolve_output_dir(args)
     if args.visualize_only:
         results = read_results(output_dir / "summary.csv", output_dir / "rounds.csv")
@@ -88,7 +91,11 @@ def main() -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     started = perf_counter()
-    print(f"compute_backend={describe_compute_backend(args.compute_backend, args.device)}", flush=True)
+    backend_description = describe_compute_backend(
+        args.compute_backend,
+        args.device,
+    )
+    print(f"compute_backend={backend_description}", flush=True)
 
     configs = build_experiment_configs(args)
     skipped_configs = [
@@ -167,6 +174,8 @@ def main() -> None:
     )
     jobs = resolve_parallel_jobs(args.jobs, dataset, pending_configs, args)
     print(f"experiment_jobs={jobs}", flush=True)
+    executor_kind = parallel_executor_kind(backend_description, jobs)
+    print(f"experiment_executor={executor_kind}", flush=True)
     progress = ProgressReporter(
         total=len(runnable_configs),
         completed=sum(result.config in runnable_configs for result in results),
@@ -192,52 +201,80 @@ def main() -> None:
             )
             progress.finish_config(config)
     elif pending_configs:
-        try:
-            with ProcessPoolExecutor(
-                max_workers=jobs,
-                initializer=_init_worker_dataset,
-                initargs=(dataset, checkpoint_dir, manifest["fingerprint"]),
-            ) as executor:
-                futures = {
-                    executor.submit(_run_config_in_worker, config): config
-                    for config in pending_configs
-                }
-                for future in as_completed(futures):
-                    config = futures[future]
-                    result = future.result()
-                    results.append(result)
-                    write_result_files(output_dir, results)
-                    finalize_config_checkpoint(
-                        checkpoint_dir,
-                        config,
-                        manifest["fingerprint"],
-                    )
-                    progress.finish_config(config)
-        except PermissionError as exc:
-            print(f"process_pool_unavailable={exc}; falling back to thread pool", flush=True)
-            finished_configs = {result.config for result in results}
-            remaining_configs = [
-                config for config in pending_configs if config not in finished_configs
-            ]
+        progress.start_parallel(jobs, len(pending_configs))
+        if executor_kind == "thread":
             with ThreadPoolExecutor(max_workers=jobs) as executor:
                 futures = {
                     executor.submit(
                         _run_config_in_thread,
-                        (dataset, config, checkpoint_dir, manifest["fingerprint"]),
+                        (
+                            dataset,
+                            config,
+                            checkpoint_dir,
+                            manifest["fingerprint"],
+                        ),
                     ): config
-                    for config in remaining_configs
+                    for config in pending_configs
                 }
-                for future in as_completed(futures):
-                    config = futures[future]
-                    result = future.result()
-                    results.append(result)
-                    write_result_files(output_dir, results)
-                    finalize_config_checkpoint(
-                        checkpoint_dir,
-                        config,
-                        manifest["fingerprint"],
+                _consume_parallel_futures(
+                    futures,
+                    results=results,
+                    output_dir=output_dir,
+                    checkpoint_dir=checkpoint_dir,
+                    run_fingerprint=manifest["fingerprint"],
+                    progress=progress,
+                )
+        else:
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=jobs,
+                    initializer=_init_worker_dataset,
+                    initargs=(dataset, checkpoint_dir, manifest["fingerprint"]),
+                ) as executor:
+                    futures = {
+                        executor.submit(_run_config_in_worker, config): config
+                        for config in pending_configs
+                    }
+                    _consume_parallel_futures(
+                        futures,
+                        results=results,
+                        output_dir=output_dir,
+                        checkpoint_dir=checkpoint_dir,
+                        run_fingerprint=manifest["fingerprint"],
+                        progress=progress,
                     )
-                    progress.finish_config(config)
+            except PermissionError as exc:
+                print(
+                    f"process_pool_unavailable={exc}; falling back to thread pool",
+                    flush=True,
+                )
+                finished_configs = {result.config for result in results}
+                remaining_configs = [
+                    config
+                    for config in pending_configs
+                    if config not in finished_configs
+                ]
+                with ThreadPoolExecutor(max_workers=jobs) as executor:
+                    futures = {
+                        executor.submit(
+                            _run_config_in_thread,
+                            (
+                                dataset,
+                                config,
+                                checkpoint_dir,
+                                manifest["fingerprint"],
+                            ),
+                        ): config
+                        for config in remaining_configs
+                    }
+                    _consume_parallel_futures(
+                        futures,
+                        results=results,
+                        output_dir=output_dir,
+                        checkpoint_dir=checkpoint_dir,
+                        run_fingerprint=manifest["fingerprint"],
+                        progress=progress,
+                    )
     progress.close()
 
     summary_path = output_dir / "summary.csv"
@@ -349,10 +386,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--jobs",
-        default="1",
+        default="auto",
         help=(
             "Number of experiment configurations to run in parallel. Use an integer "
-            "or 'auto' to estimate a memory-safe limit."
+            "or 'auto' to estimate a memory-safe limit (default: auto)."
         ),
     )
     parser.add_argument(
@@ -493,16 +530,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--vert-predict-lr",
         type=float,
-        default=1e-3,
-        help="VERT predictor/coefficient Adam learning rate.",
+        default=1e-2,
+        help="VERT predictor/coefficient Adam learning rate (paper default: 0.01).",
     )
     parser.add_argument(
         "--vert-top-k",
         type=int,
         default=0,
         help=(
-            "VERT aggregation client count. 0 follows the paper's experiment "
-            "rule: expected honest active clients minus one; ratio 0 keeps all."
+            "VERT aggregation client count. 0 runs K-means with K=2 on "
+            "predictor similarity scores and keeps the higher-score cluster "
+            "without using malicious ratio."
+        ),
+    )
+    parser.add_argument(
+        "--vert-use-ratio-prior",
+        action="store_true",
+        help=(
+            "Restore the legacy VERT known-ratio rule and derive k from each "
+            "configuration's malicious ratio and active client count."
         ),
     )
     parser.add_argument(
@@ -648,6 +694,11 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         ),
         (args.vert_top_k >= 0, "--vert-top-k must be non-negative"),
         (
+            not args.vert_use_ratio_prior or args.vert_top_k == 0,
+            "--vert-use-ratio-prior cannot be combined with a positive "
+            "--vert-top-k",
+        ),
+        (
             math.isfinite(args.fedre_threshold) and args.fedre_threshold > 0.0,
             "--fedre-threshold must be finite and positive",
         ),
@@ -753,6 +804,7 @@ def build_experiment_configs(args: argparse.Namespace) -> list[ExperimentConfig]
                             vert_predict_epochs=args.vert_predict_epochs,
                             vert_predict_lr=args.vert_predict_lr,
                             vert_top_k=args.vert_top_k,
+                            vert_use_ratio_prior=args.vert_use_ratio_prior,
                             fedre_threshold=args.fedre_threshold,
                             fedre_initial_iterations=args.fedre_initial_iterations,
                             fedre_max_iterations=args.fedre_max_iterations,
@@ -824,12 +876,7 @@ def resolve_parallel_jobs(
             requested = _auto_parallel_jobs(dataset, configs, args)
     if requested < 1:
         raise ValueError("--jobs must be at least 1")
-    resolved = min(requested, len(configs))
-    backend = describe_compute_backend(args.compute_backend, args.device)
-    if backend in {"torch:cuda", "torch:mps"}:
-        # 当前 CLI 没有“进程 -> GPU”映射；同一设备始终只运行一个配置。
-        return 1
-    return resolved
+    return min(requested, len(configs))
 
 
 def _auto_parallel_jobs(dataset, configs: list[ExperimentConfig], args: argparse.Namespace) -> int:
@@ -844,11 +891,23 @@ def _auto_parallel_jobs(dataset, configs: list[ExperimentConfig], args: argparse
     jobs = min(memory_limited, cpu_limited, len(configs))
     backend = describe_compute_backend(args.compute_backend, args.device)
     if backend in {"torch:cuda", "torch:mps"}:
-        # 单 GPU 上并发配置既会争抢显存，也可能触发 CUDA fork 初始化错误。
-        jobs = 1
+        # Accelerator configurations share one process and resident dataset.
+        # Two workers overlap CPU preparation with device kernels while keeping
+        # the default memory pressure bounded; an explicit --jobs N may raise it.
+        jobs = min(jobs, 2)
     elif backend.startswith("torch:"):
         jobs = min(jobs, 2)
     return max(1, jobs)
+
+
+def parallel_executor_kind(backend_description: str, jobs: int) -> str:
+    """Choose process isolation for CPU and threads for one accelerator device."""
+
+    if jobs <= 1:
+        return "serial"
+    if backend_description in {"torch:cuda", "torch:mps"}:
+        return "thread"
+    return "process"
 
 
 def _physical_memory_mb() -> float:
@@ -921,6 +980,30 @@ def _run_config_in_thread(task) -> ExperimentResult:
     )
 
 
+def _consume_parallel_futures(
+    futures,
+    *,
+    results: list[ExperimentResult],
+    output_dir: Path,
+    checkpoint_dir: Path | None,
+    run_fingerprint: str,
+    progress,
+) -> None:
+    """Commit completed configurations serially in the parent process."""
+
+    for future in as_completed(futures):
+        config = futures[future]
+        result = future.result()
+        results.append(result)
+        write_result_files(output_dir, results)
+        finalize_config_checkpoint(
+            checkpoint_dir,
+            config,
+            run_fingerprint,
+        )
+        progress.finish_config(config)
+
+
 class ProgressReporter:
     def __init__(
         self,
@@ -929,53 +1012,103 @@ class ProgressReporter:
         completed: int = 0,
         enabled: bool = True,
         stream=None,
+        refresh_interval: float = 1.0,
     ) -> None:
         self.total = max(0, total)
         self.enabled = enabled
         self.stream = stream if stream is not None else sys.stderr
         self.completed = min(max(0, completed), self.total)
         self.started = perf_counter()
+        self.completed_this_session = 0
+        self.eta_deadline: float | None = None
+        self.current = "starting"
+        self.refresh_interval = max(0.01, float(refresh_interval))
         self.last_message_length = 0
         self.is_tty = bool(getattr(self.stream, "isatty", lambda: False)())
         self.closed = False
+        self._lock = Lock()
+        self._stop_event = Event()
+        self._refresh_thread: Thread | None = None
         if self.enabled and self.total:
-            self._write(self._progress_message(current="starting"))
+            self._write(self._progress_message())
+            if self.is_tty:
+                self._refresh_thread = Thread(
+                    target=self._refresh_loop,
+                    name="experiment-progress-refresh",
+                    daemon=True,
+                )
+                self._refresh_thread.start()
 
     def start_config(self, config: ExperimentConfig) -> None:
         if not self.enabled:
             print(_format_running_config(config))
             return
-        self._write(self._progress_message(current=f"running {_format_config_key(config)}"))
+        with self._lock:
+            self.current = f"running {_format_config_key(config)}"
+            self._write(self._progress_message())
+
+    def start_parallel(self, workers: int, pending: int) -> None:
+        if not self.enabled:
+            print(f"running {pending} configurations with {workers} workers")
+            return
+        with self._lock:
+            self.current = (
+                f"running {pending} configurations with {workers} workers"
+            )
+            self._write(self._progress_message())
 
     def finish_config(self, config: ExperimentConfig) -> None:
-        self.completed += 1
         if not self.enabled:
+            self.completed += 1
             print(f"finished {_format_config_key(config)}")
             return
-        self._write(self._progress_message(current=f"finished {_format_config_key(config)}"))
+        with self._lock:
+            self.completed += 1
+            self.completed_this_session += 1
+            now = perf_counter()
+            remaining = max(0, self.total - self.completed)
+            elapsed = max(0.0, now - self.started)
+            seconds_per_config = elapsed / self.completed_this_session
+            self.eta_deadline = now + seconds_per_config * remaining
+            self.current = f"finished {_format_config_key(config)}"
+            self._write(self._progress_message(now=now))
 
     def close(self) -> None:
-        if self.closed:
-            return
-        self.closed = True
+        with self._lock:
+            if self.closed:
+                return
+            self.closed = True
+        self._stop_event.set()
+        if self._refresh_thread is not None:
+            self._refresh_thread.join(timeout=max(1.0, self.refresh_interval * 2.0))
         if self.enabled and self.total:
-            self._write(self._progress_message(current="complete"), final=True)
+            with self._lock:
+                self.current = "complete"
+                self._write(self._progress_message(), final=True)
 
-    def _progress_message(self, *, current: str) -> str:
-        elapsed = perf_counter() - self.started
+    def _refresh_loop(self) -> None:
+        while not self._stop_event.wait(self.refresh_interval):
+            with self._lock:
+                if self.closed:
+                    return
+                self._write(self._progress_message())
+
+    def _progress_message(self, *, now: float | None = None) -> str:
+        current_time = perf_counter() if now is None else now
+        elapsed = current_time - self.started
         ratio = 1.0 if self.total == 0 else min(1.0, self.completed / self.total)
         filled = int(round(PROGRESS_BAR_WIDTH * ratio))
         bar = "#" * filled + "-" * (PROGRESS_BAR_WIDTH - filled)
         percent = ratio * 100.0
-        remaining = self.total - self.completed
-        if self.completed:
-            eta = elapsed / self.completed * remaining
-            eta_text = _format_duration(eta)
+        if self.completed >= self.total:
+            eta_text = "0s"
+        elif self.eta_deadline is not None:
+            eta_text = _format_duration(self.eta_deadline - current_time)
         else:
             eta_text = "estimating"
         return (
             f"[{bar}] {self.completed}/{self.total} {percent:5.1f}% "
-            f"elapsed={_format_duration(elapsed)} eta={eta_text} {current}"
+            f"elapsed={_format_duration(elapsed)} eta={eta_text} {self.current}"
         )
 
     def _write(self, message: str, *, final: bool = False) -> None:
@@ -1792,8 +1925,11 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             vert_history_window=int(row.get("vert_history_window") or 10),
             vert_projection_dim=int(row.get("vert_projection_dim") or 128),
             vert_predict_epochs=int(row.get("vert_predict_epochs") or 5),
-            vert_predict_lr=float(row.get("vert_predict_lr") or 1e-3),
+            vert_predict_lr=float(row.get("vert_predict_lr") or 1e-2),
             vert_top_k=int(row.get("vert_top_k") or 0),
+            vert_use_ratio_prior=_parse_bool(
+                row.get("vert_use_ratio_prior", "False")
+            ),
             fedre_threshold=float(row.get("fedre_threshold") or 0.6),
             fedre_initial_iterations=int(
                 row.get("fedre_initial_iterations") or 800

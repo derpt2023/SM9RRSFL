@@ -65,7 +65,7 @@ class SuspicionWeightManagerTest(unittest.TestCase):
         self.assertEqual(result.trace_requested_tags, set())
         self.assertEqual(manager.pending_trace, set())
 
-    def test_single_indicator_round_breaks_consecutive_dual_indicator_count(self):
+    def test_single_indicator_round_preserves_dual_indicator_evidence(self):
         manager = SuspicionWeightManager(
             ["tag-0", "tag-1"],
             remove_after=2,
@@ -77,11 +77,30 @@ class SuspicionWeightManagerTest(unittest.TestCase):
 
         single = manager.update(["tag-0", "tag-1"], {"tag-0"}, set())
         self.assertEqual(single.trace_requested_tags, set())
-        self.assertEqual(manager.consecutive_suspicions["tag-0"], 0)
+        self.assertEqual(manager.consecutive_suspicions["tag-0"], 1)
 
         third = manager.update(["tag-0", "tag-1"], {"tag-0"}, {"tag-0"})
-        self.assertEqual(third.trace_requested_tags, set())
+        self.assertEqual(third.trace_requested_tags, {"tag-0"})
+        self.assertEqual(manager.consecutive_suspicions["tag-0"], 2)
+
+    def test_fully_normal_round_floor_halves_dual_indicator_evidence(self):
+        manager = SuspicionWeightManager(
+            ["tag-0", "tag-1"],
+            remove_after=6,
+        )
+
+        for _ in range(5):
+            manager.update(["tag-0", "tag-1"], {"tag-0"}, {"tag-0"})
+        normal = manager.update(["tag-0", "tag-1"], set(), set())
+
+        self.assertEqual(normal.trace_requested_tags, set())
+        self.assertEqual(manager.consecutive_suspicions["tag-0"], 2)
+
+        manager.update(["tag-0", "tag-1"], set(), set())
         self.assertEqual(manager.consecutive_suspicions["tag-0"], 1)
+
+        manager.update(["tag-0", "tag-1"], set(), set())
+        self.assertEqual(manager.consecutive_suspicions["tag-0"], 0)
 
     def test_count_increment_tags_must_be_suspicious(self):
         manager = SuspicionWeightManager(["tag-0", "tag-1"])

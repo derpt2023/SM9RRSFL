@@ -387,6 +387,57 @@ class FederatedLoopTest(unittest.TestCase):
         # retaining the pre-normalization value makes this visible.
         self.assertAlmostEqual(diagnostic.aggregation_weight, 1.0)
 
+    def test_normal_round_reports_floor_halved_count_evidence(self):
+        from sm9rrsfl import fl as fl_module
+
+        dataset = make_synthetic_mnist_like(
+            train_samples=20,
+            test_samples=10,
+            seed=126,
+        )
+        decisions = [
+            DetectionResult(
+                accepted=False,
+                reason="z_score_threshold",
+                count_increment=True,
+                z_sigma=4.0,
+                z_direction=5.0,
+            ),
+            DetectionResult(
+                accepted=True,
+                reason="accepted",
+                count_increment=False,
+                z_sigma=1.0,
+                z_direction=1.0,
+            ),
+        ]
+        with mock.patch.object(
+            fl_module.LongitudinalSVDDetector,
+            "evaluate",
+            side_effect=decisions,
+        ):
+            result = run_experiment(
+                dataset,
+                ExperimentConfig(
+                    method="sm9rrs",
+                    malicious_ratio=0.0,
+                    num_clients=1,
+                    rounds=2,
+                    local_epochs=1,
+                    batch_size=16,
+                    crypto_mode="simulated",
+                    suspicion_remove_after=3,
+                    early_stop=False,
+                    seed=126,
+                ),
+            )
+
+        first, normal = result.diagnostics
+        self.assertEqual(first.count_before, 0)
+        self.assertEqual(first.count_after, 1)
+        self.assertEqual(normal.count_before, 1)
+        self.assertEqual(normal.count_after, 0)
+
     def test_vert_uses_two_bootstrap_rounds_then_filters(self):
         dataset = make_synthetic_mnist_like(
             train_samples=40,
@@ -406,6 +457,7 @@ class FederatedLoopTest(unittest.TestCase):
                 compute_backend="numpy",
                 vert_projection_dim=16,
                 vert_predict_epochs=1,
+                vert_use_ratio_prior=True,
                 early_stop=False,
                 seed=124,
             ),

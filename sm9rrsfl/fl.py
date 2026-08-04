@@ -72,8 +72,9 @@ class ExperimentConfig:
     vert_history_window: int = 10
     vert_projection_dim: int = 128
     vert_predict_epochs: int = 5
-    vert_predict_lr: float = 1e-3
+    vert_predict_lr: float = 1e-2
     vert_top_k: int = 0
+    vert_use_ratio_prior: bool = False
     fedre_threshold: float = 0.6
     fedre_initial_iterations: int = 800
     fedre_max_iterations: int = 2000
@@ -322,6 +323,10 @@ def run_experiment(
         raise ValueError("vert_predict_lr must be finite and positive")
     if config.vert_top_k < 0:
         raise ValueError("vert_top_k must be non-negative")
+    if config.vert_use_ratio_prior and config.vert_top_k > 0:
+        raise ValueError(
+            "vert_use_ratio_prior cannot be combined with a positive vert_top_k"
+        )
     if not np.isfinite(config.fedre_threshold) or config.fedre_threshold <= 0.0:
         raise ValueError("fedre_threshold must be finite and positive")
     if config.fedre_initial_iterations < 1 or config.fedre_max_iterations < 1:
@@ -501,12 +506,16 @@ def run_experiment(
         vert_defense = VERTDefense(
             client_ids,
             parameter_size=model_spec.parameter_size,
-            malicious_ratio=config.malicious_ratio,
             history_window=config.vert_history_window,
             projection_dim=config.vert_projection_dim,
             predict_epochs=config.vert_predict_epochs,
             learning_rate=config.vert_predict_lr,
             top_k=config.vert_top_k,
+            malicious_ratio_prior=(
+                config.malicious_ratio
+                if config.vert_use_ratio_prior
+                else None
+            ),
             seed=config.seed,
         )
     elif config.method == "fedredefense":
