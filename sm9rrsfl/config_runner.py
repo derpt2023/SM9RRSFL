@@ -65,7 +65,9 @@ def parameters_to_argv(parameters: dict[str, Any]) -> list[str]:
     """Convert JSON parameter names to the existing experiment CLI syntax."""
 
     defaults = vars(parse_args([]))
-    known_parameters = set(defaults)
+    # ``parse_args`` also keeps private runtime-resolution markers used after
+    # the dataset and accelerator are known.  They are not JSON parameters.
+    known_parameters = {key for key in defaults if not key.startswith("_")}
     normalized: dict[str, Any] = {}
     for raw_key, raw_value in parameters.items():
         if not isinstance(raw_key, str) or not raw_key:
@@ -160,6 +162,7 @@ def main(
     except ConfigError as exc:
         parser.error(str(exc))
 
+    resolved_args = parse_args(experiment_argv)
     command = [
         sys.executable,
         "-m",
@@ -168,8 +171,20 @@ def main(
     ]
     print(f"config_file={config_path}", flush=True)
     print(f"experiment_command={shlex.join(command)}", flush=True)
+    print(
+        "config_execution_request="
+        f"compute_backend={resolved_args.compute_backend} device={resolved_args.device} "
+        f"jobs={resolved_args.jobs} "
+        f"sm9_workers={'auto' if resolved_args._sm9_workers_auto else resolved_args.sm9_workers} "
+        f"progress={'disabled' if resolved_args.no_progress else 'enabled'}",
+        flush=True,
+    )
     if runner_args.dry_run:
-        resolved = vars(parse_args(experiment_argv))
+        resolved = {
+            key: value
+            for key, value in vars(resolved_args).items()
+            if not key.startswith("_")
+        }
         print(
             "resolved_parameters="
             + json.dumps(resolved, ensure_ascii=False, sort_keys=True),

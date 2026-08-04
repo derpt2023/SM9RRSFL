@@ -80,6 +80,22 @@ def main(argv: list[str] | None = None) -> None:
         print(f"wrote {visualization_path}")
         return
 
+    backend_description = describe_compute_backend(
+        args.compute_backend,
+        args.device,
+    )
+    print(f"compute_backend={backend_description}", flush=True)
+    print(
+        "execution_request="
+        f"jobs={args.jobs} sm9_workers={'auto' if args._sm9_workers_auto else args.sm9_workers} "
+        f"device={args.device}",
+        flush=True,
+    )
+    if "sm9rrs" in args.methods:
+        print(f"sm3_backend={sm3_backend_name()}", flush=True)
+        if args.crypto_mode == "sm9":
+            print(f"rrs_backend={rrs_backend_name()}", flush=True)
+
     dataset = load_image_dataset(
         args.dataset,
         args.data_dir,
@@ -91,13 +107,18 @@ def main(argv: list[str] | None = None) -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     started = perf_counter()
-    backend_description = describe_compute_backend(
-        args.compute_backend,
-        args.device,
-    )
-    print(f"compute_backend={backend_description}", flush=True)
 
     configs = build_experiment_configs(args)
+    planned_jobs = resolve_parallel_jobs(args.jobs, dataset, configs, args)
+    if args._sm9_workers_auto:
+        effective_sm9_workers = resolve_sm9_workers(
+            "auto",
+            max(config.num_clients for config in configs),
+            parallel_jobs=planned_jobs,
+        )
+        args.sm9_workers = effective_sm9_workers
+        configs = [replace(config, sm9_workers=effective_sm9_workers) for config in configs]
+    configs = assign_auto_cuda_devices(configs, backend_description, args.device)
     skipped_configs = [
         (config, reason)
         for config in configs
@@ -154,10 +175,6 @@ def main(argv: list[str] | None = None) -> None:
         print(f"skipped_invalid_configs={len(skipped_configs)}", flush=True)
         for config, reason in skipped_configs:
             print(f"skipped {_format_config_key(config)} reason={reason}", flush=True)
-    if any(config.method == "sm9rrs" for config in configs):
-        print(f"sm3_backend={sm3_backend_name()}", flush=True)
-        if args.crypto_mode == "sm9":
-            print(f"rrs_backend={rrs_backend_name()}", flush=True)
     checkpoint_dir = output_dir / ".checkpoints" if args.resume else None
     # 若上次恰好在“结果快照已落盘、检查点尚未删除”的极短窗口中退出，
     # 已完成结果是权威状态，启动时清理对应的冗余终态检查点。
@@ -172,7 +189,16 @@ def main(argv: list[str] | None = None) -> None:
         pending_configs,
         str(manifest["fingerprint"]),
     )
-    jobs = resolve_parallel_jobs(args.jobs, dataset, pending_configs, args)
+    jobs = min(planned_jobs, max(1, len(pending_configs)))
+    print_resource_plan(
+        backend_description,
+        dataset,
+        configs,
+        jobs=jobs,
+        sm9_workers=args.sm9_workers,
+        requested_jobs=args.jobs,
+        cuda_devices=available_cuda_devices() if backend_description == "torch:cuda" else (),
+    )
     print(f"experiment_jobs={jobs}", flush=True)
     executor_kind = parallel_executor_kind(backend_description, jobs)
     print(f"experiment_executor={executor_kind}", flush=True)
@@ -609,6 +635,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "use --attack-boost for lambda"
         )
     max_clients = max(args.client_counts or [args.num_clients])
+    args._sm9_workers_auto = (
+        isinstance(args.sm9_workers, str)
+        and args.sm9_workers.strip().lower() == "auto"
+    )
     try:
         args.sm9_workers = resolve_sm9_workers(args.sm9_workers, max_clients)
     except ValueError as exc:
@@ -842,15 +872,29 @@ def apply_presets(args: argparse.Namespace, raw_args: list[str]) -> argparse.Nam
     return args
 
 
-def resolve_sm9_workers(value: str | int, num_clients: int) -> int:
+def resolve_sm9_workers(
+    value: str | int,
+    num_clients: int,
+    *,
+    parallel_jobs: int = 1,
+) -> int:
+    """Resolve per-experiment SM9 threads without oversubscribing auto mode.
+
+    A configuration can issue independent native SM9 operations in parallel, but
+    an experiment grid can also run several configurations at once.  In auto
+    mode the CPU budget is divided between those configurations; explicit user
+    values remain authoritative.
+    """
+
     if isinstance(value, int):
         workers = value
     else:
         text = value.strip().lower()
         if text == "auto":
-            # 原生配对运算会释放 GIL；8 个 worker 通常已能吃满桌面 CPU，继续
-            # 增大会增加线程调度和每轮临时内存而几乎没有收益。
-            workers = min(8, max(1, os.cpu_count() or 1), max(1, num_clients))
+            cpu_share = max(1, available_cpu_count() // max(1, parallel_jobs))
+            # 原生配对运算会释放 GIL；超过每个并发配置的 CPU 预算只会增加
+            # 线程调度和每轮临时内存，而不会提高真实吞吐。
+            workers = min(8, cpu_share, max(1, num_clients))
         else:
             workers = int(text)
     if workers < 1:
@@ -887,17 +931,142 @@ def _auto_parallel_jobs(dataset, configs: list[ExperimentConfig], args: argparse
     update_mb = max_clients * max_params * 4 / (1024 * 1024)
     per_worker_mb = max(1024.0, dataset_mb * 0.35 + update_mb * 2.5 + 768.0)
     memory_limited = max(1, int((total_mb * 0.75) // per_worker_mb))
-    cpu_limited = max(1, os.cpu_count() or 1)
+    cpu_limited = available_cpu_count()
     jobs = min(memory_limited, cpu_limited, len(configs))
     backend = describe_compute_backend(args.compute_backend, args.device)
-    if backend in {"torch:cuda", "torch:mps"}:
-        # Accelerator configurations share one process and resident dataset.
-        # Two workers overlap CPU preparation with device kernels while keeping
-        # the default memory pressure bounded; an explicit --jobs N may raise it.
-        jobs = min(jobs, 2)
-    elif backend.startswith("torch:"):
-        jobs = min(jobs, 2)
+    if backend == "torch:cuda":
+        cuda_limited = _cuda_memory_parallel_limit(per_worker_mb)
+        if cuda_limited is not None:
+            jobs = min(jobs, cuda_limited)
     return max(1, jobs)
+
+
+def available_cpu_count() -> int:
+    """Return the CPU capacity available to this process, including cgroup limits."""
+
+    count = max(1, os.cpu_count() or 1)
+    affinity = getattr(os, "sched_getaffinity", None)
+    if affinity is not None:
+        try:
+            count = min(count, max(1, len(affinity(0))))
+        except OSError:
+            pass
+    quota_count = _cgroup_cpu_quota_count()
+    if quota_count is not None:
+        count = min(count, quota_count)
+    return max(1, count)
+
+
+def _cgroup_cpu_quota_count() -> int | None:
+    """Read common Linux cgroup CPU quotas when the program runs in a container."""
+
+    try:
+        text = Path("/sys/fs/cgroup/cpu.max").read_text(encoding="utf-8").strip()
+        quota, period = text.split()[:2]
+        if quota != "max":
+            return max(1, math.ceil(int(quota) / int(period)))
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text().strip())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text().strip())
+        if quota > 0:
+            return max(1, math.ceil(quota / period))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def available_cuda_devices() -> tuple[str, ...]:
+    """List CUDA devices visible to this process without making CUDA mandatory."""
+
+    try:
+        from .torch_backend import _torch_module
+
+        torch = _torch_module()
+        if not torch.cuda.is_available():
+            return ()
+        return tuple(f"cuda:{index}" for index in range(torch.cuda.device_count()))
+    except (RuntimeError, ImportError):
+        return ()
+
+
+def _cuda_memory_parallel_limit(per_worker_mb: float) -> int | None:
+    """Estimate a safe grid width from currently free CUDA memory.
+
+    The estimate deliberately follows the host-memory calculation's update
+    retention model.  Returning ``None`` means the runtime cannot inspect CUDA
+    memory, so CPU and host-memory limits remain the safe fallback.
+    """
+
+    try:
+        from .torch_backend import _torch_module
+
+        torch = _torch_module()
+        if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+            return None
+        slots = 0
+        for index in range(torch.cuda.device_count()):
+            free_bytes, _total_bytes = torch.cuda.mem_get_info(index)
+            free_mb = float(free_bytes) / (1024 * 1024)
+            slots += max(1, int((free_mb * 0.75) // per_worker_mb))
+        return max(1, slots)
+    except (AttributeError, RuntimeError, ImportError):
+        return None
+
+
+def assign_auto_cuda_devices(
+    configs: list[ExperimentConfig],
+    backend_description: str,
+    requested_device: str,
+) -> list[ExperimentConfig]:
+    """Spread auto-selected CUDA configurations over all visible GPUs.
+
+    Explicit ``--device cuda`` remains pinned to PyTorch's default device.
+    With one GPU the assignments intentionally share that device, which lets
+    independent small CNN jobs keep it busy while CPU work from another job is
+    in flight.
+    """
+
+    if backend_description != "torch:cuda" or requested_device.strip().lower() != "auto":
+        return configs
+    devices = available_cuda_devices()
+    if not devices:
+        return configs
+    return [
+        replace(config, device=devices[index % len(devices)])
+        for index, config in enumerate(configs)
+    ]
+
+
+def print_resource_plan(
+    backend_description: str,
+    dataset,
+    configs: list[ExperimentConfig],
+    *,
+    jobs: int,
+    sm9_workers: int,
+    requested_jobs: str | int,
+    cuda_devices: tuple[str, ...],
+) -> None:
+    """Emit one compact, machine-readable explanation of effective auto choices."""
+
+    assigned_devices = sorted({config.device for config in configs})
+    if assigned_devices == ["auto"] and backend_description.startswith("torch:"):
+        assigned_devices = [backend_description.split(":", 1)[1]]
+    fields = [
+        f"backend={backend_description}",
+        f"cpu_slots={available_cpu_count()}",
+        f"host_memory_mb={_physical_memory_mb():.0f}",
+        f"dataset_memory_mb={_dataset_memory_mb(dataset):.0f}",
+        f"requested_jobs={requested_jobs}",
+        f"jobs={jobs}",
+        f"sm9_workers_per_experiment={sm9_workers}",
+        "assigned_devices=" + ",".join(assigned_devices),
+    ]
+    if cuda_devices:
+        fields.append("visible_cuda_devices=" + ",".join(cuda_devices))
+    print("resource_plan=" + " ".join(fields), flush=True)
 
 
 def parallel_executor_kind(backend_description: str, jobs: int) -> str:
@@ -1025,19 +1194,24 @@ class ProgressReporter:
         self.refresh_interval = max(0.01, float(refresh_interval))
         self.last_message_length = 0
         self.is_tty = bool(getattr(self.stream, "isatty", lambda: False)())
+        # AI Station and redirected log files are normally non-interactive.  A
+        # one-shot progress line makes long first configurations look stalled,
+        # so retain periodic heartbeats there without flooding the log.
+        self._effective_refresh_interval = (
+            self.refresh_interval if self.is_tty else max(15.0, self.refresh_interval)
+        )
         self.closed = False
         self._lock = Lock()
         self._stop_event = Event()
         self._refresh_thread: Thread | None = None
         if self.enabled and self.total:
             self._write(self._progress_message())
-            if self.is_tty:
-                self._refresh_thread = Thread(
-                    target=self._refresh_loop,
-                    name="experiment-progress-refresh",
-                    daemon=True,
-                )
-                self._refresh_thread.start()
+            self._refresh_thread = Thread(
+                target=self._refresh_loop,
+                name="experiment-progress-refresh",
+                daemon=True,
+            )
+            self._refresh_thread.start()
 
     def start_config(self, config: ExperimentConfig) -> None:
         if not self.enabled:
@@ -1080,14 +1254,16 @@ class ProgressReporter:
             self.closed = True
         self._stop_event.set()
         if self._refresh_thread is not None:
-            self._refresh_thread.join(timeout=max(1.0, self.refresh_interval * 2.0))
+            self._refresh_thread.join(
+                timeout=max(1.0, self._effective_refresh_interval * 2.0)
+            )
         if self.enabled and self.total:
             with self._lock:
                 self.current = "complete"
                 self._write(self._progress_message(), final=True)
 
     def _refresh_loop(self) -> None:
-        while not self._stop_event.wait(self.refresh_interval):
+        while not self._stop_event.wait(self._effective_refresh_interval):
             with self._lock:
                 if self.closed:
                     return

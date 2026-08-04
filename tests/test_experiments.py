@@ -12,6 +12,7 @@ from unittest import mock
 from sm9rrsfl.experiments import (
     ProgressReporter,
     _format_duration,
+    assign_auto_cuda_devices,
     build_experiment_configs,
     confirm_matching_checkpoints,
     default_output_dir,
@@ -21,6 +22,7 @@ from sm9rrsfl.experiments import (
     parse_args,
     parallel_executor_kind,
     read_results,
+    resolve_sm9_workers,
     resolve_parallel_jobs,
     resolve_output_dir,
     run_measured_experiment,
@@ -500,6 +502,49 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
         self.assertEqual(jobs, 2)
         self.assertEqual(parallel_executor_kind("torch:cuda", jobs), "thread")
+
+    def test_auto_jobs_uses_all_available_cpu_slots_when_cuda_memory_allows(self):
+        args = parse_args(["--jobs", "auto"])
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=2)
+        configs = [ExperimentConfig(seed=index) for index in range(8)]
+
+        with (
+            mock.patch(
+                "sm9rrsfl.experiments.describe_compute_backend",
+                return_value="torch:cuda",
+            ),
+            mock.patch("sm9rrsfl.experiments.available_cpu_count", return_value=4),
+            mock.patch("sm9rrsfl.experiments._physical_memory_mb", return_value=64 * 1024),
+            mock.patch("sm9rrsfl.experiments._cuda_memory_parallel_limit", return_value=6),
+        ):
+            jobs = resolve_parallel_jobs("auto", dataset, configs, args)
+
+        self.assertEqual(jobs, 4)
+
+    def test_auto_sm9_workers_share_cpu_budget_with_parallel_experiments(self):
+        with mock.patch("sm9rrsfl.experiments.available_cpu_count", return_value=4):
+            workers = resolve_sm9_workers("auto", 100, parallel_jobs=4)
+
+        self.assertEqual(workers, 1)
+
+    def test_auto_cuda_assignment_round_robins_visible_devices(self):
+        configs = [ExperimentConfig(seed=index) for index in range(5)]
+        with mock.patch(
+            "sm9rrsfl.experiments.available_cuda_devices",
+            return_value=("cuda:0", "cuda:1"),
+        ):
+            assigned = assign_auto_cuda_devices(configs, "torch:cuda", "auto")
+
+        self.assertEqual(
+            [config.device for config in assigned],
+            ["cuda:0", "cuda:1", "cuda:0", "cuda:1", "cuda:0"],
+        )
+        self.assertTrue(all(config.device == "auto" for config in configs))
+
+    def test_internal_indexed_cuda_device_is_accepted(self):
+        from sm9rrsfl.torch_backend import _normalize_device
+
+        self.assertEqual(_normalize_device("cuda:3"), "cuda:3")
 
     def test_explicit_jobs_is_honored_on_mps_and_uses_threads(self):
         args = parse_args(["--jobs", "4"])

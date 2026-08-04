@@ -92,6 +92,8 @@ class ConfigRunnerTest(unittest.TestCase):
         text = output.getvalue()
         self.assertIn(f"config_file={config.resolve()}", text)
         self.assertIn("experiment_command=", text)
+        self.assertIn("config_execution_request=", text)
+        self.assertIn("progress=enabled", text)
         self.assertIn("resolved_parameters=", text)
         self.assertIn('"dataset":', text)
 

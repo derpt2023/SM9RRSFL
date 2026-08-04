@@ -32,7 +32,7 @@
     "crypto_mode": "sm9",
     "dkg_threshold": 2,
     "dkg_nodes": 3,
-    "sm9_workers": 8,
+    "sm9_workers": "auto",
     "compute_backend": "auto",
     "device": "auto",
     "jobs": "auto",

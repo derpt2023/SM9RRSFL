@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import re
 from threading import Lock
 import weakref
 import numpy as np
@@ -17,6 +18,7 @@ from .model import (
 
 SUPPORTED_BACKENDS = {"numpy", "auto", "torch"}
 SUPPORTED_DEVICES = {"auto", "cpu", "cuda", "mps"}
+_CUDA_DEVICE_PATTERN = re.compile(r"cuda:(\d+)")
 _STREAMING_TORCH_AVERAGE_THRESHOLD_BYTES = 256 * 1024 * 1024
 _DATASET_TENSOR_CACHE: dict[tuple[int, str, ModelSpec], tuple[object, ...]] = {}
 _DATASET_TENSOR_CACHE_LOCK = Lock()
@@ -1015,8 +1017,8 @@ def _normalize_backend(compute_backend: str) -> str:
 
 def _normalize_device(device: str) -> str:
     normalized = (device or "auto").strip().lower()
-    if normalized not in SUPPORTED_DEVICES:
-        raise ValueError("device must be one of: auto, cpu, cuda, mps")
+    if normalized not in SUPPORTED_DEVICES and not _CUDA_DEVICE_PATTERN.fullmatch(normalized):
+        raise ValueError("device must be one of: auto, cpu, cuda, cuda:N, mps")
     return normalized
 
 
@@ -1032,8 +1034,15 @@ def _resolve_device(torch, device: str):
     requested = _normalize_device(device)
     if requested == "auto":
         return torch.device(_best_gpu_device(torch) or "cpu")
-    if requested == "cuda" and not torch.cuda.is_available():
+    if requested.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available for this PyTorch installation.")
+    if requested.startswith("cuda:"):
+        index = int(requested.split(":", 1)[1])
+        if index >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"CUDA device {index} is unavailable; "
+                f"PyTorch can see {torch.cuda.device_count()} CUDA device(s)."
+            )
     if requested == "mps":
         mps = getattr(torch.backends, "mps", None)
         if mps is None or not mps.is_available():
