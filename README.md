@@ -52,13 +52,22 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
-# 将 GmSSL-master.zip 放在 ~/Downloads 后，原地构建 SM3 与 SM9 v2 扩展
-python setup.py build_ext --inplace
+# 真实 SM9 模式：准备项目固定版本的 GmSSL-master.zip，显式指定其实际位置。
+# 示例假定压缩包放在当前项目的 Downloads/ 目录；不要把这里的路径省略。
+export GMSSL_ARCHIVE="$PWD/Downloads/GmSSL-master.zip"
+sha256sum "$GMSSL_ARCHIVE"  # macOS 可改用：shasum -a 256 "$GMSSL_ARCHIVE"
+python setup.py build_ext --inplace --force
+
+# 构建后必须确认原生桥已生成且可被 Python 加载。
+ls sm9rrsfl/_native_sm9*.so
+python -c "from sm9rrsfl.crypto import rrs_backend_name; print(rrs_backend_name())"
 ```
 
 基础运行不强制依赖 PyTorch、torchvision 或 scikit-learn；TAD 的 Isolation Forest 已用纯 NumPy 实现。`FedREDefense` 的服务端更新重构依赖 PyTorch 高阶自动微分，因此即使客户端训练选择 `--compute-backend numpy`，运行该方法也必须安装 PyTorch；按论文默认迭代数执行时，其运行时间会显著长于其余方法。`simulated` 模式无需 GmSSL 原生扩展；真实 `sm9` 模式需要用户提供的 GmSSL C 源码和成功构建的 `_native_sm9` 扩展。
 
-`setup.py` 优先使用显式的 `GMSSL_SOURCE=/绝对路径/GmSSL-master`；否则读取 `GMSSL_ARCHIVE` 指定的压缩包，未指定时使用 `~/Downloads/GmSSL-master.zip`。默认归档固定为 GmSSL `3.3.0-dev.1183`，构建前校验 SHA-256，按摘要隔离缓存并执行受限解压；源码存在时 `_native_sm9` 编译失败会直接终止。真实模式启动时应输出 `rrs_backend=gmssl-sm9-native-v2`。若该桥未构建，`crypto_mode="sm9"` 会明确报错，不会静默退回非国标参考曲线；`simulated` 模式仍可运行。`_native_sm3` 构建失败时，更新摘要会回退到 OpenSSL 或 Python SM3。
+`GmSSL-master.zip` 必须是项目固定的 GmSSL `3.3.0-dev.1183` 归档，其 SHA-256 为 `6dc97c6b4f7d2f6df9d44f014cca0561a7b4776017efd4486d341e986051fab4`；不要以当前最新版 GmSSL 替代。`setup.py` 优先使用显式的 `GMSSL_SOURCE=/绝对路径/GmSSL-master`，其次读取 `GMSSL_ARCHIVE=/绝对路径/GmSSL-master.zip`；只有两者都未设置时才会尝试 `~/Downloads/GmSSL-master.zip`。其中 `~` 是运行命令用户的主目录（例如 root 用户为 `/root`），**不是项目内的 `Downloads/`**。将归档放在项目内的 `Downloads/` 时，应在已进入项目根目录的前提下使用 `GMSSL_ARCHIVE="$PWD/Downloads/GmSSL-master.zip"`；若放在其他位置，则改为该文件的绝对路径。构建前会校验摘要并执行受限解压；源码存在时 `_native_sm9` 编译失败会直接终止。真实模式启动时应输出 `rrs_backend=gmssl-sm9-native-v2`。若命令输出 `unavailable` 或找不到 `sm9rrsfl/_native_sm9*.so`，说明归档路径错误、归档版本/摘要不符或编译失败；应先修复构建问题，不能将 `--crypto-mode simulated` 的输出当作真实 SM9 实验结果。
+
+GitHub 的源码 ZIP 与 `git clone` 都只分发可移植的 C 源和 Python 源，故不会包含针对某台机器编译的 `_native_sm9*.so`；Linux x86_64、Mac ARM、Python 版本不同的扩展二进制不能互相复制。每个新环境都应使用上面的固定 GmSSL 归档在本机重新构建，然后执行后端检查。
 
 原生桥会严格检查定长编码、曲线、无穷点和素数阶子群，并在耗时群运算中释放 GIL。需要注意，当前 GmSSL z256 底层并未声明为恒定时间实现，因此此桥用于本地论文实验，不应直接作为具备侧信道防护的生产密码模块。
 
