@@ -22,6 +22,16 @@ BOOLEAN_ALIASES = {
     "progress": ("no_progress", True),
     "no_resume": ("resume", True),
 }
+# JSON keys normally use argparse destinations (for example
+# ``detector_window``).  Keep the paper/CLI spellings available too, so a
+# configuration can faithfully use ``K`` and ``C_tol`` just as the command
+# line accepts ``--K`` and ``--C_tol``.
+PARAMETER_ALIASES = {
+    "K": "detector_window",
+    "k": "detector_window",
+    "C_tol": "suspicion_remove_after",
+    "c_tol": "suspicion_remove_after",
+}
 
 
 class ConfigError(ValueError):
@@ -73,6 +83,7 @@ def parameters_to_argv(parameters: dict[str, Any]) -> list[str]:
         if not isinstance(raw_key, str) or not raw_key:
             raise ConfigError("every parameter name must be a non-empty string")
         key = raw_key.replace("-", "_")
+        key = PARAMETER_ALIASES.get(key, key)
         if key in BOOLEAN_ALIASES:
             canonical, invert = BOOLEAN_ALIASES[key]
             if not isinstance(raw_value, bool):
@@ -176,7 +187,7 @@ def main(
         f"compute_backend={resolved_args.compute_backend} device={resolved_args.device} "
         f"jobs={resolved_args.jobs} "
         f"sm9_workers={'auto' if resolved_args._sm9_workers_auto else resolved_args.sm9_workers} "
-        f"progress={'disabled' if resolved_args.no_progress else 'enabled'}",
+        f"progress={'disabled' if resolved_args.no_progress else resolved_args.progress_mode}",
         flush=True,
     )
     if runner_args.dry_run:

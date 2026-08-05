@@ -52,6 +52,17 @@ class ConfigRunnerTest(unittest.TestCase):
         self.assertTrue(args.download)
         self.assertTrue(args.vert_use_ratio_prior)
 
+    def test_paper_parameter_aliases_map_to_their_cli_destinations(self):
+        argv = parameters_to_argv({"K": 10, "C_tol": 4})
+        args = parse_args(argv)
+
+        self.assertEqual(args.detector_window, 10)
+        self.assertEqual(args.suspicion_remove_after, 4)
+
+    def test_paper_alias_and_canonical_key_cannot_conflict(self):
+        with self.assertRaisesRegex(ConfigError, "configured more than once"):
+            parameters_to_argv({"K": 10, "detector_window": 5})
+
     def test_unknown_or_duplicate_parameter_is_rejected(self):
         with self.assertRaisesRegex(ConfigError, "unknown experiment parameter"):
             parameters_to_argv({"not_a_parameter": 1})
@@ -93,7 +104,7 @@ class ConfigRunnerTest(unittest.TestCase):
         self.assertIn(f"config_file={config.resolve()}", text)
         self.assertIn("experiment_command=", text)
         self.assertIn("config_execution_request=", text)
-        self.assertIn("progress=enabled", text)
+        self.assertIn("progress=live", text)
         self.assertIn("resolved_parameters=", text)
         self.assertIn('"dataset":', text)
 

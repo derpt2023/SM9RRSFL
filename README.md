@@ -156,8 +156,9 @@ python -m sm9rrsfl.config_runner \
 
 - 顶层必须包含 `"schema_version": 1` 和 `"parameters": { ... }`。
 - 参数名对应主实验长参数去掉 `--` 后将连字符改成下划线，例如 `--vert-top-k` 写成 `"vert_top_k"`，`--client-counts` 写成 `"client_counts"`。
+- 论文参数也可直接使用 `"K"` 和 `"C_tol"`，分别等价于 `"detector_window"` 和 `"suspicion_remove_after"`；同一份配置不能同时写别名与规范名，避免出现冲突值。
 - `methods`、`ratios`、`client_counts`、`partitions` 使用 JSON 数组；普通数值和字符串直接填写。
-- 布尔参数可直接填写 `true/false`。配置入口额外支持较直观的 `early_stop`、`visualizations`、`progress` 和 `resume`；例如 `"early_stop": false` 等价于命令行 `--no-early-stop`。
+- 布尔参数可直接填写 `true/false`。配置入口额外支持较直观的 `early_stop`、`visualizations`、`progress` 和 `resume`；例如 `"early_stop": false` 等价于命令行 `--no-early-stop`。`"progress_mode"` 可取 `"auto"`、`"live"` 或 `"log"`；本示例使用 `"live"`，以兼容 PyCharm 等不报告 TTY 的本地控制台。
 - 未填写的参数继续使用原命令行默认值和数据集训练预设；未知参数、空数组、非法取值或冲突组合会在加载数据和开始训练前报错。
 
 配置入口最终仍调用 `sm9rrsfl.experiments`，因此命令行模式原有的参数校验、数据集预设、并行执行、断点恢复、可视化和输出格式全部保持一致。每次实际生效的完整参数仍会写入输出目录的 `run_manifest.json`、`summary.csv` 和 `summary.json`。
@@ -389,7 +390,7 @@ NumPy 及 CPU Torch 后端优先使用多进程，使独立配置能够占用多
 
 `--sm9-workers auto`（默认）会用最多 8 个线程调度每轮中相互独立的封包、签名和验签，但会按 `jobs` 将实际 CPU 预算分给每个并发配置：例如 4 个 CPU 槽、`jobs=4` 时每个配置使用 1 个 SM9 线程，避免 `4 × 8` 的超额竞争。GmSSL v2 原生桥在点乘、配对和目标群运算期间释放 GIL；实际加速比仍取决于 CPU 核数和配对开销。SVD 轨迹检测按任务标签的稳定顺序更新状态，因此并行不会改变追踪、降权和异常判定语义。
 
-主实验运行时会显示配置级进度条和预计剩余时间，例如 `42/168 25.0% elapsed=... eta=...`。交互式终端中的独立刷新线程每秒重绘一次；AI Station/重定向日志等非交互环境也会每 15 秒输出一次进度心跳，因此第一个长配置执行时不会看起来停住。第一个配置完成前仍显示 `eta=estimating`，之后根据本次运行已完成配置的吞吐量建立并持续倒计时。串行模式显示当前配置，并发模式显示待运行配置数和 worker 数。
+主实验运行时会显示配置级进度条和预计剩余时间，例如 `42/168 25.0% elapsed=... eta=...`。`progress_mode=auto` 时，交互式终端中的独立刷新线程每秒在同一行重绘一次；`progress_mode=live` 可强制 IDE 控制台也使用同样的单行刷新；`log` 则只在启动、配置完成和结束时写入状态行，适合重定向日志。配置文件启动器与直接输入参数共用同一个标准输出流。第一个配置完成前仍显示 `eta=estimating`，之后根据本次运行已完成配置的吞吐量建立并持续倒计时。串行模式显示当前配置，并发模式显示待运行配置数和 worker 数。
 
 在本机 Mac 上启用 PyTorch MPS 后端，可以在命令末尾额外加入：
 
@@ -567,7 +568,8 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 #### 断点、进度与可视化
 
 - `--no-resume`：忽略输出目录中的已完成配置和逐轮检查点，从零开始本次实验；默认会安全断点续跑。
-- `--no-progress`：关闭终端进度条、非交互日志心跳和 ETA 输出；训练、结果文件和可视化生成不受影响。
+- `--no-progress`：关闭终端进度条和 ETA 输出；训练、结果文件和可视化生成不受影响。
+- `--progress-mode auto|live|log`：`auto` 仅在 TTY 中实时覆写；`live` 强制实时覆写，适合 PyCharm 等本地 IDE 控制台；`log` 不创建刷新线程，只保留关键状态行。
 - `--no-visualizations`：只输出 CSV/JSON，不生成 HTML/SVG 图表。
 - `--visualize-only`：不重新训练，只读取输出目录中的 `summary.csv` 和 `rounds.csv` 重新生成图表。
 

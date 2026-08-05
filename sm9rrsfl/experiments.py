@@ -206,6 +206,11 @@ def main(argv: list[str] | None = None) -> None:
         total=len(runnable_configs),
         completed=sum(result.config in runnable_configs for result in results),
         enabled=not args.no_progress,
+        # The configuration launcher preserves stdout from the user's terminal.
+        # Use that same stream as direct CLI invocation, so both entry points
+        # render one in-place progress line when a TTY is available.
+        stream=sys.stdout,
+        mode=args.progress_mode,
     )
     if jobs == 1:
         for config in pending_configs:
@@ -613,6 +618,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fedre-teacher-lr-lr", type=float, default=5e-6)
     parser.add_argument("--no-visualizations", action="store_true")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress and ETA output.")
+    parser.add_argument(
+        "--progress-mode",
+        choices=["auto", "live", "log"],
+        default="auto",
+        help=(
+            "Progress rendering mode: auto uses a live line on a TTY, live forces "
+            "in-place refresh for IDE consoles, and log writes only state changes."
+        ),
+    )
     parser.add_argument(
         "--no-resume",
         dest="resume",
@@ -1182,6 +1196,7 @@ class ProgressReporter:
         enabled: bool = True,
         stream=None,
         refresh_interval: float = 1.0,
+        mode: str = "auto",
     ) -> None:
         self.total = max(0, total)
         self.enabled = enabled
@@ -1194,24 +1209,23 @@ class ProgressReporter:
         self.refresh_interval = max(0.01, float(refresh_interval))
         self.last_message_length = 0
         self.is_tty = bool(getattr(self.stream, "isatty", lambda: False)())
-        # AI Station and redirected log files are normally non-interactive.  A
-        # one-shot progress line makes long first configurations look stalled,
-        # so retain periodic heartbeats there without flooding the log.
-        self._effective_refresh_interval = (
-            self.refresh_interval if self.is_tty else max(15.0, self.refresh_interval)
-        )
+        self.mode = mode
+        if mode not in {"auto", "live", "log"}:
+            raise ValueError("progress mode must be one of: auto, live, log")
+        self.live = mode == "live" or (mode == "auto" and self.is_tty)
         self.closed = False
         self._lock = Lock()
         self._stop_event = Event()
         self._refresh_thread: Thread | None = None
         if self.enabled and self.total:
             self._write(self._progress_message())
-            self._refresh_thread = Thread(
-                target=self._refresh_loop,
-                name="experiment-progress-refresh",
-                daemon=True,
-            )
-            self._refresh_thread.start()
+            if self.live:
+                self._refresh_thread = Thread(
+                    target=self._refresh_loop,
+                    name="experiment-progress-refresh",
+                    daemon=True,
+                )
+                self._refresh_thread.start()
 
     def start_config(self, config: ExperimentConfig) -> None:
         if not self.enabled:
@@ -1254,16 +1268,14 @@ class ProgressReporter:
             self.closed = True
         self._stop_event.set()
         if self._refresh_thread is not None:
-            self._refresh_thread.join(
-                timeout=max(1.0, self._effective_refresh_interval * 2.0)
-            )
+            self._refresh_thread.join(timeout=max(1.0, self.refresh_interval * 2.0))
         if self.enabled and self.total:
             with self._lock:
                 self.current = "complete"
                 self._write(self._progress_message(), final=True)
 
     def _refresh_loop(self) -> None:
-        while not self._stop_event.wait(self._effective_refresh_interval):
+        while not self._stop_event.wait(self.refresh_interval):
             with self._lock:
                 if self.closed:
                     return
@@ -1288,7 +1300,7 @@ class ProgressReporter:
         )
 
     def _write(self, message: str, *, final: bool = False) -> None:
-        if self.is_tty:
+        if self.live:
             padding = " " * max(0, self.last_message_length - len(message))
             self.stream.write(f"\r{message}{padding}")
             if final:
