@@ -694,6 +694,11 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
         self.assertTrue(args.no_progress)
 
+    def test_progress_mode_is_parsed(self):
+        args = parse_args(["--progress-mode", "live"])
+
+        self.assertEqual(args.progress_mode, "live")
+
     def test_progress_reporter_prints_eta(self):
         stream = io.StringIO()
         progress = ProgressReporter(total=2, stream=stream)
@@ -704,6 +709,40 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertIn("1/2", output)
         self.assertIn("eta=", output)
         self.assertIn("complete", output)
+
+    def test_non_tty_progress_does_not_emit_periodic_log_lines(self):
+        progress = ProgressReporter(total=2, stream=io.StringIO())
+        try:
+            self.assertFalse(progress.is_tty)
+            self.assertIsNone(progress._refresh_thread)
+        finally:
+            progress.close()
+
+    def test_live_mode_refreshes_an_ide_style_non_tty_stream(self):
+        refreshed = Event()
+
+        class IDEStream(io.StringIO):
+            def isatty(self):
+                return False
+
+            def write(self, value):
+                if value.startswith("\r"):
+                    refreshed.set()
+                return super().write(value)
+
+        stream = IDEStream()
+        progress = ProgressReporter(
+            total=2,
+            stream=stream,
+            mode="live",
+            refresh_interval=0.01,
+        )
+        try:
+            self.assertTrue(progress.live)
+            self.assertTrue(refreshed.wait(0.5))
+            self.assertIsNotNone(progress._refresh_thread)
+        finally:
+            progress.close()
 
     def test_tty_progress_refreshes_without_a_completed_configuration(self):
         refreshed = Event()
