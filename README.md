@@ -36,7 +36,9 @@ AS 创建追踪证据时会把完整不可变证据、摘要和控制面授权�
 - `tests/`：单元测试与流程自检。
 - `docs/`：论文补充说明和机制设计材料。
 - `configs/experiment.json`：可直接编辑的 JSON 实验参数配置。
+- `configs/fair_tuning.example.json`：六种方案统一公平调参与独立最终评估的示例配置。
 - `run_experiments_from_config.py`：读取默认 JSON 配置并启动实验的入口文件。
+- `run_fair_tuning_from_config.py`：带资源规划、进度条和 GPU/MPS/CPU 并发的公平调参入口。
 - `outputs/`：实验输出目录，默认由启动命令自动创建。
 
 ## 环境说明
@@ -173,6 +175,7 @@ python -m sm9rrsfl.config_runner \
 4. 所有候选使用同一组 `validation_seeds` 和场景，最终主实验使用与之不重叠的 `final_seeds`。配置强制 `early_stop=false` 和 `eval_interval=1`，避免某个候选少跑轮次，并完整审计非有限更新。
 5. 默认 `require_finite_updates=true`：只要候选产生任何 NaN/Inf 更新，该候选即无效，不能因恶意更新被自动丢弃而获得虚假的高分。如果某方法全部候选无效，搜索会直接失败并要求先修正共享训练/攻击配置。
 6. 选参前预先声明统一目标：干净准确率、攻击场景准确率、目标攻击成功率和误撤销率的固定权重。最终论文表格使用独立 `final_seeds` 的均值/标准差，不从最终测试集反向选择候选。
+7. 参数选择阶段把“候选 × 验证种子 × 场景”展开为独立配置，复用主实验的资源规划：CUDA/MPS 使用线程队列和设备端 Torch 训练，多个 CUDA 设备自动轮转；NumPy/Torch CPU 使用多进程。进度条按实际配置数显示完成比例、已用时间和 ETA。最终论文计时阶段固定 `jobs=1` 且不跨 GPU 轮转，避免并发竞争或不同 GPU 性能污染时间公平性；单个配置仍可使用 CUDA/MPS 加速。
 
 示例配置为 `configs/fair_tuning.example.json`。先做只校验不训练的检查：
 
@@ -195,6 +198,25 @@ python run_fair_tuning_from_config.py \
 python -m sm9rrsfl.fair_tuning \
   --config configs/fair_tuning.example.json
 ```
+
+调参配置直接复用主实验的计算和进度参数。示例使用以下自动模式：
+
+```json
+{
+  "compute_backend": "auto",
+  "device": "auto",
+  "jobs": "auto",
+  "progress": true,
+  "progress_mode": "live"
+}
+```
+
+- `compute_backend=auto, device=auto`：优先使用 CUDA，其次使用 Apple MPS，否则回落到 NumPy；也可显式指定 `compute_backend=torch, device=cuda|mps`。
+- `jobs=auto`：根据 CPU 配额、主存、CUDA 空闲显存、数据集和更新规模决定验证配置并发数；可填写正整数限制并发。
+- `progress=true`：启用两段进度条，先显示验证搜索，选参完成后显示独立最终评估。`progress_mode=live` 适合 PyCharm/IDE 控制台，`auto` 只在 TTY 原地刷新，`log` 输出离散状态行。
+- Ours 的 `sm9_workers=auto` 会按外层并发数重新分配 CPU 槽，避免网格并发与签名/验签线程相互过度订阅。
+
+搜索阶段的并发墙钟时间不进入选参目标，也不应作为论文方法耗时；论文时间统一来自串行的 `final_evaluation/`。
 
 每个数据集应复制一份配置并分别声明搜索空间，例如 MNIST 与 CIFAR-10 各自一份；不要在同一次搜索中混合两个数据集。网格必须为有限的显式数组，三种可调方法的笛卡尔积大小必须等于相同的 `trials_per_tunable_method`。当前允许的专属参数如下：
 

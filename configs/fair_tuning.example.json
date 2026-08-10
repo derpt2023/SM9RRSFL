@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "name": "MNIST unified fair grid search",
+  "description": "Select every method on a training holdout, then rerun the unified main evaluation on the untouched official test set.",
+  "shared_parameters": {
+    "dataset": "mnist",
+    "output_dir": "outputs/mnist_fair_tuning",
+    "methods": [
+      "sm9rrs",
+      "vert",
+      "fedredefense",
+      "krum",
+      "ding13",
+      "fedavg"
+    ],
+    "ratios": [0.0, 0.1, 0.2, 0.4, 0.45, 0.6, 0.8],
+    "client_counts": [20],
+    "partitions": ["iid", "dirichlet"],
+    "dirichlet_alpha": 0.5,
+    "rounds": 30,
+    "local_epochs": 1,
+    "batch_size": 32,
+    "lr": 0.05,
+    "lr_decay": 1.0,
+    "compute_backend": "auto",
+    "device": "auto",
+    "jobs": "auto",
+    "attack": "alternating_minimization",
+    "attack_boost": 10.0,
+    "attack_epochs": 10,
+    "attack_stealth_steps": 10,
+    "attack_distance_weight": 0.0001,
+    "attack_source_label": 5,
+    "attack_target_label": 7,
+    "attack_target_count": 1,
+    "attack_start_round": 0,
+    "crypto_mode": "sm9",
+    "early_stop": false,
+    "eval_interval": 1,
+    "visualizations": true,
+    "progress": true,
+    "progress_mode": "live",
+    "seed": 42
+  },
+  "tuning": {
+    "algorithm": "grid",
+    "validation_fraction": 0.1,
+    "split_seed": 20260810,
+    "validation_seeds": [41, 42, 43],
+    "final_seeds": [141, 142, 143],
+    "trials_per_tunable_method": 4,
+    "require_finite_updates": true,
+    "run_final_evaluation": true,
+    "objective": {
+      "clean_accuracy_weight": 0.25,
+      "robust_accuracy_weight": 0.5,
+      "attack_success_weight": 0.2,
+      "false_positive_weight": 0.05
+    },
+    "method_spaces": {
+      "sm9rrs": {
+        "detector_window": [3, 5],
+        "z_threshold": [2.5, 3.0]
+      },
+      "vert": {
+        "vert_history_window": [5, 10],
+        "vert_predict_epochs": [3, 5]
+      },
+      "fedredefense": {
+        "fedre_threshold": [0.4, 0.6],
+        "fedre_teacher_lr": [0.1, 0.2]
+      },
+      "krum": {},
+      "ding13": {},
+      "fedavg": {}
+    }
+  }
+}

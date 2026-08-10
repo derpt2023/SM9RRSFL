@@ -7,7 +7,12 @@ __pycache__/
 data/
 outputs/
 build/
+tmp/
 *.egg-info/
 *.so
 *.pyd
 *.docx
+
+# Retired v1 native source kept only as a local archive.  The active v2 build
+# uses _native_sm9.c and _native_sm3.c; setup.py deliberately excludes this file.
+sm9rrsfl/_native_rrs.c
