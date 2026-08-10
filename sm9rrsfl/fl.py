@@ -102,6 +102,7 @@ class RoundRecord:
     krum_selected_client: str
     attack_target_success_rate: float | None = None
     attack_target_confidence: float | None = None
+    nonfinite_updates: int = 0
 
 
 @dataclass(frozen=True)
@@ -144,9 +145,31 @@ class StageTimings:
     detection_seconds: float = 0.0
     aggregation_seconds: float = 0.0
     evaluation_seconds: float = 0.0
+    # The per-operation fields above are sums across clients and may exceed
+    # wall time when sm9_workers > 1.  These four fields instead measure
+    # non-overlapping wall-clock spans and are safe to subtract from the
+    # end-to-end runtime for the protocol-free comparison.
+    crypto_setup_wall_seconds: float = 0.0
+    crypto_packet_wall_seconds: float = 0.0
+    crypto_audit_wall_seconds: float = 0.0
+    crypto_finalize_wall_seconds: float = 0.0
+
+    @property
+    def crypto_wall_seconds(self) -> float:
+        return sum(
+            (
+                self.crypto_setup_wall_seconds,
+                self.crypto_packet_wall_seconds,
+                self.crypto_audit_wall_seconds,
+                self.crypto_finalize_wall_seconds,
+            )
+        )
 
     def summary_dict(self) -> dict[str, float]:
-        return asdict(self)
+        return {
+            **asdict(self),
+            "crypto_wall_seconds": self.crypto_wall_seconds,
+        }
 
 
 @dataclass(frozen=True)
@@ -162,6 +185,13 @@ class ExperimentResult:
     runtime_seconds: float = 0.0
     peak_memory_mb: float = 0.0
     stage_timings: StageTimings = field(default_factory=StageTimings)
+    nonfinite_updates: int = 0
+
+    @property
+    def runtime_without_crypto_seconds(self) -> float:
+        """End-to-end wall time with measured SM9/RRS protocol spans removed."""
+
+        return max(0.0, self.runtime_seconds - self.stage_timings.crypto_wall_seconds)
 
     def summary_dict(self) -> dict[str, object]:
         final_record = self.records[-1] if self.records else None
@@ -183,6 +213,8 @@ class ExperimentResult:
             "malicious_clients": ",".join(self.malicious_clients),
             "blacklisted_clients": ",".join(self.blacklisted_clients),
             "runtime_seconds": self.runtime_seconds,
+            "runtime_without_crypto_seconds": self.runtime_without_crypto_seconds,
+            "nonfinite_updates": self.nonfinite_updates,
             "peak_memory_mb": self.peak_memory_mb,
             **self.stage_timings.summary_dict(),
         }
@@ -388,6 +420,11 @@ def run_experiment(
     detection_seconds = 0.0
     aggregation_seconds = 0.0
     evaluation_seconds = 0.0
+    crypto_setup_wall_seconds = 0.0
+    crypto_packet_wall_seconds = 0.0
+    crypto_audit_wall_seconds = 0.0
+    crypto_finalize_wall_seconds = 0.0
+    nonfinite_updates = 0
     start_round = 1
     if resume_state is None:
         evaluation_started = perf_counter()
@@ -437,6 +474,19 @@ def run_experiment(
         detection_seconds = float(timings.get("detection_seconds", 0.0))
         aggregation_seconds = float(timings.get("aggregation_seconds", 0.0))
         evaluation_seconds = float(timings.get("evaluation_seconds", 0.0))
+        crypto_setup_wall_seconds = float(
+            timings.get("crypto_setup_wall_seconds", 0.0)
+        )
+        crypto_packet_wall_seconds = float(
+            timings.get("crypto_packet_wall_seconds", 0.0)
+        )
+        crypto_audit_wall_seconds = float(
+            timings.get("crypto_audit_wall_seconds", 0.0)
+        )
+        crypto_finalize_wall_seconds = float(
+            timings.get("crypto_finalize_wall_seconds", 0.0)
+        )
+        nonfinite_updates = int(resume_state.get("nonfinite_updates", 0))
 
     blacklisted: set[str] = set(resume_state.get("blacklisted", ())) if resume_state else set()
     true_positive_revocations = (
@@ -456,6 +506,7 @@ def run_experiment(
     fedre_defense = None
     sm9_weight_manager = None
     if config.method == "sm9rrs":
+        crypto_setup_started = perf_counter()
         crypto_state = resume_state.get("crypto_state") if resume_state else None
         if resume_state is not None and crypto_state is None:
             raise ValueError("SM9-RRS checkpoint is missing D-KGC/task state")
@@ -478,6 +529,7 @@ def run_experiment(
             expected_update_shape=(model_spec.parameter_size,),
         )
         auditor = crypto.auditor_service()
+        crypto_setup_wall_seconds += perf_counter() - crypto_setup_started
         detector = LongitudinalSVDDetector(
             window_size=detector_window,
             z_threshold=z_threshold,
@@ -566,12 +618,15 @@ def run_experiment(
                     "checkpoint pending audit is absent from the weight-manager state"
                 )
             try:
+                audit_started = perf_counter()
                 trace_result = _trace_and_archive(
                     as_verifier,
                     auditor,
                     evidence,
                 )
+                crypto_audit_wall_seconds += perf_counter() - audit_started
             except (RuntimeError, TypeError, ValueError) as exc:
+                crypto_audit_wall_seconds += perf_counter() - audit_started
                 raise RuntimeError(
                     "a restored SM9-RRS audit is still unresolved; task remains active"
                 ) from exc
@@ -589,9 +644,13 @@ def run_experiment(
                 identity for identity in client_ids if identity not in blacklisted
             ]
             if remaining_ring:
+                audit_started = perf_counter()
                 crypto.update_task_ring(dataset.name, remaining_ring)
+                crypto_audit_wall_seconds += perf_counter() - audit_started
             else:
+                finalize_started = perf_counter()
                 crypto.finalize_task(dataset.name)
+                crypto_finalize_wall_seconds += perf_counter() - finalize_started
                 task_exhausted = True
 
     if checkpoint_callback is not None and resume_state is None:
@@ -621,6 +680,11 @@ def run_experiment(
                 detection_seconds=detection_seconds,
                 aggregation_seconds=aggregation_seconds,
                 evaluation_seconds=evaluation_seconds,
+                crypto_setup_wall_seconds=crypto_setup_wall_seconds,
+                crypto_packet_wall_seconds=crypto_packet_wall_seconds,
+                crypto_audit_wall_seconds=crypto_audit_wall_seconds,
+                crypto_finalize_wall_seconds=crypto_finalize_wall_seconds,
+                nonfinite_updates=nonfinite_updates,
             )
         )
 
@@ -637,6 +701,7 @@ def run_experiment(
         count_increment_tags: set[str] = set()
         sm9_candidates_by_tag: dict[str, _VerifiedSM9Candidate] = {}
         rejected = 0
+        round_nonfinite_updates = 0
 
         for client_idx, identity in enumerate(client_ids):
             if identity in blacklisted:
@@ -686,6 +751,8 @@ def run_experiment(
             # 做了兜底，FedAvg/Krum 仍可能把全局模型永久污染为非有限值。
             if not _update_is_finite(delta):
                 rejected += 1
+                round_nonfinite_updates += 1
+                nonfinite_updates += 1
                 continue
 
             if config.method == "sm9rrs":
@@ -713,6 +780,7 @@ def run_experiment(
         if config.method == "sm9rrs" and sm9_candidates:
             # 密码封包可并行，轨迹检测必须按客户端稳定顺序更新历史状态。
             assert detector is not None and as_verifier is not None
+            packet_started = perf_counter()
             sm9_result = _process_sm9_candidates(
                 sm9_candidates,
                 client_signers=client_signers,
@@ -721,6 +789,10 @@ def run_experiment(
                 round_id=round_id,
                 task_id=dataset.name,
                 workers=config.sm9_workers,
+            )
+            crypto_packet_wall_seconds += max(
+                0.0,
+                perf_counter() - packet_started - sm9_result.detection_seconds,
             )
             updates.extend(sm9_result.updates)
             update_samples.extend(sm9_result.samples)
@@ -742,6 +814,7 @@ def run_experiment(
             # 六种方法共享训练结果，只在服务端检测和聚合规则上分支。
             aggregation_started = perf_counter()
             detection_inside_aggregation = 0.0
+            crypto_inside_aggregation = 0.0
             aggregate = None
             if config.method == "krum":
                 active_neighbor_count = len(updates) - len(malicious_clients) - 2
@@ -789,6 +862,7 @@ def run_experiment(
                             "C_tol trace request has no matching verified evidence"
                         )
                     try:
+                        audit_started = perf_counter()
                         evidence = as_verifier.build_trace_evidence(
                             candidate.packet,
                             candidate.cpu_delta,
@@ -798,7 +872,13 @@ def run_experiment(
                             auditor,
                             evidence,
                         )
+                        audit_elapsed = perf_counter() - audit_started
+                        crypto_audit_wall_seconds += audit_elapsed
+                        crypto_inside_aggregation += audit_elapsed
                     except (RuntimeError, TypeError, ValueError) as exc:
+                        audit_elapsed = perf_counter() - audit_started
+                        crypto_audit_wall_seconds += audit_elapsed
+                        crypto_inside_aggregation += audit_elapsed
                         # Word 4.3.3 requires the C_tol trigger update to be
                         # rejected immediately.  Preserve its exact evidence
                         # for retry and keep its round weight at zero; no
@@ -818,12 +898,20 @@ def run_experiment(
                         identity for identity in client_ids if identity not in blacklisted
                     ]
                     if remaining_ring:
+                        audit_started = perf_counter()
                         crypto.update_task_ring(dataset.name, remaining_ring)
+                        audit_elapsed = perf_counter() - audit_started
+                        crypto_audit_wall_seconds += audit_elapsed
+                        crypto_inside_aggregation += audit_elapsed
                     else:
                         # There is no valid non-empty ring to install.  Close
                         # the task immediately so the revoked signer cannot use
                         # stale client/AS material from the previous RID.
+                        finalize_started = perf_counter()
                         crypto.finalize_task(dataset.name)
+                        finalize_elapsed = perf_counter() - finalize_started
+                        crypto_finalize_wall_seconds += finalize_elapsed
+                        crypto_inside_aggregation += finalize_elapsed
                         task_exhausted = True
 
                 for tag in update_clients:
@@ -1026,7 +1114,10 @@ def run_experiment(
                     else (params + aggregate).astype(np.float32)
                 )
             aggregation_seconds += (
-                perf_counter() - aggregation_started - detection_inside_aggregation
+                perf_counter()
+                - aggregation_started
+                - detection_inside_aggregation
+                - crypto_inside_aggregation
             )
 
         should_evaluate = round_id == config.rounds or round_id % config.eval_interval == 0
@@ -1058,6 +1149,7 @@ def run_experiment(
                     krum_selected=krum_selected,
                     attack_target_success=target_success,
                     attack_target_confidence=target_confidence,
+                    nonfinite_updates=round_nonfinite_updates,
                 )
             )
             can_stop = not malicious_clients or round_id >= attack_start
@@ -1090,6 +1182,11 @@ def run_experiment(
                     detection_seconds=detection_seconds,
                     aggregation_seconds=aggregation_seconds,
                     evaluation_seconds=evaluation_seconds,
+                    crypto_setup_wall_seconds=crypto_setup_wall_seconds,
+                    crypto_packet_wall_seconds=crypto_packet_wall_seconds,
+                    crypto_audit_wall_seconds=crypto_audit_wall_seconds,
+                    crypto_finalize_wall_seconds=crypto_finalize_wall_seconds,
+                    nonfinite_updates=nonfinite_updates,
                 )
             )
         if config.method == "sm9rrs" and unresolved_audit_error is not None:
@@ -1106,7 +1203,9 @@ def run_experiment(
     # destroying h_t, kappa_t and cached task-linking material.
     if crypto is not None:
         if not crypto.is_task_finalized(dataset.name):
+            finalize_started = perf_counter()
             crypto.finalize_task(dataset.name)
+            crypto_finalize_wall_seconds += perf_counter() - finalize_started
         if checkpoint_callback is not None:
             checkpoint_callback(
                 _build_checkpoint_state(
@@ -1132,6 +1231,11 @@ def run_experiment(
                     detection_seconds=detection_seconds,
                     aggregation_seconds=aggregation_seconds,
                     evaluation_seconds=evaluation_seconds,
+                    crypto_setup_wall_seconds=crypto_setup_wall_seconds,
+                    crypto_packet_wall_seconds=crypto_packet_wall_seconds,
+                    crypto_audit_wall_seconds=crypto_audit_wall_seconds,
+                    crypto_finalize_wall_seconds=crypto_finalize_wall_seconds,
+                    nonfinite_updates=nonfinite_updates,
                 )
             )
 
@@ -1155,7 +1259,12 @@ def run_experiment(
             detection_seconds=detection_seconds,
             aggregation_seconds=aggregation_seconds,
             evaluation_seconds=evaluation_seconds,
+            crypto_setup_wall_seconds=crypto_setup_wall_seconds,
+            crypto_packet_wall_seconds=crypto_packet_wall_seconds,
+            crypto_audit_wall_seconds=crypto_audit_wall_seconds,
+            crypto_finalize_wall_seconds=crypto_finalize_wall_seconds,
         ),
+        nonfinite_updates=nonfinite_updates,
     )
 
 
@@ -1446,6 +1555,11 @@ def _build_checkpoint_state(
     detection_seconds: float,
     aggregation_seconds: float,
     evaluation_seconds: float,
+    crypto_setup_wall_seconds: float,
+    crypto_packet_wall_seconds: float,
+    crypto_audit_wall_seconds: float,
+    crypto_finalize_wall_seconds: float,
+    nonfinite_updates: int,
 ) -> dict[str, Any]:
     """只在轮次边界构造一致快照，绝不保存完成一半的聚合状态。"""
 
@@ -1457,6 +1571,7 @@ def _build_checkpoint_state(
         "blacklisted": tuple(sorted(blacklisted)),
         "true_positive_revocations": true_positive_revocations,
         "false_positive_revocations": false_positive_revocations,
+        "nonfinite_updates": nonfinite_updates,
         "detector": detector,
         "weight_manager": weight_manager,
         "ding13_detector": ding13_detector,
@@ -1473,6 +1588,10 @@ def _build_checkpoint_state(
             "detection_seconds": detection_seconds,
             "aggregation_seconds": aggregation_seconds,
             "evaluation_seconds": evaluation_seconds,
+            "crypto_setup_wall_seconds": crypto_setup_wall_seconds,
+            "crypto_packet_wall_seconds": crypto_packet_wall_seconds,
+            "crypto_audit_wall_seconds": crypto_audit_wall_seconds,
+            "crypto_finalize_wall_seconds": crypto_finalize_wall_seconds,
         },
     }
 
@@ -1739,6 +1858,7 @@ def _make_record(
     krum_selected: str,
     attack_target_success: float | None = None,
     attack_target_confidence: float | None = None,
+    nonfinite_updates: int = 0,
 ) -> RoundRecord:
     return RoundRecord(
         method=config.method,
@@ -1762,4 +1882,5 @@ def _make_record(
             if attack_target_confidence is not None
             else None
         ),
+        nonfinite_updates=nonfinite_updates,
     )

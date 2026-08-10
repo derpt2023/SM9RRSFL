@@ -42,7 +42,7 @@ PROGRESS_BAR_WIDTH = 28
 _WORKER_DATASET = None
 _WORKER_CHECKPOINT_DIR = None
 _WORKER_RUN_FINGERPRINT = None
-CHECKPOINT_SCHEMA_VERSION = 9
+CHECKPOINT_SCHEMA_VERSION = 10
 COMPLETED_RESULTS_SNAPSHOT = ".completed_results.pickle"
 DATASET_TRAINING_PRESETS = {
     "mnist": {
@@ -1985,6 +1985,7 @@ def write_rounds(path: Path, results: list[ExperimentResult]) -> None:
                 "partition": result.config.partition,
                 "dirichlet_alpha": result.config.dirichlet_alpha,
                 "num_clients": result.config.num_clients,
+                "seed": result.config.seed,
                 **asdict(record),
             }
             rows.append(row)
@@ -2040,8 +2041,9 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
         partition = row.get("partition", "iid")
         alpha = float(row.get("dirichlet_alpha") or 0.0)
         num_clients = int(row["num_clients"]) if row.get("num_clients") else None
+        seed = int(row["seed"]) if row.get("seed") else None
         ratio = float(row["malicious_ratio"])
-        key = (partition, alpha, num_clients, row["method"], ratio)
+        key = (partition, alpha, num_clients, row["method"], ratio, seed)
         rounds_by_key.setdefault(key, []).append(
             RoundRecord(
                 method=row["method"],
@@ -2061,6 +2063,7 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
                 attack_target_confidence=_parse_optional_float(
                     row.get("attack_target_confidence")
                 ),
+                nonfinite_updates=int(row.get("nonfinite_updates") or 0),
             )
         )
 
@@ -2135,10 +2138,14 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             ),
             seed=int(row["seed"]),
         )
-        record_key = (partition, alpha, num_clients, row["method"], ratio)
-        legacy_record_key = (partition, alpha, None, row["method"], ratio)
-        legacy_iid_key = ("iid", 0.0, None, row["method"], ratio)
+        seed = int(row["seed"])
+        record_key = (partition, alpha, num_clients, row["method"], ratio, seed)
+        legacy_seed_key = (partition, alpha, num_clients, row["method"], ratio, None)
+        legacy_record_key = (partition, alpha, None, row["method"], ratio, None)
+        legacy_iid_key = ("iid", 0.0, None, row["method"], ratio, None)
         records = rounds_by_key.get(record_key)
+        if records is None:
+            records = rounds_by_key.get(legacy_seed_key)
         if records is None:
             records = rounds_by_key.get(legacy_record_key)
         if records is None and partition == "iid":
@@ -2154,6 +2161,7 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
                 blacklisted_clients=tuple(filter(None, row["blacklisted_clients"].split(","))),
                 runtime_seconds=float(row.get("runtime_seconds") or 0.0),
                 peak_memory_mb=float(row.get("peak_memory_mb") or 0.0),
+                nonfinite_updates=int(row.get("nonfinite_updates") or 0),
                 stage_timings=StageTimings(
                     training_seconds=float(row.get("training_seconds") or 0.0),
                     attack_seconds=float(row.get("attack_seconds") or 0.0),
@@ -2164,6 +2172,18 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
                     detection_seconds=float(row.get("detection_seconds") or 0.0),
                     aggregation_seconds=float(row.get("aggregation_seconds") or 0.0),
                     evaluation_seconds=float(row.get("evaluation_seconds") or 0.0),
+                    crypto_setup_wall_seconds=float(
+                        row.get("crypto_setup_wall_seconds") or 0.0
+                    ),
+                    crypto_packet_wall_seconds=float(
+                        row.get("crypto_packet_wall_seconds") or 0.0
+                    ),
+                    crypto_audit_wall_seconds=float(
+                        row.get("crypto_audit_wall_seconds") or 0.0
+                    ),
+                    crypto_finalize_wall_seconds=float(
+                        row.get("crypto_finalize_wall_seconds") or 0.0
+                    ),
                 ),
             )
         )
@@ -2183,7 +2203,8 @@ def _parse_optional_float(value: str | None) -> float | None:
 def print_summary(results: list[ExperimentResult]) -> None:
     print(
         "partition clients method ratio final_acc final_error target_asr target_conf "
-        "stopped blacklisted runtime_s train_s hash_s sign_s verify_s eval_s peak_mem_mb"
+        "stopped blacklisted runtime_s no_crypto_s crypto_s train_s hash_s sign_s "
+        "verify_s eval_s peak_mem_mb"
     )
     for result in results:
         timings = result.stage_timings
@@ -2214,6 +2235,8 @@ def print_summary(results: list[ExperimentResult]) -> None:
             f"{result.stopped_round:3d} "
             f"{len(result.blacklisted_clients):3d} "
             f"{result.runtime_seconds:8.2f} "
+            f"{result.runtime_without_crypto_seconds:11.2f} "
+            f"{timings.crypto_wall_seconds:8.2f} "
             f"{timings.training_seconds:8.2f} "
             f"{timings.hash_seconds:7.2f} "
             f"{timings.sign_seconds:7.2f} "

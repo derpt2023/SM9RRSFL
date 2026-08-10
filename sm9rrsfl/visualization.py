@@ -116,17 +116,42 @@ def generate_visualizations(results: list[ExperimentResult], output_dir: str | P
                 )
             )
 
+        fair_runtime_path = plot_dir / f"{prefix}runtime_without_crypto.svg"
+        _write_text(
+            fair_runtime_path,
+            _grouped_bar_chart(
+                title=f"{title_prefix}各方案的训练/防御时间开销对比（扣除密码协议）",
+                values=_metric_by_ratio_and_method(
+                    scenario_results,
+                    "runtime_without_crypto_seconds",
+                ),
+                x_label="恶意节点比例",
+                y_label="扣除密码协议后的运行时间（秒）",
+            ),
+        )
+        generated.append(
+            (
+                f"{scenario_label} - 公平时间开销对比（扣除密码协议）",
+                fair_runtime_path.relative_to(out).as_posix(),
+            )
+        )
+
         runtime_path = plot_dir / f"{prefix}runtime_overhead.svg"
         _write_text(
             runtime_path,
             _grouped_bar_chart(
-                title=f"{title_prefix}各方案的时间开销对比",
+                title=f"{title_prefix}各方案的端到端时间开销对比（含密码协议）",
                 values=_metric_by_ratio_and_method(scenario_results, "runtime_seconds"),
                 x_label="恶意节点比例",
-                y_label="运行时间（秒）",
+                y_label="端到端运行时间（秒）",
             ),
         )
-        generated.append((f"{scenario_label} - 时间开销对比", runtime_path.relative_to(out).as_posix()))
+        generated.append(
+            (
+                f"{scenario_label} - 端到端时间开销对比（含密码协议）",
+                runtime_path.relative_to(out).as_posix(),
+            )
+        )
 
         memory_path = plot_dir / f"{prefix}memory_overhead.svg"
         _write_text(
@@ -178,16 +203,39 @@ def generate_visualizations(results: list[ExperimentResult], output_dir: str | P
             _write_text(
                 runtime_path,
                 _grouped_bar_chart(
-                    title=f"{partition_label}：恶意比例 {ratio_label} 时不同客户端数量的时间开销对比",
-                    values=_metric_by_clients_and_method(subset, "runtime_seconds"),
+                    title=f"{partition_label}：恶意比例 {ratio_label} 时不同客户端数量的公平时间开销（扣除密码协议）",
+                    values=_metric_by_clients_and_method(
+                        subset,
+                        "runtime_without_crypto_seconds",
+                    ),
                     x_label="客户端数量",
-                    y_label="运行时间（秒）",
+                    y_label="扣除密码协议后的运行时间（秒）",
                 ),
             )
             generated.append(
                 (
-                    f"{partition_label} - 恶意比例 {ratio_label} 客户端数量/时间开销对比",
+                    f"{partition_label} - 恶意比例 {ratio_label} 客户端数量/公平时间开销对比",
                     runtime_path.relative_to(out).as_posix(),
+                )
+            )
+
+            end_to_end_path = (
+                plot_dir
+                / f"{prefix}client_count_runtime_end_to_end_ratio_{_ratio_slug(ratio)}.svg"
+            )
+            _write_text(
+                end_to_end_path,
+                _grouped_bar_chart(
+                    title=f"{partition_label}：恶意比例 {ratio_label} 时不同客户端数量的端到端时间开销（含密码协议）",
+                    values=_metric_by_clients_and_method(subset, "runtime_seconds"),
+                    x_label="客户端数量",
+                    y_label="端到端运行时间（秒）",
+                ),
+            )
+            generated.append(
+                (
+                    f"{partition_label} - 恶意比例 {ratio_label} 客户端数量/端到端时间开销",
+                    end_to_end_path.relative_to(out).as_posix(),
                 )
             )
 

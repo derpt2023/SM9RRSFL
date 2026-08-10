@@ -20,6 +20,7 @@ class VisualizationTest(unittest.TestCase):
             self.assertTrue(dashboard.exists())
             self.assertTrue((Path(tmp) / "plots" / "accuracy_baseline.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "runtime_overhead.svg").exists())
+            self.assertTrue((Path(tmp) / "plots" / "runtime_without_crypto.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "memory_overhead.svg").exists())
             baseline = (
                 Path(tmp) / "plots" / "accuracy_baseline.svg"
@@ -33,6 +34,10 @@ class VisualizationTest(unittest.TestCase):
             self.assertIn(">TAD<", runtime)
             self.assertNotIn("文献 [13]", runtime)
             self.assertNotIn(">SM9-RRS-FL<", baseline)
+            fair_runtime = (
+                Path(tmp) / "plots" / "runtime_without_crypto.svg"
+            ).read_text(encoding="utf-8")
+            self.assertIn("扣除密码协议", fair_runtime)
 
     def test_generates_partition_specific_files_for_multiple_scenarios(self):
         results = [

@@ -31,6 +31,7 @@ from sm9rrsfl.experiments import (
 from sm9rrsfl.datasets import make_synthetic_mnist_like
 from sm9rrsfl.fl import (
     ExperimentConfig,
+    StageTimings,
     experiment_config_error,
     malicious_client_count,
     run_experiment,
@@ -587,7 +588,68 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertEqual(len(snapshot), 1)
         self.assertIn("training_seconds", row)
+        self.assertIn("runtime_without_crypto_seconds", row)
+        self.assertIn("crypto_wall_seconds", row)
+        self.assertIn("nonfinite_updates", row)
         self.assertGreaterEqual(restored[0].stage_timings.training_seconds, 0.0)
+
+    def test_protocol_free_runtime_uses_wall_spans_not_parallel_operation_sums(self):
+        timings = StageTimings(
+            hash_seconds=5.0,
+            sign_seconds=7.0,
+            verify_seconds=9.0,
+            crypto_setup_wall_seconds=0.5,
+            crypto_packet_wall_seconds=1.5,
+            crypto_audit_wall_seconds=0.25,
+            crypto_finalize_wall_seconds=0.25,
+        )
+        result = run_experiment(
+            make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=70),
+            ExperimentConfig(
+                method="fedavg",
+                num_clients=2,
+                rounds=1,
+                early_stop=False,
+                seed=70,
+            ),
+        )
+        measured = result.__class__(
+            **{
+                **result.__dict__,
+                "runtime_seconds": 10.0,
+                "stage_timings": timings,
+            }
+        )
+
+        self.assertAlmostEqual(timings.crypto_wall_seconds, 2.5)
+        self.assertAlmostEqual(measured.runtime_without_crypto_seconds, 7.5)
+
+    def test_round_csv_keeps_repeated_seed_records_separate(self):
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=71)
+        results = [
+            run_experiment(
+                dataset,
+                ExperimentConfig(
+                    method="fedavg",
+                    num_clients=2,
+                    rounds=1,
+                    early_stop=False,
+                    seed=seed,
+                ),
+            )
+            for seed in (71, 72)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            write_result_files(output_dir, results)
+            restored = read_results(
+                output_dir / "summary.csv",
+                output_dir / "rounds.csv",
+            )
+
+        self.assertEqual(len(restored), 2)
+        self.assertEqual({result.config.seed for result in restored}, {71, 72})
+        self.assertTrue(all(len(result.records) == 2 for result in restored))
 
     def test_sm9rrs_client_diagnostics_are_written(self):
         dataset = make_synthetic_mnist_like(

@@ -163,6 +163,57 @@ python -m sm9rrsfl.config_runner \
 
 配置入口最终仍调用 `sm9rrsfl.experiments`，因此命令行模式原有的参数校验、数据集预设、并行执行、断点恢复、可视化和输出格式全部保持一致。每次实际生效的完整参数仍会写入输出目录的 `run_manifest.json`、`summary.csv` 和 `summary.json`。
 
+## 分数据集的统一公平调参和主实验
+
+允许 MNIST 与 CIFAR-10 使用不同的最优防御参数，因为模型维度、更新范数、局部训练轮数与数据异质性不同；但不能在看到最终测试结果后只为某一个方案手工修改参数。项目提供 `sm9rrsfl.fair_tuning`，在一份数据集配置中同时编排六种方案，并强制执行以下协议：
+
+1. 只从训练集按类别分层划出验证集。官方测试集不参加参数选择；选参结束后，最终主实验重新使用完整训练集和官方测试集。
+2. 六种方法共享数据集、客户端数量、IID/Non-IID 划分、恶意比例、攻击、轮数、本地 epoch、batch size、学习率、学习率衰减、提前停止规则和评价函数。方法搜索空间只能包含该方法专属的防御参数，不能把 `lr`、攻击强度或训练轮数按方法分别调整。
+3. Ours、VERT 和 FedREDefense 等确有暴露超参数的方法必须具有完全相同的网格候选数 `trials_per_tunable_method`。FedAvg、Krum 和当前 TAD 实现没有额外的可调防御参数，因此各自只有一个空候选，但仍完整参加验证和最终主实验。
+4. 所有候选使用同一组 `validation_seeds` 和场景，最终主实验使用与之不重叠的 `final_seeds`。配置强制 `early_stop=false` 和 `eval_interval=1`，避免某个候选少跑轮次，并完整审计非有限更新。
+5. 默认 `require_finite_updates=true`：只要候选产生任何 NaN/Inf 更新，该候选即无效，不能因恶意更新被自动丢弃而获得虚假的高分。如果某方法全部候选无效，搜索会直接失败并要求先修正共享训练/攻击配置。
+6. 选参前预先声明统一目标：干净准确率、攻击场景准确率、目标攻击成功率和误撤销率的固定权重。最终论文表格使用独立 `final_seeds` 的均值/标准差，不从最终测试集反向选择候选。
+
+示例配置为 `configs/fair_tuning.example.json`。先做只校验不训练的检查：
+
+```bash
+python run_fair_tuning_from_config.py \
+  --config configs/fair_tuning.example.json \
+  --dry-run
+```
+
+正式运行：
+
+```bash
+python run_fair_tuning_from_config.py \
+  --config configs/fair_tuning.example.json
+```
+
+也可直接使用模块入口：
+
+```bash
+python -m sm9rrsfl.fair_tuning \
+  --config configs/fair_tuning.example.json
+```
+
+每个数据集应复制一份配置并分别声明搜索空间，例如 MNIST 与 CIFAR-10 各自一份；不要在同一次搜索中混合两个数据集。网格必须为有限的显式数组，三种可调方法的笛卡尔积大小必须等于相同的 `trials_per_tunable_method`。当前允许的专属参数如下：
+
+- Ours：`detector_window`、`z_threshold`、`suspicion_penalty_factor`、`suspicion_recovery_factor`、`suspicion_remove_after`。
+- VERT：`vert_history_window`、`vert_projection_dim`、`vert_predict_epochs`、`vert_predict_lr`、`vert_top_k`、`vert_use_ratio_prior`。
+- FedREDefense：`fedre_threshold`、各重构迭代数/步数/图像数及 `fedre_*_lr`。
+- Krum、TAD、FedAvg：当前没有项目级可调防御参数，搜索空间必须写成 `{}`。
+
+调参目录会输出：
+
+- `tuning_trials.csv`：每个候选的统一验证分数、四项指标、有效性与非有限更新数。
+- `validation_results.csv`：所有候选、种子和场景的原始验证摘要。
+- `best_parameters.json` 与 `tuning_manifest.json`：共享协议、数据隔离声明、候选预算和各方法入选参数。
+- `final_evaluation/summary.csv`、`rounds.csv`：独立最终种子的完整主实验结果；逐轮文件带 `seed`，不会把不同重复实验混在一起。
+- `final_evaluation/aggregate.csv`：论文表格应使用的多种子均值/标准差，同时给出端到端时间、扣除密码协议后的时间和密码协议墙钟时间。
+- `final_evaluation/seed_<seed>/visualizations.html`：每个最终种子的独立图表。多种子统计以 `aggregate.csv` 为准，避免同名曲线覆盖。
+
+这一功能不替代攻击有效性预检查：应先确认无防御 FedAvg 在攻击场景中能稳定产生有限更新并达到预期 ASR，再启动防御参数搜索。
+
 ## 签名与验签开销实验
 
 该实验用于回答“客户端数量变化时，本方案签名与验签耗时是多少”。实验入口是 `sm9rrsfl/benchmarks/crypto_overhead.py`，不会训练模型，只测密码层。
@@ -597,8 +648,8 @@ python -m sm9rrsfl.benchmarks.crypto_overhead
 
 默认输出目录按数据集和密码模式区分：MNIST 的 `--crypto-mode sm9` 写入 `outputs/mnist/`，CIFAR-10 的 `--crypto-mode sm9` 写入 `outputs/cifar10/`；模拟模式分别写入 `outputs/mnist_simulated/` 和 `outputs/cifar10_simulated/`；CIFAR-10 干净基线写入 `outputs/cifar10_clean_baseline/`。每个输出目录都会包含：
 
-- `summary.csv`：每个方法和恶意比例的一行摘要，同时包含最终目标攻击成功率 `final_attack_target_success_rate`、平均目标类别置信度 `final_attack_target_confidence`，以及训练、攻击、摘要、封包、签名、验签、检测、聚合和评估的分阶段耗时。使用多个 `sm9-workers` 时，密码字段是各客户端操作耗时之和，用于判断热点；`runtime_seconds` 才是配置的真实墙钟时间。
-- `rounds.csv`：逐轮准确率、误差、目标攻击成功率/置信度、接收/拒绝更新数、黑名单数量、TP/FP 等。交替最小化的无恶意客户端对照组也会在测试集样本充足时记录同一目标指标；非交替最小化配置的目标指标为空值。
+- `summary.csv`：每个方法和恶意比例的一行摘要，同时包含最终目标攻击成功率 `final_attack_target_success_rate`、平均目标类别置信度 `final_attack_target_confidence`、累计非有限更新数 `nonfinite_updates`，以及训练、攻击、摘要、封包、签名、验签、检测、聚合和评估的分阶段耗时。使用多个 `sm9-workers` 时，`hash_seconds`、`sign_seconds`、`verify_seconds` 等字段是各客户端操作耗时之和，只用于判断热点，不能从墙钟时间直接相减。`runtime_seconds` 是含完整密码协议的端到端墙钟时间；`crypto_setup_wall_seconds`、`crypto_packet_wall_seconds`、`crypto_audit_wall_seconds` 和 `crypto_finalize_wall_seconds` 是互不重叠的密码协议墙钟区间，其和为 `crypto_wall_seconds`；`runtime_without_crypto_seconds = max(0, runtime_seconds - crypto_wall_seconds)`，用于与不含密码层的防御做公平算法时间对比。
+- `rounds.csv`：逐轮准确率、误差、目标攻击成功率/置信度、接收/拒绝更新数、该轮非有限更新数 `nonfinite_updates`、黑名单数量、TP/FP 和随机种子 `seed` 等。交替最小化的无恶意客户端对照组也会在测试集样本充足时记录同一目标指标；非交替最小化配置的目标指标为空值。
 - `sm9rrs_diagnostics.csv`：Ours 的逐客户端逐轮诊断记录，包括两个 Z-Score、对应阈值条件、奇异值变化、方向余弦、异常原因、惩罚/恢复前权重、归一化前权重、实际聚合权重、`Count` 前后值以及追踪、待处理和撤销状态。`client_id` 与 `is_malicious` 仅作为实验真值写入结果，不参与服务器检测或聚合；客户端被撤销后不再提交更新，因此后续轮次不会再产生新的 Z-Score 行。
 - `summary.json`：与 `summary.csv` 对应的 JSON 结果。
 - `run_manifest.json`：本次数据规模与完整配置指纹，用于确认检查点可以安全复用。
@@ -610,7 +661,9 @@ python -m sm9rrsfl.benchmarks.crypto_overhead
 - `.checkpoints/*.pickle`：当前未完成配置的逐轮状态，配置成功完成后自动删除。
 - `.checkpoints/discarded/*.pickle`：用户在断点询问中选择 `N` 后保留的旧断点备份，不参与自动续跑。
 - `visualizations.html`：自动生成的可视化总览页面。
-- `plots/*.svg`：各个图表的 SVG 文件，可直接插入论文或进一步编辑。
+- `plots/runtime_without_crypto.svg`：扣除 Ours 密码协议墙钟区间后的公平算法时间对比，应作为论文“防御算法时间”主图。
+- `plots/runtime_overhead.svg`：包含密钥初始化、签名、验签、追踪等协议成本的端到端时间，应作为系统总体成本补充图。
+- `plots/*.svg`：其余图表，可直接插入论文或进一步编辑。
 
 每轮和每个配置的结果都通过临时文件及原子替换保存。长时间实验中途退出后，既能保留已经完成的配置，也能从当前配置的下一轮继续，而不必重跑前面的数百轮。
 
@@ -630,7 +683,9 @@ python -m sm9rrsfl.benchmarks.crypto_overhead
 - `plots/iid_client_count_runtime_ratio_045.svg`
 - `plots/iid_client_count_memory_ratio_045.svg`
 
-时间开销使用单个配置运行的墙钟时间；内存开销使用当前 Python 进程的峰值 RSS。由于同一脚本会顺序运行多组配置，RSS 是粗粒度指标；如果需要更严格的内存隔离，可以分别运行单个 `--methods` 和单个 `--ratios` 配置后对比。
+时间开销同时报告端到端墙钟时间和扣除密码协议后的墙钟时间。后者只减去外层测得的非重叠墙钟区间，不会错误减去并行客户端操作耗时之和；训练、攻击、SVD/重构检测和聚合均保留。内存开销使用当前 Python 进程的峰值 RSS。由于同一脚本会顺序运行多组配置，RSS 是粗粒度指标；如果需要更严格的内存隔离，可以分别运行单个 `--methods` 和单个 `--ratios` 配置后对比。
+
+旧结果没有保存密钥生成、任务环更新、追踪和销毁的墙钟边界，无法从已有 `summary.csv` 精确反推出 `runtime_without_crypto_seconds`。准确率/ASR 结论不因本次纯计时代码改变而必须重跑，但若论文要使用新的公平时间列或两张时间图，需要重跑相应的计时实验。检查点模式版本已相应更新，旧的未完成检查点不会被误当成带完整新计时字段的检查点。
 
 注意：Krum 在实现上需要满足 `n - f - 2 >= 1`，其中 `n` 为当前参与客户端数，`f` 为恶意客户端数。默认 `20/50/100` 客户端数量下，`80%` 恶意节点仍可运行；如果把客户端数改得很小，`60%` 或 `80%` 可能会使 Krum 无法计算。即使在 `0%` 恶意节点下，Krum 也保持“每轮选择一个更新”的原始语义，不自动替换为 FedAvg。
 

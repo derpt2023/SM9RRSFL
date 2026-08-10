@@ -40,6 +40,8 @@ class FederatedLoopTest(unittest.TestCase):
             result = run_experiment(dataset, config)
 
         self.assertEqual(result.records[-1].rejected_updates, 1)
+        self.assertEqual(result.records[-1].nonfinite_updates, 1)
+        self.assertEqual(result.nonfinite_updates, 1)
         self.assertTrue(np.isfinite(result.final_accuracy))
 
     def test_vert_torch_backend_runs_on_cpu_when_no_accelerator_is_requested(self):
