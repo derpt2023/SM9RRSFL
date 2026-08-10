@@ -11,12 +11,14 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import csv
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
+import hashlib
 from itertools import product
 import json
 from pathlib import Path
 from statistics import fmean, pstdev
 import sys
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 
@@ -24,15 +26,23 @@ from .config_runner import ConfigError, parameters_to_argv
 from .datasets import ImageDataset, load_image_dataset
 from .experiments import (
     ProgressReporter,
+    _cuda_capacity_error,
+    _estimated_parallel_worker_memory_mb,
     assign_auto_cuda_devices,
     available_cuda_devices,
+    build_run_manifest,
     build_experiment_configs,
+    confirm_matching_checkpoints,
+    cuda_devices_with_capacity,
+    finalize_config_checkpoint,
+    load_completed_results_snapshot,
     parallel_executor_kind,
     parse_args,
     print_resource_plan,
     resolve_parallel_jobs,
     resolve_sm9_workers,
     run_measured_experiment,
+    write_run_manifest,
     write_result_files,
 )
 from .fl import ExperimentConfig, ExperimentResult, malicious_client_count
@@ -101,6 +111,7 @@ TUNING_KEYS = {
     "final_seeds",
     "trials_per_tunable_method",
     "require_finite_updates",
+    "require_clean_acceptance",
     "run_final_evaluation",
     "objective",
     "method_spaces",
@@ -125,6 +136,7 @@ class FairTuningConfig:
     final_seeds: tuple[int, ...]
     trials_per_tunable_method: int
     require_finite_updates: bool
+    require_clean_acceptance: bool
     run_final_evaluation: bool
     objective: dict[str, float]
     candidates: dict[str, tuple[dict[str, Any], ...]]
@@ -141,6 +153,7 @@ class TrialScore:
     robust_accuracy: float
     attack_success_rate: float
     false_positive_rate: float
+    clean_acceptance_rate: float
     nonfinite_updates: int
     result_count: int
 
@@ -160,6 +173,7 @@ class TrialScore:
             "robust_accuracy": self.robust_accuracy,
             "attack_success_rate": self.attack_success_rate,
             "false_positive_rate": self.false_positive_rate,
+            "clean_acceptance_rate": self.clean_acceptance_rate,
             "nonfinite_updates": self.nonfinite_updates,
             "result_count": self.result_count,
         }
@@ -176,6 +190,8 @@ class TuningExperimentTask:
 
 
 _TUNING_WORKER_DATASET: ImageDataset | None = None
+_TUNING_WORKER_CHECKPOINT_DIR: Path | None = None
+_TUNING_WORKER_RUN_FINGERPRINT: str | None = None
 
 
 class FairTuningError(ValueError):
@@ -259,10 +275,16 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
     if budget < 1:
         raise FairTuningError("trials_per_tunable_method must be at least 1")
     require_finite = tuning.get("require_finite_updates", True)
+    require_clean_acceptance = tuning.get("require_clean_acceptance", True)
     run_final = tuning.get("run_final_evaluation", True)
-    if not isinstance(require_finite, bool) or not isinstance(run_final, bool):
+    if (
+        not isinstance(require_finite, bool)
+        or not isinstance(require_clean_acceptance, bool)
+        or not isinstance(run_final, bool)
+    ):
         raise FairTuningError(
-            "require_finite_updates and run_final_evaluation must be boolean"
+            "require_finite_updates, require_clean_acceptance and "
+            "run_final_evaluation must be boolean"
         )
 
     objective = dict(OBJECTIVE_DEFAULTS)
@@ -324,6 +346,7 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
         final_seeds=final_seeds,
         trials_per_tunable_method=budget,
         require_finite_updates=require_finite,
+        require_clean_acceptance=require_clean_acceptance,
         run_final_evaluation=run_final,
         objective=objective,
         candidates=candidates,
@@ -399,6 +422,7 @@ def score_trial(
     *,
     objective: dict[str, float],
     require_finite_updates: bool,
+    require_clean_acceptance: bool = True,
 ) -> TrialScore:
     clean = [result for result in results if abs(result.config.malicious_ratio) < 1e-12]
     attacked = [result for result in results if result.config.malicious_ratio > 0.0]
@@ -424,8 +448,24 @@ def score_trial(
             / max(1, honest)
         )
     false_positive_rate = fmean(false_positive_rates)
+    clean_acceptance_rates = [
+        max(
+            (
+                record.accepted_updates / max(1, result.config.num_clients)
+                for record in result.records
+                if record.round > 0
+            ),
+            default=0.0,
+        )
+        for result in clean
+    ]
+    clean_acceptance_rate = fmean(clean_acceptance_rates)
     nonfinite_updates = sum(result.nonfinite_updates for result in results)
-    valid = not require_finite_updates or nonfinite_updates == 0
+    finite_valid = not require_finite_updates or nonfinite_updates == 0
+    clean_acceptance_valid = not require_clean_acceptance or all(
+        rate > 0.0 for rate in clean_acceptance_rates
+    )
+    valid = finite_valid and clean_acceptance_valid
     score = (
         objective["clean_accuracy_weight"] * clean_accuracy
         + objective["robust_accuracy_weight"] * robust_accuracy
@@ -444,6 +484,7 @@ def score_trial(
         robust_accuracy=robust_accuracy,
         attack_success_rate=attack_success,
         false_positive_rate=false_positive_rate,
+        clean_acceptance_rate=clean_acceptance_rate,
         nonfinite_updates=nonfinite_updates,
         result_count=len(results),
     )
@@ -455,8 +496,9 @@ def select_best_trials(trials: list[TrialScore]) -> dict[str, TrialScore]:
         method_trials = [trial for trial in trials if trial.method == method and trial.valid]
         if not method_trials:
             raise FairTuningError(
-                f"no finite valid candidate remains for {method}; fix the shared attack/training "
-                "configuration instead of selecting an apparently good NaN run"
+                f"no valid candidate remains for {method}; fix the shared attack/training "
+                "configuration or the method grid instead of selecting a NaN run or a "
+                "candidate that rejects every clean client"
             )
         selected[method] = max(
             method_trials,
@@ -547,7 +589,21 @@ def prepare_tuning_tasks(
         )
     configs = [replace(task.config, sm9_workers=sm9_workers) for task in tasks]
     if spread_cuda_devices:
-        configs = assign_auto_cuda_devices(configs, backend_description, args.device)
+        estimated_worker_mb = _estimated_parallel_worker_memory_mb(dataset, configs)
+        usable_cuda_devices = (
+            cuda_devices_with_capacity(estimated_worker_mb)
+            if backend_description == "torch:cuda"
+            and args.device.strip().lower() == "auto"
+            else None
+        )
+        if usable_cuda_devices == ():
+            raise RuntimeError(_cuda_capacity_error(estimated_worker_mb))
+        configs = assign_auto_cuda_devices(
+            configs,
+            backend_description,
+            args.device,
+            cuda_devices=usable_cuda_devices,
+        )
     prepared = [
         replace(task, config=config)
         for task, config in zip(tasks, configs)
@@ -563,11 +619,17 @@ def execute_tuning_tasks(
     backend_description: str,
     progress_enabled: bool,
     progress_mode: str,
+    checkpoint_dir: Path | None = None,
+    run_fingerprint: str | None = None,
+    progress_total: int | None = None,
+    progress_completed: int = 0,
+    on_complete: Callable[[TuningExperimentTask, ExperimentResult], None] | None = None,
 ) -> list[tuple[TuningExperimentTask, ExperimentResult]]:
     """Execute independent configs with the main runner's executor semantics."""
 
     progress = ProgressReporter(
-        total=len(tasks),
+        total=len(tasks) if progress_total is None else progress_total,
+        completed=progress_completed,
         enabled=progress_enabled,
         stream=sys.stdout,
         mode=progress_mode,
@@ -583,8 +645,21 @@ def execute_tuning_tasks(
         if jobs <= 1:
             for task in tasks:
                 progress.start_config(task.config)
-                result = run_measured_experiment(dataset, task.config)
+                result = run_measured_experiment(
+                    dataset,
+                    task.config,
+                    checkpoint_dir=checkpoint_dir,
+                    run_fingerprint=run_fingerprint,
+                    retain_success_checkpoint=checkpoint_dir is not None,
+                )
                 completed.append((task, result))
+                if on_complete is not None:
+                    on_complete(task, result)
+                finalize_config_checkpoint(
+                    checkpoint_dir,
+                    task.config,
+                    run_fingerprint,
+                )
                 progress.finish_config(task.config)
             return completed
 
@@ -592,23 +667,43 @@ def execute_tuning_tasks(
         if executor_kind == "thread":
             with ThreadPoolExecutor(max_workers=jobs) as executor:
                 futures = {
-                    executor.submit(_run_tuning_task_in_thread, dataset, task): task
+                    executor.submit(
+                        _run_tuning_task_in_thread,
+                        dataset,
+                        task,
+                        checkpoint_dir,
+                        run_fingerprint,
+                    ): task
                     for task in tasks
                 }
-                _consume_tuning_futures(futures, completed, progress)
+                _consume_tuning_futures(
+                    futures,
+                    completed,
+                    progress,
+                    checkpoint_dir=checkpoint_dir,
+                    run_fingerprint=run_fingerprint,
+                    on_complete=on_complete,
+                )
             return completed
 
         try:
             with ProcessPoolExecutor(
                 max_workers=jobs,
                 initializer=_init_tuning_worker_dataset,
-                initargs=(dataset,),
+                initargs=(dataset, checkpoint_dir, run_fingerprint),
             ) as executor:
                 futures = {
                     executor.submit(_run_tuning_task_in_worker, task): task
                     for task in tasks
                 }
-                _consume_tuning_futures(futures, completed, progress)
+                _consume_tuning_futures(
+                    futures,
+                    completed,
+                    progress,
+                    checkpoint_dir=checkpoint_dir,
+                    run_fingerprint=run_fingerprint,
+                    on_complete=on_complete,
+                )
         except PermissionError as exc:
             print(
                 f"tuning_process_pool_unavailable={exc}; falling back to thread pool",
@@ -618,42 +713,249 @@ def execute_tuning_tasks(
             remaining = [task for task in tasks if task not in finished]
             with ThreadPoolExecutor(max_workers=jobs) as executor:
                 futures = {
-                    executor.submit(_run_tuning_task_in_thread, dataset, task): task
+                    executor.submit(
+                        _run_tuning_task_in_thread,
+                        dataset,
+                        task,
+                        checkpoint_dir,
+                        run_fingerprint,
+                    ): task
                     for task in remaining
                 }
-                _consume_tuning_futures(futures, completed, progress)
+                _consume_tuning_futures(
+                    futures,
+                    completed,
+                    progress,
+                    checkpoint_dir=checkpoint_dir,
+                    run_fingerprint=run_fingerprint,
+                    on_complete=on_complete,
+                )
         return completed
     finally:
         progress.close()
 
 
-def _init_tuning_worker_dataset(dataset: ImageDataset) -> None:
+def _init_tuning_worker_dataset(
+    dataset: ImageDataset,
+    checkpoint_dir: Path | None = None,
+    run_fingerprint: str | None = None,
+) -> None:
     global _TUNING_WORKER_DATASET
+    global _TUNING_WORKER_CHECKPOINT_DIR
+    global _TUNING_WORKER_RUN_FINGERPRINT
     _TUNING_WORKER_DATASET = dataset
+    _TUNING_WORKER_CHECKPOINT_DIR = checkpoint_dir
+    _TUNING_WORKER_RUN_FINGERPRINT = run_fingerprint
 
 
 def _run_tuning_task_in_worker(task: TuningExperimentTask) -> ExperimentResult:
     if _TUNING_WORKER_DATASET is None:
         raise RuntimeError("tuning worker dataset was not initialized")
-    return run_measured_experiment(_TUNING_WORKER_DATASET, task.config)
+    return run_measured_experiment(
+        _TUNING_WORKER_DATASET,
+        task.config,
+        checkpoint_dir=_TUNING_WORKER_CHECKPOINT_DIR,
+        run_fingerprint=_TUNING_WORKER_RUN_FINGERPRINT,
+        retain_success_checkpoint=_TUNING_WORKER_CHECKPOINT_DIR is not None,
+    )
 
 
 def _run_tuning_task_in_thread(
     dataset: ImageDataset,
     task: TuningExperimentTask,
+    checkpoint_dir: Path | None = None,
+    run_fingerprint: str | None = None,
 ) -> ExperimentResult:
-    return run_measured_experiment(dataset, task.config)
+    return run_measured_experiment(
+        dataset,
+        task.config,
+        checkpoint_dir=checkpoint_dir,
+        run_fingerprint=run_fingerprint,
+        retain_success_checkpoint=checkpoint_dir is not None,
+    )
 
 
 def _consume_tuning_futures(
     futures,
     completed: list[tuple[TuningExperimentTask, ExperimentResult]],
     progress: ProgressReporter,
+    *,
+    checkpoint_dir: Path | None,
+    run_fingerprint: str | None,
+    on_complete: Callable[[TuningExperimentTask, ExperimentResult], None] | None,
 ) -> None:
     for future in as_completed(futures):
         task = futures[future]
-        completed.append((task, future.result()))
+        result = future.result()
+        completed.append((task, result))
+        if on_complete is not None:
+            on_complete(task, result)
+        finalize_config_checkpoint(
+            checkpoint_dir,
+            task.config,
+            run_fingerprint,
+        )
         progress.finish_config(task.config)
+
+
+def execute_resumable_tuning_phase(
+    dataset: ImageDataset,
+    tasks: list[TuningExperimentTask],
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+    jobs: int,
+    backend_description: str,
+    progress_enabled: bool,
+    progress_mode: str,
+    fingerprint_context: dict[str, Any] | None = None,
+    on_snapshot: Callable[
+        [list[tuple[TuningExperimentTask, ExperimentResult]], str, str],
+        None,
+    ]
+    | None = None,
+) -> tuple[list[tuple[TuningExperimentTask, ExperimentResult]], str]:
+    """Run one tuning phase with per-round and per-configuration recovery.
+
+    A completed worker first leaves a terminal round checkpoint.  The parent
+    then atomically commits the phase result snapshot and only afterwards
+    removes that terminal checkpoint.  This mirrors the main experiment's
+    two-phase commit and makes both validation and final evaluation resumable.
+    """
+
+    if not tasks:
+        return [], ""
+    phase = tasks[0].phase
+    if any(task.phase != phase for task in tasks):
+        raise FairTuningError("one resumable tuning phase cannot mix phase names")
+    task_by_config: dict[ExperimentConfig, TuningExperimentTask] = {}
+    for task in tasks:
+        if task.config in task_by_config:
+            raise FairTuningError(
+                "tuning tasks must resolve to unique experiment configurations"
+            )
+        task_by_config[task.config] = task
+
+    manifest = build_run_manifest(args, dataset, [task.config for task in tasks])
+    manifest["tuning_phase"] = phase
+    manifest["tuning_context"] = dict(fingerprint_context or {})
+    manifest["candidates"] = [
+        {
+            "candidate_id": task.candidate_id,
+            "method": task.method,
+            "config": asdict(task.config),
+        }
+        for task in tasks
+    ]
+    fingerprint_payload = dict(manifest)
+    fingerprint_payload.pop("fingerprint", None)
+    canonical = json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":"))
+    fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    manifest["fingerprint"] = fingerprint
+
+    state_dir = output_dir / ".tuning_state" / phase / fingerprint
+    checkpoint_dir = state_dir / ".checkpoints" if args.resume else None
+    recovered_results: list[ExperimentResult] = []
+    if args.resume:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        write_run_manifest(state_dir, manifest)
+        recovered_results = load_completed_results_snapshot(state_dir) or []
+
+    recovered_by_config: dict[ExperimentConfig, ExperimentResult] = {}
+    for result in recovered_results:
+        if result.config in task_by_config:
+            recovered_by_config[result.config] = result
+    executions = [
+        (task_by_config[config], result)
+        for config, result in recovered_by_config.items()
+    ]
+    executions.sort(key=lambda item: _tuning_task_sort_key(item[0]))
+    completed_configs = set(recovered_by_config)
+    pending_tasks = [task for task in tasks if task.config not in completed_configs]
+
+    if executions:
+        print(
+            f"tuning_phase={phase} resumed_completed_configurations={len(executions)}",
+            flush=True,
+        )
+    if checkpoint_dir is not None:
+        for config in completed_configs:
+            finalize_config_checkpoint(checkpoint_dir, config, fingerprint)
+        confirm_matching_checkpoints(
+            checkpoint_dir,
+            [task.config for task in pending_tasks],
+            fingerprint,
+        )
+
+    if on_snapshot is not None:
+        on_snapshot(executions, fingerprint, "running")
+
+    def commit(task: TuningExperimentTask, result: ExperimentResult) -> None:
+        executions.append((task, result))
+        executions.sort(key=lambda item: _tuning_task_sort_key(item[0]))
+        if args.resume:
+            write_result_files(state_dir, [item[1] for item in executions])
+        if on_snapshot is not None:
+            on_snapshot(executions, fingerprint, "running")
+
+    if pending_tasks:
+        execute_tuning_tasks(
+            dataset,
+            pending_tasks,
+            jobs=min(jobs, len(pending_tasks)),
+            backend_description=backend_description,
+            progress_enabled=progress_enabled,
+            progress_mode=progress_mode,
+            checkpoint_dir=checkpoint_dir,
+            run_fingerprint=fingerprint if checkpoint_dir is not None else None,
+            progress_total=len(tasks),
+            progress_completed=len(executions),
+            on_complete=commit,
+        )
+    if on_snapshot is not None:
+        on_snapshot(executions, fingerprint, "complete")
+    return executions, fingerprint
+
+
+def _write_tuning_progress(
+    output_dir: Path,
+    *,
+    phase: str,
+    fingerprint: str,
+    completed: int,
+    total: int,
+    status: str,
+) -> None:
+    path = output_dir / "tuning_progress.json"
+    payload: dict[str, Any] = {"schema_version": TUNING_SCHEMA_VERSION, "phases": {}}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict) and isinstance(loaded.get("phases"), dict):
+                payload = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+    payload["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    payload["phases"][phase] = {
+        "fingerprint": fingerprint,
+        "status": status,
+        "completed": completed,
+        "total": total,
+        "pending": max(0, total - completed),
+    }
+    _write_json(path, payload)
+
+
+def _validation_rows(
+    executions: list[tuple[TuningExperimentTask, ExperimentResult]],
+) -> list[dict[str, Any]]:
+    return [
+        {"candidate_id": task.candidate_id, **result.summary_dict()}
+        for task, result in sorted(
+            executions,
+            key=lambda item: _tuning_task_sort_key(item[0]),
+        )
+    ]
 
 
 def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
@@ -694,25 +996,43 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
             else ()
         ),
     )
-    validation_executions = execute_tuning_tasks(
+    def validation_snapshot(
+        executions: list[tuple[TuningExperimentTask, ExperimentResult]],
+        fingerprint: str,
+        status: str,
+    ) -> None:
+        rows = _validation_rows(executions)
+        if rows:
+            _write_csv(output_dir / "validation_results.csv", rows)
+        _write_tuning_progress(
+            output_dir,
+            phase="validation",
+            fingerprint=fingerprint,
+            completed=len(executions),
+            total=len(validation_tasks),
+            status=status,
+        )
+
+    validation_executions, validation_fingerprint = execute_resumable_tuning_phase(
         validation_dataset,
         validation_tasks,
+        args,
+        output_dir=output_dir,
         jobs=validation_jobs,
         backend_description=backend_description,
         progress_enabled=not args.no_progress,
         progress_mode=args.progress_mode,
+        fingerprint_context={
+            "validation_fraction": spec.validation_fraction,
+            "split_seed": spec.split_seed,
+        },
+        on_snapshot=validation_snapshot,
     )
     validation_executions.sort(key=lambda item: _tuning_task_sort_key(item[0]))
     results_by_candidate: dict[str, list[ExperimentResult]] = {}
-    validation_rows: list[dict[str, Any]] = []
+    validation_rows = _validation_rows(validation_executions)
     for task, result in validation_executions:
         results_by_candidate.setdefault(task.candidate_id, []).append(result)
-        validation_rows.append(
-            {
-                "candidate_id": task.candidate_id,
-                **result.summary_dict(),
-            }
-        )
 
     trial_scores: list[TrialScore] = []
     for method in ALL_METHODS:
@@ -725,6 +1045,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
                 results_by_candidate.get(candidate_id, []),
                 objective=spec.objective,
                 require_finite_updates=spec.require_finite_updates,
+                require_clean_acceptance=spec.require_clean_acceptance,
             )
             trial_scores.append(trial)
             print(
@@ -748,6 +1069,8 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         "objective": spec.objective,
         "trials_per_tunable_method": spec.trials_per_tunable_method,
         "require_finite_updates": spec.require_finite_updates,
+        "require_clean_acceptance": spec.require_clean_acceptance,
+        "validation_fingerprint": validation_fingerprint,
         "shared_parameters": spec.shared_parameters,
         "selected": {
             method: {
@@ -792,19 +1115,41 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
                 else ()
             ),
         )
-        final_executions = execute_tuning_tasks(
+        final_dir = output_dir / "final_evaluation"
+        final_dir.mkdir(parents=True, exist_ok=True)
+
+        def final_snapshot(
+            executions: list[tuple[TuningExperimentTask, ExperimentResult]],
+            fingerprint: str,
+            status: str,
+        ) -> None:
+            results = [result for _task, result in executions]
+            if results:
+                write_result_files(final_dir, results)
+            _write_tuning_progress(
+                output_dir,
+                phase="final",
+                fingerprint=fingerprint,
+                completed=len(executions),
+                total=len(final_tasks),
+                status=status,
+            )
+
+        final_executions, final_fingerprint = execute_resumable_tuning_phase(
             dataset,
             final_tasks,
+            args,
+            output_dir=output_dir,
             jobs=final_jobs,
             backend_description=final_backend_description,
             progress_enabled=not args.no_progress,
             progress_mode=args.progress_mode,
+            fingerprint_context={"selected_validation_fingerprint": validation_fingerprint},
+            on_snapshot=final_snapshot,
         )
         final_executions.sort(key=lambda item: _tuning_task_sort_key(item[0]))
         final_results = [result for _task, result in final_executions]
-        final_dir = output_dir / "final_evaluation"
-        final_dir.mkdir(parents=True, exist_ok=True)
-        write_result_files(final_dir, final_results)
+        best_payload["final_fingerprint"] = final_fingerprint
         _write_final_aggregate(final_dir / "aggregate.csv", final_results)
         if not args.no_visualizations:
             # Generate one dashboard per seed.  Combining repeated seeds in the
@@ -988,6 +1333,7 @@ __all__ = [
     "TuningExperimentTask",
     "build_final_tasks",
     "build_validation_tasks",
+    "execute_resumable_tuning_phase",
     "execute_tuning_tasks",
     "load_fair_tuning_config",
     "make_validation_dataset",

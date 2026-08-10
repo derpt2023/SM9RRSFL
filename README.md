@@ -174,8 +174,9 @@ python -m sm9rrsfl.config_runner \
 3. Ours、VERT 和 FedREDefense 等确有暴露超参数的方法必须具有完全相同的网格候选数 `trials_per_tunable_method`。FedAvg、Krum 和当前 TAD 实现没有额外的可调防御参数，因此各自只有一个空候选，但仍完整参加验证和最终主实验。
 4. 所有候选使用同一组 `validation_seeds` 和场景，最终主实验使用与之不重叠的 `final_seeds`。配置强制 `early_stop=false` 和 `eval_interval=1`，避免某个候选少跑轮次，并完整审计非有限更新。
 5. 默认 `require_finite_updates=true`：只要候选产生任何 NaN/Inf 更新，该候选即无效，不能因恶意更新被自动丢弃而获得虚假的高分。如果某方法全部候选无效，搜索会直接失败并要求先修正共享训练/攻击配置。
-6. 选参前预先声明统一目标：干净准确率、攻击场景准确率、目标攻击成功率和误撤销率的固定权重。最终论文表格使用独立 `final_seeds` 的均值/标准差，不从最终测试集反向选择候选。
-7. 参数选择阶段把“候选 × 验证种子 × 场景”展开为独立配置，复用主实验的资源规划：CUDA/MPS 使用线程队列和设备端 Torch 训练，多个 CUDA 设备自动轮转；NumPy/Torch CPU 使用多进程。进度条按实际配置数显示完成比例、已用时间和 ETA。最终论文计时阶段固定 `jobs=1` 且不跨 GPU 轮转，避免并发竞争或不同 GPU 性能污染时间公平性；单个配置仍可使用 CUDA/MPS 加速。
+6. 默认 `require_clean_acceptance=true`：每个候选必须在每个 `0%` 恶意验证场景中至少有一次实际聚合。像 FedREDefense 第一轮拒绝并永久屏蔽全部正常客户端的候选会直接判为无效，不能再从一组全部崩溃的参数中强行选出“最优值”。
+7. 选参前预先声明统一目标：干净准确率、攻击场景准确率、目标攻击成功率和误撤销率的固定权重。最终论文表格使用独立 `final_seeds` 的均值/标准差，不从最终测试集反向选择候选。
+8. 参数选择阶段把“候选 × 验证种子 × 场景”展开为独立配置，复用主实验的资源规划：CUDA/MPS 使用线程队列和设备端 Torch 训练，多个 CUDA 设备自动轮转；NumPy/Torch CPU 使用多进程。进度条按实际配置数显示完成比例、已用时间和 ETA。最终论文计时阶段固定 `jobs=1` 且不跨 GPU 轮转，避免并发竞争或不同 GPU 性能污染时间公平性；单个配置仍可使用 CUDA/MPS 加速。
 
 示例配置为 `configs/fair_tuning.example.json`。先做只校验不训练的检查：
 
@@ -206,6 +207,7 @@ python -m sm9rrsfl.fair_tuning \
   "compute_backend": "auto",
   "device": "auto",
   "jobs": "auto",
+  "resume": true,
   "progress": true,
   "progress_mode": "live"
 }
@@ -214,6 +216,7 @@ python -m sm9rrsfl.fair_tuning \
 - `compute_backend=auto, device=auto`：优先使用 CUDA，其次使用 Apple MPS，否则回落到 NumPy；也可显式指定 `compute_backend=torch, device=cuda|mps`。
 - `jobs=auto`：根据 CPU 配额、主存、CUDA 空闲显存、数据集和更新规模决定验证配置并发数；可填写正整数限制并发。
 - `progress=true`：启用两段进度条，先显示验证搜索，选参完成后显示独立最终评估。`progress_mode=live` 适合 PyCharm/IDE 控制台，`auto` 只在 TTY 原地刷新，`log` 输出离散状态行。
+- `resume=true`：默认启用调参专用断点恢复。每轮保存当前配置状态，每完成一个配置就先原子更新阶段快照，再更新公开 CSV，最后删除该配置的终态检查点。重启完全相同的调参配置时，会跳过已经提交的候选场景，并从未完成配置的上一轮继续。
 - Ours 的 `sm9_workers=auto` 会按外层并发数重新分配 CPU 槽，避免网格并发与签名/验签线程相互过度订阅。
 
 搜索阶段的并发墙钟时间不进入选参目标，也不应作为论文方法耗时；论文时间统一来自串行的 `final_evaluation/`。
@@ -225,14 +228,19 @@ python -m sm9rrsfl.fair_tuning \
 - FedREDefense：`fedre_threshold`、各重构迭代数/步数/图像数及 `fedre_*_lr`。
 - Krum、TAD、FedAvg：当前没有项目级可调防御参数，搜索空间必须写成 `{}`。
 
+示例中的 MNIST FedREDefense 网格不再使用 `teacher_lr=0.1/0.2`。历史 `outputs/` 结果表明，共享客户端 `lr=0.05` 时，`teacher_lr=5.0` 能恢复训练但仍会误屏蔽约 `19%–51%` 的正常客户端；而旧的低尺度候选会开局拒绝全部客户端。因此默认网格以历史可工作点为中心，搜索 `fedre_teacher_lr=[5.0, 6.0]` 与 `fedre_threshold=[0.6, 0.7]`，其中保留官方阈值 `0.6`，并让统一验证目标决定是否需要较温和的 `0.7`。这组数值只适用于该 MNIST、`lr=0.05` 配置；CIFAR-10 必须使用自己的搜索文件，不能直接搬用。
+
 调参目录会输出：
 
-- `tuning_trials.csv`：每个候选的统一验证分数、四项指标、有效性与非有限更新数。
+- `tuning_trials.csv`：每个候选的统一验证分数、四项选参指标、干净场景接受率、有效性与非有限更新数。
 - `validation_results.csv`：所有候选、种子和场景的原始验证摘要。
+- `tuning_progress.json`：可随时读取的阶段进度，分别记录验证/最终复验的指纹、`completed/total/pending` 和状态；不再需要等整个验证阶段结束才知道 `x/总数`。
 - `best_parameters.json` 与 `tuning_manifest.json`：共享协议、数据隔离声明、候选预算和各方法入选参数。
 - `final_evaluation/summary.csv`、`rounds.csv`：独立最终种子的完整主实验结果；逐轮文件带 `seed`，不会把不同重复实验混在一起。
 - `final_evaluation/aggregate.csv`：论文表格应使用的多种子均值/标准差，同时给出端到端时间、扣除密码协议后的时间和密码协议墙钟时间。
 - `final_evaluation/seed_<seed>/visualizations.html`：每个最终种子的独立图表。多种子统计以 `aggregate.csv` 为准，避免同名曲线覆盖。
+
+恢复所需的权威状态保存在 `.tuning_state/<phase>/<fingerprint>/`。其中 `.checkpoints/` 保存正在运行配置的逐轮状态，`.completed_results.pickle` 保存已经完成配置的事务式快照；公开的 `validation_results.csv` 和 `final_evaluation/` 都可由该快照重建。修改候选、种子、共享参数、数据规模或有效设备分配后指纹会变化，旧状态不会被错误复用。显式设置 `"resume": false` 可以从零运行，但原状态仍保留，避免不可逆删除。
 
 这一功能不替代攻击有效性预检查：应先确认无防御 FedAvg 在攻击场景中能稳定产生有限更新并达到预期 ASR，再启动防御参数搜索。
 
@@ -620,7 +628,7 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 
 - `--vert-history-window 10`：VERT 使用的历史投影更新轮数 $H$，默认采用论文设置 `10`。前两轮只建立历史并执行 FedAvg，从第 3 轮开始训练预测器和筛选更新。
 - `--vert-projection-dim 128`：MNIST 低维投影输出长度，默认采用论文设置 `128`。MNIST 使用固定随机全连接投影器；若模型对应的稠密投影矩阵超过 `256 MiB`，实现会切换到固定稀疏符号哈希投影，以避免 CIFAR 大模型出现不可执行的内存占用，该工程适配必须在论文复现说明中披露。
-- `--vert-predict-epochs 5` / `--vert-predict-lr 0.01`：VERT 每个全局轮次重新初始化共享三层预测器和两个逐元素集成系数，再按客户端历史依次执行 Adam 训练；轮数和学习率默认采用论文设置。固定线性投影的输出和预测器最后一层均不施加 Softmax，预测器只在前两层线性层后使用 ReLU。
+- `--vert-predict-epochs 5` / `--vert-predict-lr 0.01`：VERT 每个全局轮次重新初始化共享三层预测器和两个逐元素集成系数，再按客户端历史依次执行 Adam 训练。训练轮数 `5` 与论文一致；程序当前的预测器学习率默认值 `0.01` 跟随 VERT 官方仓库当前 `conf.json`，但论文第 6.1 节报告的预测器 Adam 学习率是 `0.001`，两者并不一致。严格按论文参数复现时应显式传入 `--vert-predict-lr 0.001`。该参数只控制 VERT 服务器端预测器，不是客户端本地训练的 `--lr`；公平主实验可固定所有方法共享的客户端 `--lr 0.05`，同时为 VERT 使用 `--vert-predict-lr 0.001` 或仅在训练集验证划分上公平调节该内部参数。固定线性投影的输出和预测器最后一层均不施加 Softmax，预测器只在前两层线性层后使用 ReLU。
 - `--vert-top-k 0`：VERT 每轮进入聚合的客户端选择策略。正整数表示与恶意比例无关的显式 $k$；默认 `0` 对当轮预测余弦相似度执行论文第 VI-C3 节的 K-means（$K=2$），保留中心值较高的簇。相似度完全相同等无法形成两个有效簇时保留全部客户端。该规则不读取真实恶意节点比例。
 - `--vert-use-ratio-prior`：显式启用项目旧版的 VERT 恶意比例先验自动接口。每个配置会自动使用自己的恶意比例 $r$ 和当轮活跃客户端数 $n$；$r=0$ 时保留全部客户端，否则取 $k=\max(1,\lceil(1-r)n\rceil-1)$。该开关可直接配合多个 `--ratios` 和 `--client-counts`，无需逐项手算 $k$；不能与正整数 `--vert-top-k` 同时使用。论文主实验使用的是若干显式 $k$ 值，并非这个自动公式；若要逐项精确复现论文表格，应使用正整数 `--vert-top-k`。三种选择模式共用完全相同的投影、历史替换、预测器训练、余弦评分和等权 FedAvg 代码，只在获得相似度分数后分叉。
 - `--fedre-threshold 0.6`：FedREDefense 的归一化更新重构误差阈值，默认采用官方实现的 `0.6`；超过阈值的客户端被过滤，并按官方 `clients_flags` 语义在后续轮次保持不可用。
@@ -635,12 +643,12 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 - `--dkg-nodes 3`：D-KGC 节点总数，默认 `3`；门限至少为 $1$，且不得大于节点总数。
 - `--compute-backend numpy|auto|torch`：CNN 本地训练/评估后端，默认 `auto`；有 CUDA/MPS 时自动使用 PyTorch GPU，否则回落到 NumPy，`numpy` 和 `torch` 可强制指定实现。
 - `--device auto|cpu|cuda|mps`：PyTorch 设备，默认 `auto`；Mac Apple Silicon 可用 `mps`，Windows/Linux NVIDIA 可用 `cuda`，`auto` 优先 CUDA、其次 MPS。
-- `--jobs 1|auto|N`：外层实验配置并发数，默认 `auto`。CPU/NumPy 使用多进程，CUDA/MPS 使用同进程线程队列。自动值会综合进程可用 CPU、主存、CUDA 空闲显存和待运行配置数；`device=auto` 且有多张 CUDA 卡时会让配置轮转使用它们。该参数只改变实验网格的调度和总墙钟时间，不改变单个配置的实验变量；显存或统一内存不足时应降低并发数。
+- `--jobs 1|auto|N`：外层实验配置并发数，默认 `auto`。CPU/NumPy 使用多进程，CUDA/MPS 使用同进程线程队列。自动值会综合进程可用 CPU、主存、每张 CUDA 卡的实时空闲显存和待运行配置数；`device=auto` 时仅在满足单实验显存估计及 `25%` 安全余量的 CUDA 卡之间轮转，并默认每张可用卡最多放置一个并发配置。其他进程已经占满的可见 GPU 不再被错误计为一个可用槽。`resource_plan` 会同时打印 `visible_cuda_devices`、`usable_cuda_devices`、各卡 `cuda_free_mb` 和单配置显存估计。该参数只改变实验网格的调度和总墙钟时间，不改变单个配置的实验变量；手动指定过大的并发数仍可能导致显存不足。
 - `--sm9-workers 1|auto|N`：单个 SM9RRS 配置每轮内部的摘要、构包、签名和验签线程数，默认 `auto`；自动值不超过 `8`、每个并发配置分得的 CPU 槽和最大客户端数。SVD 检测器状态仍按客户端稳定顺序更新，不改变检测、降权或撤销规则。
 
 #### 断点、进度与可视化
 
-- `--no-resume`：忽略输出目录中的已完成配置和逐轮检查点，从零开始本次实验；默认会安全断点续跑。
+- `--no-resume`：忽略输出目录中的已完成配置和逐轮检查点，从零开始本次实验；默认会安全断点续跑。长时间 AI Station 实验不建议设置该选项，应在 JSON 中使用 `"resume": true`。自动调度因某张 GPU 被其他进程占用而改用另一 CUDA 编号时，程序会把它视为等价的运行时放置，继续复用已完成配置，而不会仅因 `cuda:2` 改为 `cuda:3` 就重跑整个网格。
 - `--no-progress`：关闭终端进度条和 ETA 输出；训练、结果文件和可视化生成不受影响。
 - `--progress-mode auto|live|log`：`auto` 仅在 TTY 中实时覆写；`live` 强制实时覆写，适合 PyCharm 等本地 IDE 控制台；`log` 不创建刷新线程，只保留关键状态行。
 - `--no-visualizations`：只输出 CSV/JSON，不生成 HTML/SVG 图表。
@@ -717,6 +725,8 @@ VERT 文献与官方实现：
 
 Wang J, Wang R, Zhang F. How to Defend Against Large-Scale Model Poisoning Attacks in Federated Learning: A Vertical Solution. IEEE Transactions on Dependable and Secure Computing, 2026. 论文与代码：[arXiv](https://arxiv.org/abs/2411.10673)、[VERT](https://github.com/mylab426/VERT)。
 
+VERT 的公开参数存在需要披露的论文/仓库差异：论文第 6.1 节将客户端本地 SGD 学习率和服务器端预测器 Adam 学习率都写为 `0.001`；官方仓库当前 `conf.json` 则只有一个 `lr=0.01`，并在 `client.py` 与 `defenses.py` 中同时用于客户端 SGD 和预测器 Adam。本项目将两者拆分为客户端 `lr` 和 VERT 专属 `vert_predict_lr`，避免为了复现预测器参数而迫使所有对比方法采用较小的客户端学习率。主实验若使用共享 `lr=0.05`，应将其描述为统一训练协议下的公平比较，而不是 VERT 官方训练参数的逐项复现；严格官方复现结果应单独报告并注明选择的是论文参数还是仓库参数。
+
 本项目的 VERT 位于 `sm9rrsfl/vert.py`，保留两轮历史建立、冻结的随机线性投影、每个全局轮次重新初始化并按客户端顺序训练的共享三层预测器与集成系数、原始线性投影特征、余弦相似度排序、被排除更新以全局更新替换历史，以及入选更新等权 FedAvg 的语义。默认的无先验模式仅把论文已知 $k$ 的 Top-k 选择替换为论文提出的 `K=2` K-means 高相似度簇选择；显式 `--vert-use-ratio-prior` 和正整数 `--vert-top-k` 与它共用同一评分核心。MNIST 参数向量规模允许直接使用固定随机全连接投影；只有预计稠密投影器超过 `256 MiB` 时才使用稀疏符号哈希投影，该路径是面向大模型内存约束的工程适配。所有被 VERT 排除的客户端仅在当前轮不聚合，其更新历史由本轮全局更新替换，不会像 FedREDefense 一样永久进入黑名单。
 
 当 `--compute-backend torch --device cuda`（或可用的 `auto`）启用时，VERT 的固定投影、三层预测器、集成系数训练和余弦评分会使用 Torch 设备张量；历史记录和检查点仍为可移植的 NumPy 数据。无 CUDA/MPS、未安装 Torch 或显式 `--compute-backend numpy` 时，自动保持原有 NumPy 实现，因此 Mac CPU 环境可正常运行。SM9 签名验签仍为 CPU 原生密码学计算。
@@ -728,6 +738,12 @@ Xie Y, Fang M, Gong N Z. FedREDefense: Defending against Model Poisoning Attacks
 本项目的 FedREDefense 位于 `sm9rrsfl/fedredefense.py`，按照官方 `image_synthesizer.py` 为每个客户端持续维护合成图像、软标签和可训练合成步长，从当前全局参数出发执行可微 SGD，使用“重构参数平方误差 / 实际客户端更新平方范数”作为归一化重构误差，并采用阈值 `0.6`。通过筛选的客户端执行官方等客户端 FedAvg；超过阈值的客户端在后续轮次保持屏蔽。
 
 官方仓库公开的是 Fashion-MNIST、CIFAR-10 和 CINIC-10 脚本，没有单独的 MNIST 参数文件。本项目在 MNIST 上沿用 Fashion-MNIST 的同形状配置，因此论文应写成“基于官方代码迁移到 MNIST”，而不是声称运行了作者发布的 MNIST 脚本。FedREDefense 论文的核心可分性针对“真实本地训练更新与手工构造模型投毒更新”；当前交替最小化攻击本身也通过训练过程生成，所以它可能得到较低重构误差。这属于威胁模型匹配结果，不应通过读取恶意客户端真值或修改阈值来人为强化。
+
+官方 CIFAR-10 脚本的完整协议为：`100` 个客户端、每轮 `10%` 参与、`300` 轮、`local_epochs=1`、`batch_size=32`、客户端 SGD `lr=0.001`、Dirichlet `alpha=0.1`，并使用 Scaling 攻击；FedREDefense 内部参数为 `threshold=0.6`、`synthetic_steps=5`、`images_per_class=1`、`image_lr=0.1`、`label_lr=0.05`、`teacher_lr=0.05`、`teacher_lr_lr=5e-5`、`initial_iterations=500` 和 `max_iterations=1500`。只复制最后一组重构参数，却把共享客户端学习率改为 `0.05`、让全部客户端每轮参与、改用交替最小化攻击或改变数据异质性，属于统一主实验下的 FedREDefense 参数迁移，不应标为官方 CIFAR-10 逐项复现。
+
+在统一共享 `lr=0.05` 的公平主实验中，只能依据训练集验证划分调节 FedREDefense 专属参数，并必须同时检查：干净场景连续多轮的正常客户端接受率、攻击场景的误接收率、NaN/Inf 以及实际重构迭代耗时。首轮接受并不代表参数可用，因为官方 `clients_flags` 会将后续任一轮被拒绝的客户端永久屏蔽；若放宽阈值后恶意更新的重构误差反而低于正常更新，则不存在能解决该候选的静态阈值，应如实报告威胁模型不匹配，不能按客户端真值选阈值。
+
+本项目的 CIFAR-10 统一主实验明确不再纳入 FedREDefense。其原因不是预先认定该算法在所有 CIFAR-10 场景中无效，而是实测表明：在本项目固定的共享客户端 `lr=0.05`、全客户端参与、IID/Dirichlet 划分和交替最小化攻击协议下，官方 CIFAR-10 重构参数会拒绝正常客户端；围绕合成学习率、重构迭代数和阈值进行参数迁移后，仍出现正常/恶意重构误差重叠或顺序反转，以及正常客户端在后续干净轮次被永久屏蔽的问题。放宽阈值只能掩盖首轮拒绝，不能同时保证连续正常接受和恶意拒绝。因此 CIFAR-10 结果应表述为“FedREDefense 在本项目统一实验协议下失效/不适用”，并将其排除原因、官方协议差异和校准失败证据单独报告；MNIST 或 FedREDefense 官方协议下的既有结果不由该结论否定。
 
 ## TAD（文献 [13]）复现说明
 

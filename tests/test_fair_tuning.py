@@ -11,6 +11,7 @@ from sm9rrsfl.fair_tuning import (
     FairTuningError,
     TuningExperimentTask,
     build_validation_tasks,
+    execute_resumable_tuning_phase,
     execute_tuning_tasks,
     load_fair_tuning_config,
     make_validation_dataset,
@@ -37,6 +38,14 @@ class FairTuningTest(unittest.TestCase):
         self.assertEqual(len(spec.candidates["fedredefense"]), 4)
         self.assertEqual(len(spec.candidates["fedavg"]), 1)
         self.assertTrue(set(spec.validation_seeds).isdisjoint(spec.final_seeds))
+        self.assertTrue(spec.require_clean_acceptance)
+        self.assertEqual(
+            {
+                candidate["fedre_teacher_lr"]
+                for candidate in spec.candidates["fedredefense"]
+            },
+            {5.0, 6.0},
+        )
 
     def test_validation_tasks_expand_every_candidate_seed_and_scenario(self):
         spec = load_fair_tuning_config(
@@ -104,7 +113,7 @@ class FairTuningTest(unittest.TestCase):
                 return_value=1,
             ),
             mock.patch(
-                "sm9rrsfl.experiments.available_cuda_devices",
+                "sm9rrsfl.fair_tuning.cuda_devices_with_capacity",
                 return_value=("cuda:0", "cuda:1"),
             ),
         ):
@@ -136,7 +145,7 @@ class FairTuningTest(unittest.TestCase):
         with (
             mock.patch(
                 "sm9rrsfl.fair_tuning.run_measured_experiment",
-                side_effect=lambda _dataset, config: _result(
+                side_effect=lambda _dataset, config, **_kwargs: _result(
                     config.malicious_ratio,
                     0.5,
                     0,
@@ -172,7 +181,7 @@ class FairTuningTest(unittest.TestCase):
         with (
             mock.patch(
                 "sm9rrsfl.fair_tuning.run_measured_experiment",
-                side_effect=lambda _dataset, config: _result(
+                side_effect=lambda _dataset, config, **_kwargs: _result(
                     config.malicious_ratio,
                     0.5,
                     0,
@@ -193,6 +202,76 @@ class FairTuningTest(unittest.TestCase):
         self.assertEqual(len(completed), 2)
         self.assertEqual(run.call_count, 2)
         self.assertIn("executor=thread", output.getvalue())
+
+    def test_resumable_phase_skips_atomically_committed_tasks(self):
+        dataset = make_synthetic_mnist_like(train_samples=40, test_samples=10, seed=8)
+        args = parse_args(["--methods", *ALL_METHODS, "--no-early-stop"])
+        tasks = [
+            TuningExperimentTask(
+                phase="validation",
+                candidate_id=f"fedavg-{index:03d}",
+                method="fedavg",
+                config=ExperimentConfig(
+                    method="fedavg",
+                    num_clients=10,
+                    rounds=1,
+                    early_stop=False,
+                    seed=index,
+                ),
+            )
+            for index in (1, 2)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            snapshots = []
+            with mock.patch(
+                "sm9rrsfl.fair_tuning.run_measured_experiment",
+                side_effect=lambda _dataset, config, **_kwargs: _result(
+                    config.malicious_ratio,
+                    0.5,
+                    0,
+                    config.method,
+                    config=config,
+                ),
+            ) as first_run:
+                completed, fingerprint = execute_resumable_tuning_phase(
+                    dataset,
+                    tasks,
+                    args,
+                    output_dir=output_dir,
+                    jobs=1,
+                    backend_description="numpy",
+                    progress_enabled=False,
+                    progress_mode="log",
+                    on_snapshot=lambda executions, _fingerprint, status: snapshots.append(
+                        (len(executions), status)
+                    ),
+                )
+            self.assertEqual(first_run.call_count, 2)
+            self.assertEqual(len(completed), 2)
+            self.assertTrue(fingerprint)
+            self.assertEqual(
+                snapshots,
+                [(0, "running"), (1, "running"), (2, "running"), (2, "complete")],
+            )
+
+            with mock.patch(
+                "sm9rrsfl.fair_tuning.run_measured_experiment",
+                side_effect=AssertionError("completed tuning tasks must be skipped"),
+            ) as resumed_run:
+                resumed, resumed_fingerprint = execute_resumable_tuning_phase(
+                    dataset,
+                    tasks,
+                    args,
+                    output_dir=output_dir,
+                    jobs=1,
+                    backend_description="numpy",
+                    progress_enabled=False,
+                    progress_mode="log",
+                )
+            self.assertEqual(resumed_run.call_count, 0)
+            self.assertEqual(len(resumed), 2)
+            self.assertEqual(resumed_fingerprint, fingerprint)
 
     def test_shared_training_parameter_cannot_be_tuned_per_method(self):
         payload = json.loads(
@@ -275,16 +354,50 @@ class FairTuningTest(unittest.TestCase):
         self.assertFalse(bad.valid)
         self.assertEqual(selected["fedavg"].candidate_id, "good")
 
+    def test_candidate_rejecting_every_clean_client_is_invalid(self):
+        trial = score_trial(
+            "fedredefense",
+            "collapsed",
+            {"fedre_teacher_lr": 0.1},
+            [
+                _result(0.0, 0.1, 0, "fedredefense", accepted_updates=0),
+                _result(0.4, 0.1, 0, "fedredefense", accepted_updates=0),
+            ],
+            objective={
+                "clean_accuracy_weight": 0.25,
+                "robust_accuracy_weight": 0.5,
+                "attack_success_weight": 0.2,
+                "false_positive_weight": 0.05,
+            },
+            require_finite_updates=True,
+            require_clean_acceptance=True,
+        )
 
-def _result(ratio, accuracy, nonfinite, method="fedavg"):
-    config = ExperimentConfig(method=method, malicious_ratio=ratio, num_clients=10)
+        self.assertFalse(trial.valid)
+        self.assertEqual(trial.clean_acceptance_rate, 0.0)
+
+
+def _result(
+    ratio,
+    accuracy,
+    nonfinite,
+    method="fedavg",
+    *,
+    accepted_updates=10,
+    config=None,
+):
+    config = config or ExperimentConfig(
+        method=method,
+        malicious_ratio=ratio,
+        num_clients=10,
+    )
     record = RoundRecord(
         method,
         ratio,
         1,
         accuracy,
         1.0 - accuracy,
-        10,
+        accepted_updates,
         nonfinite,
         0,
         0,

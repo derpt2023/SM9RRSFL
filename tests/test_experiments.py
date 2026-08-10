@@ -11,10 +11,13 @@ from unittest import mock
 
 from sm9rrsfl.experiments import (
     ProgressReporter,
+    _cuda_memory_parallel_limit,
     _format_duration,
+    _manifests_differ_only_by_indexed_cuda_device,
     assign_auto_cuda_devices,
     build_experiment_configs,
     confirm_matching_checkpoints,
+    cuda_devices_with_capacity,
     default_output_dir,
     finalize_config_checkpoint,
     load_archived_results,
@@ -490,14 +493,20 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
         self.assertEqual(resolve_parallel_jobs(args.jobs, object(), [object(), object()], args), 2)
 
-    def test_auto_jobs_uses_two_thread_workers_for_single_gpu(self):
+    def test_auto_jobs_uses_thread_workers_for_two_usable_gpus(self):
         args = parse_args(["--jobs", "auto"])
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=2)
         configs = [ExperimentConfig(), ExperimentConfig(method="fedavg")]
 
-        with mock.patch(
-            "sm9rrsfl.experiments.describe_compute_backend",
-            return_value="torch:cuda",
+        with (
+            mock.patch(
+                "sm9rrsfl.experiments.describe_compute_backend",
+                return_value="torch:cuda",
+            ),
+            mock.patch(
+                "sm9rrsfl.experiments._cuda_memory_parallel_limit",
+                return_value=2,
+            ),
         ):
             jobs = resolve_parallel_jobs("auto", dataset, configs, args)
 
@@ -541,6 +550,53 @@ class ExperimentOutputDirTest(unittest.TestCase):
             ["cuda:0", "cuda:1", "cuda:0", "cuda:1", "cuda:0"],
         )
         self.assertTrue(all(config.device == "auto" for config in configs))
+
+    def test_cuda_capacity_excludes_nearly_full_visible_device(self):
+        memory_info = (
+            ("cuda:0", 20_000.0, 24_000.0),
+            ("cuda:1", 3_000.0, 24_000.0),
+            ("cuda:2", 18_000.0, 24_000.0),
+        )
+        with (
+            mock.patch(
+                "sm9rrsfl.experiments.available_cuda_devices",
+                return_value=("cuda:0", "cuda:1", "cuda:2"),
+            ),
+            mock.patch(
+                "sm9rrsfl.experiments.cuda_device_memory_info",
+                return_value=memory_info,
+            ),
+        ):
+            usable = cuda_devices_with_capacity(3_000.0)
+            limit = _cuda_memory_parallel_limit(3_000.0)
+
+        self.assertEqual(usable, ("cuda:0", "cuda:2"))
+        self.assertEqual(limit, 2)
+
+    def test_manifest_resume_ignores_only_indexed_cuda_assignment(self):
+        previous = {
+            "schema_version": 10,
+            "dataset": {"name": "cifar10"},
+            "configs": [{"method": "fedavg", "lr": 0.05, "device": "cuda:2"}],
+            "fingerprint": "old",
+        }
+        moved = {
+            "schema_version": 10,
+            "dataset": {"name": "cifar10"},
+            "configs": [{"method": "fedavg", "lr": 0.05, "device": "cuda:3"}],
+            "fingerprint": "new",
+        }
+        changed_lr = {
+            **moved,
+            "configs": [{"method": "fedavg", "lr": 0.01, "device": "cuda:3"}],
+        }
+
+        self.assertTrue(
+            _manifests_differ_only_by_indexed_cuda_device(previous, moved)
+        )
+        self.assertFalse(
+            _manifests_differ_only_by_indexed_cuda_device(previous, changed_lr)
+        )
 
     def test_internal_indexed_cuda_device_is_accepted(self):
         from sm9rrsfl.torch_backend import _normalize_device

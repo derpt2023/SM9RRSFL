@@ -37,6 +37,7 @@
     "crypto_mode": "sm9",
     "early_stop": false,
     "eval_interval": 1,
+    "resume": true,
     "visualizations": true,
     "progress": true,
     "progress_mode": "live",
@@ -50,6 +51,7 @@
     "final_seeds": [141, 142, 143],
     "trials_per_tunable_method": 4,
     "require_finite_updates": true,
+    "require_clean_acceptance": true,
     "run_final_evaluation": true,
     "objective": {
       "clean_accuracy_weight": 0.25,
@@ -67,8 +69,8 @@
         "vert_predict_epochs": [3, 5]
       },
       "fedredefense": {
-        "fedre_threshold": [0.4, 0.6],
-        "fedre_teacher_lr": [0.1, 0.2]
+        "fedre_threshold": [0.6, 0.7],
+        "fedre_teacher_lr": [5.0, 6.0]
       },
       "krum": {},
       "ding13": {},

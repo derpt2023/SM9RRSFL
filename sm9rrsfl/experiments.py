@@ -44,6 +44,7 @@ _WORKER_CHECKPOINT_DIR = None
 _WORKER_RUN_FINGERPRINT = None
 CHECKPOINT_SCHEMA_VERSION = 10
 COMPLETED_RESULTS_SNAPSHOT = ".completed_results.pickle"
+CUDA_MEMORY_SAFETY_FRACTION = 0.75
 DATASET_TRAINING_PRESETS = {
     "mnist": {
         "rounds": 30,
@@ -109,6 +110,19 @@ def main(argv: list[str] | None = None) -> None:
     started = perf_counter()
 
     configs = build_experiment_configs(args)
+    cuda_worker_mb = _estimated_parallel_worker_memory_mb(dataset, configs)
+    usable_cuda_devices = (
+        cuda_devices_with_capacity(cuda_worker_mb)
+        if backend_description == "torch:cuda"
+        and args.device.strip().lower() == "auto"
+        else available_cuda_devices()
+    )
+    if (
+        backend_description == "torch:cuda"
+        and args.device.strip().lower() == "auto"
+        and not usable_cuda_devices
+    ):
+        raise RuntimeError(_cuda_capacity_error(cuda_worker_mb))
     planned_jobs = resolve_parallel_jobs(args.jobs, dataset, configs, args)
     if args._sm9_workers_auto:
         effective_sm9_workers = resolve_sm9_workers(
@@ -118,7 +132,12 @@ def main(argv: list[str] | None = None) -> None:
         )
         args.sm9_workers = effective_sm9_workers
         configs = [replace(config, sm9_workers=effective_sm9_workers) for config in configs]
-    configs = assign_auto_cuda_devices(configs, backend_description, args.device)
+    configs = assign_auto_cuda_devices(
+        configs,
+        backend_description,
+        args.device,
+        cuda_devices=usable_cuda_devices,
+    )
     skipped_configs = [
         (config, reason)
         for config in configs
@@ -129,14 +148,29 @@ def main(argv: list[str] | None = None) -> None:
     ]
     manifest = build_run_manifest(args, dataset, configs)
     previous_manifest = read_run_manifest(output_dir)
-    current_manifest_matches = bool(
+    exact_manifest_match = bool(
         args.resume
         and previous_manifest is not None
         and previous_manifest.get("fingerprint") == manifest["fingerprint"]
     )
+    runtime_assignment_match = bool(
+        args.resume
+        and previous_manifest is not None
+        and _manifests_differ_only_by_indexed_cuda_device(
+            previous_manifest,
+            manifest,
+        )
+    )
+    current_manifest_matches = exact_manifest_match or runtime_assignment_match
     results: list[ExperimentResult] = []
     archived_resume_dir = None
     if current_manifest_matches:
+        if runtime_assignment_match and not exact_manifest_match:
+            print(
+                "resume_cuda_assignment_changed=true; "
+                "reusing completed results across equivalent CUDA device indices",
+                flush=True,
+            )
         results = load_completed_results_snapshot(output_dir) or []
         if not results:
             try:
@@ -165,9 +199,11 @@ def main(argv: list[str] | None = None) -> None:
     if archived_resume_dir is not None and results:
         # 复制生成新的权威快照和 CSV；原归档目录继续保留作为只读备份。
         write_result_files(output_dir, results)
-    completed_configs = {result.config for result in results}
+    completed_configs = {_resume_config_key(result.config) for result in results}
     pending_configs = [
-        config for config in runnable_configs if config not in completed_configs
+        config
+        for config in runnable_configs
+        if _resume_config_key(config) not in completed_configs
     ]
     if results:
         print(f"resumed_completed_configs={len(results)}", flush=True)
@@ -204,7 +240,11 @@ def main(argv: list[str] | None = None) -> None:
     print(f"experiment_executor={executor_kind}", flush=True)
     progress = ProgressReporter(
         total=len(runnable_configs),
-        completed=sum(result.config in runnable_configs for result in results),
+        completed=sum(
+            _resume_config_key(result.config)
+            in {_resume_config_key(config) for config in runnable_configs}
+            for result in results
+        ),
         enabled=not args.no_progress,
         # The configuration launcher preserves stdout from the user's terminal.
         # Use that same stream as direct CLI invocation, so both entry points
@@ -939,11 +979,7 @@ def resolve_parallel_jobs(
 
 def _auto_parallel_jobs(dataset, configs: list[ExperimentConfig], args: argparse.Namespace) -> int:
     total_mb = _physical_memory_mb()
-    max_clients = max(config.num_clients for config in configs)
-    max_params = max(_parameter_size_for_dataset(dataset) for _ in configs)
-    dataset_mb = _dataset_memory_mb(dataset)
-    update_mb = max_clients * max_params * 4 / (1024 * 1024)
-    per_worker_mb = max(1024.0, dataset_mb * 0.35 + update_mb * 2.5 + 768.0)
+    per_worker_mb = _estimated_parallel_worker_memory_mb(dataset, configs)
     memory_limited = max(1, int((total_mb * 0.75) // per_worker_mb))
     cpu_limited = available_cpu_count()
     jobs = min(memory_limited, cpu_limited, len(configs))
@@ -951,8 +987,26 @@ def _auto_parallel_jobs(dataset, configs: list[ExperimentConfig], args: argparse
     if backend == "torch:cuda":
         cuda_limited = _cuda_memory_parallel_limit(per_worker_mb)
         if cuda_limited is not None:
+            if cuda_limited < 1:
+                raise RuntimeError(_cuda_capacity_error(per_worker_mb))
             jobs = min(jobs, cuda_limited)
     return max(1, jobs)
+
+
+def _estimated_parallel_worker_memory_mb(dataset, configs: list[ExperimentConfig]) -> float:
+    """Estimate peak accelerator/host memory needed by one experiment config."""
+
+    if not configs:
+        return 1024.0
+    max_clients = max(config.num_clients for config in configs)
+    max_params = _parameter_size_for_dataset(dataset)
+    dataset_mb = _dataset_memory_mb(dataset)
+    update_mb = max_clients * max_params * 4 / (1024 * 1024)
+    # Besides the resident image tensors, a configuration retains client model
+    # updates and temporary autograd/aggregation buffers.  Keep the existing
+    # conservative host estimate and apply a separate 25% CUDA safety margin
+    # when deciding whether a physical device can accept the configuration.
+    return max(1024.0, dataset_mb * 0.35 + update_mb * 2.5 + 768.0)
 
 
 def available_cpu_count() -> int:
@@ -1005,6 +1059,72 @@ def available_cuda_devices() -> tuple[str, ...]:
         return ()
 
 
+def cuda_device_memory_info() -> tuple[tuple[str, float, float], ...] | None:
+    """Return ``(device, free_mb, total_mb)`` for every visible CUDA device.
+
+    ``None`` means the installed PyTorch/CUDA runtime cannot inspect memory;
+    an empty tuple means CUDA is available but exposes no devices.
+    """
+
+    try:
+        from .torch_backend import _torch_module
+
+        torch = _torch_module()
+        if not torch.cuda.is_available():
+            return ()
+        info = []
+        for index in range(torch.cuda.device_count()):
+            free_bytes, total_bytes = torch.cuda.mem_get_info(index)
+            info.append(
+                (
+                    f"cuda:{index}",
+                    float(free_bytes) / (1024 * 1024),
+                    float(total_bytes) / (1024 * 1024),
+                )
+            )
+        return tuple(info)
+    except (AttributeError, RuntimeError, ImportError):
+        return None
+
+
+def cuda_devices_with_capacity(per_worker_mb: float) -> tuple[str, ...]:
+    """Return visible devices with enough current free memory for one job."""
+
+    visible = available_cuda_devices()
+    if not visible:
+        return ()
+    info = cuda_device_memory_info()
+    if info is None:
+        # Older PyTorch builds may not expose mem_get_info.  Preserve the prior
+        # behavior rather than disabling CUDA solely because inspection failed.
+        return visible
+    by_device = {device: free_mb for device, free_mb, _total_mb in info}
+    return tuple(
+        device
+        for device in visible
+        if by_device.get(device, 0.0) * CUDA_MEMORY_SAFETY_FRACTION
+        >= per_worker_mb
+    )
+
+
+def _cuda_capacity_error(per_worker_mb: float) -> str:
+    info = cuda_device_memory_info()
+    if info:
+        free_text = ",".join(
+            f"{device}:{free_mb:.0f}/{total_mb:.0f}MiB-free"
+            for device, free_mb, total_mb in info
+        )
+    else:
+        free_text = "unavailable"
+    required_free_mb = per_worker_mb / CUDA_MEMORY_SAFETY_FRACTION
+    return (
+        "no visible CUDA device has enough free memory for one experiment; "
+        f"estimated_required_free_mb={required_free_mb:.0f} "
+        f"cuda_memory={free_text}. Stop unrelated GPU processes or restrict "
+        "CUDA_VISIBLE_DEVICES to idle GPUs, then rerun with resume enabled."
+    )
+
+
 def _cuda_memory_parallel_limit(per_worker_mb: float) -> int | None:
     """Estimate a safe grid width from currently free CUDA memory.
 
@@ -1013,28 +1133,26 @@ def _cuda_memory_parallel_limit(per_worker_mb: float) -> int | None:
     memory, so CPU and host-memory limits remain the safe fallback.
     """
 
-    try:
-        from .torch_backend import _torch_module
-
-        torch = _torch_module()
-        if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
-            return None
-        slots = 0
-        for index in range(torch.cuda.device_count()):
-            free_bytes, _total_bytes = torch.cuda.mem_get_info(index)
-            free_mb = float(free_bytes) / (1024 * 1024)
-            slots += max(1, int((free_mb * 0.75) // per_worker_mb))
-        return max(1, slots)
-    except (AttributeError, RuntimeError, ImportError):
+    info = cuda_device_memory_info()
+    if info is None:
         return None
+    # Auto mode deliberately runs at most one independent experiment per GPU.
+    # This avoids silently counting a nearly full GPU as one slot and avoids
+    # cross-job contention that would also bias paper-facing runtime results.
+    return sum(
+        free_mb * CUDA_MEMORY_SAFETY_FRACTION >= per_worker_mb
+        for _device, free_mb, _total_mb in info
+    )
 
 
 def assign_auto_cuda_devices(
     configs: list[ExperimentConfig],
     backend_description: str,
     requested_device: str,
+    *,
+    cuda_devices: tuple[str, ...] | None = None,
 ) -> list[ExperimentConfig]:
-    """Spread auto-selected CUDA configurations over all visible GPUs.
+    """Spread auto-selected CUDA configurations over usable GPUs.
 
     Explicit ``--device cuda`` remains pinned to PyTorch's default device.
     With one GPU the assignments intentionally share that device, which lets
@@ -1044,7 +1162,7 @@ def assign_auto_cuda_devices(
 
     if backend_description != "torch:cuda" or requested_device.strip().lower() != "auto":
         return configs
-    devices = available_cuda_devices()
+    devices = available_cuda_devices() if cuda_devices is None else cuda_devices
     if not devices:
         return configs
     return [
@@ -1080,6 +1198,16 @@ def print_resource_plan(
     ]
     if cuda_devices:
         fields.append("visible_cuda_devices=" + ",".join(cuda_devices))
+        per_worker_mb = _estimated_parallel_worker_memory_mb(dataset, configs)
+        usable_devices = cuda_devices_with_capacity(per_worker_mb)
+        fields.append("usable_cuda_devices=" + ",".join(usable_devices))
+        fields.append(f"estimated_cuda_worker_mb={per_worker_mb:.0f}")
+        info = cuda_device_memory_info()
+        if info:
+            fields.append(
+                "cuda_free_mb="
+                + ",".join(f"{device}={free_mb:.0f}" for device, free_mb, _ in info)
+            )
     print("resource_plan=" + " ".join(fields), flush=True)
 
 
@@ -1398,6 +1526,53 @@ def build_run_manifest(
         **payload,
         "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
     }
+
+
+def _normalized_cuda_device(value: object) -> object:
+    """Treat indexed CUDA placement as runtime scheduling, not an algorithm change."""
+
+    if isinstance(value, str) and value.startswith("cuda:"):
+        suffix = value.split(":", 1)[1]
+        if suffix.isdigit():
+            return "cuda:auto-index"
+    return value
+
+
+def _normalized_manifest_payload(manifest: dict[str, object]) -> dict[str, object]:
+    payload = {
+        key: value
+        for key, value in manifest.items()
+        if key != "fingerprint"
+    }
+    configs = payload.get("configs")
+    if isinstance(configs, list):
+        normalized_configs = []
+        for config in configs:
+            if not isinstance(config, dict):
+                normalized_configs.append(config)
+                continue
+            normalized = dict(config)
+            normalized["device"] = _normalized_cuda_device(normalized.get("device"))
+            normalized_configs.append(normalized)
+        payload["configs"] = normalized_configs
+    return payload
+
+
+def _manifests_differ_only_by_indexed_cuda_device(
+    previous: dict[str, object],
+    current: dict[str, object],
+) -> bool:
+    """Allow completed configs to survive changes in auto-selected GPU index."""
+
+    if previous.get("fingerprint") == current.get("fingerprint"):
+        return False
+    return _normalized_manifest_payload(previous) == _normalized_manifest_payload(current)
+
+
+def _resume_config_key(config: ExperimentConfig) -> str:
+    payload = asdict(config)
+    payload["device"] = _normalized_cuda_device(payload.get("device"))
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 def read_run_manifest(output_dir: Path) -> dict[str, object] | None:

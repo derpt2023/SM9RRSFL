@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from sm9rrsfl.fl import ExperimentConfig, ExperimentResult, RoundRecord
@@ -18,22 +19,36 @@ class VisualizationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dashboard = generate_visualizations(results, tmp)
             self.assertTrue(dashboard.exists())
-            self.assertTrue((Path(tmp) / "plots" / "accuracy_baseline.svg").exists())
+            self.assertTrue((Path(tmp) / "plots" / "accuracy_comparison.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "runtime_overhead.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "runtime_without_crypto.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "memory_overhead.svg").exists())
-            baseline = (
-                Path(tmp) / "plots" / "accuracy_baseline.svg"
+            comparison = (
+                Path(tmp) / "plots" / "accuracy_comparison.svg"
             ).read_text(encoding="utf-8")
-            self.assertIn(">Ours<", baseline)
-            self.assertIn(">VERT<", baseline)
-            self.assertIn(">FedREDefense<", baseline)
+            self.assertIn(">Ours<", comparison)
+            self.assertIn(">VERT<", comparison)
+            self.assertIn(">FedREDefense<", comparison)
+            self.assertIn("(a) 恶意节点比例 0%", comparison)
+            self.assertIn("(b) 恶意节点比例 10%", comparison)
+            self.assertIn('data-series="accuracy"', comparison)
+            svg = ET.fromstring(comparison)
+            namespace = "{http://www.w3.org/2000/svg}"
+            ours = next(
+                node
+                for node in svg.iter(f"{namespace}polyline")
+                if node.get("data-series") == "accuracy"
+                and node.get("data-method") == "Ours"
+                and node.get("data-malicious-ratio") == "0"
+            )
+            self.assertEqual(len(ours.get("points").split()), 3)
+            self.assertNotIn('data-series="accuracy-padded"', comparison)
             runtime = (
                 Path(tmp) / "plots" / "runtime_overhead.svg"
             ).read_text(encoding="utf-8")
             self.assertIn(">TAD<", runtime)
             self.assertNotIn("文献 [13]", runtime)
-            self.assertNotIn(">SM9-RRS-FL<", baseline)
+            self.assertNotIn(">SM9-RRS-FL<", comparison)
             fair_runtime = (
                 Path(tmp) / "plots" / "runtime_without_crypto.svg"
             ).read_text(encoding="utf-8")
@@ -48,9 +63,9 @@ class VisualizationTest(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmp:
             generate_visualizations(results, tmp)
-            self.assertTrue((Path(tmp) / "plots" / "iid_accuracy_baseline.svg").exists())
+            self.assertTrue((Path(tmp) / "plots" / "iid_accuracy_comparison.svg").exists())
             self.assertTrue(
-                (Path(tmp) / "plots" / "dirichlet_alpha_0_5_accuracy_baseline.svg").exists()
+                (Path(tmp) / "plots" / "dirichlet_alpha_0_5_accuracy_comparison.svg").exists()
             )
 
     def test_generates_client_count_comparison_files(self):
@@ -62,8 +77,8 @@ class VisualizationTest(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmp:
             generate_visualizations(results, tmp)
-            self.assertTrue((Path(tmp) / "plots" / "iid_clients_020_accuracy_baseline.svg").exists())
-            self.assertTrue((Path(tmp) / "plots" / "iid_clients_050_accuracy_baseline.svg").exists())
+            self.assertTrue((Path(tmp) / "plots" / "iid_clients_020_accuracy_comparison.svg").exists())
+            self.assertTrue((Path(tmp) / "plots" / "iid_clients_050_accuracy_comparison.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "client_count_accuracy_ratio_000.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "client_count_runtime_ratio_000.svg").exists())
             self.assertTrue((Path(tmp) / "plots" / "client_count_memory_ratio_000.svg").exists())

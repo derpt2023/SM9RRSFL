@@ -1,67 +1,96 @@
 {
   "schema_version": 1,
-  "name": "cifar10-6-methods-30-rounds",
-  "description": "Equivalent JSON configuration for the CIFAR-10 six-method command.",
+  "name": "cifar10-stable-official-fedre-20260810",
+  "description": "CIFAR-best-16 derived configuration with a finite alternating attack and official-aligned CIFAR-10 FedREDefense parameters.",
   "parameters": {
-    "dataset": "mnist",
+    "dataset": "cifar10",
     "download": true,
-    "data_dir": "data/mnist",
-    "output_dir": "outputs/mnist_best_13",
-    "methods": ["sm9rrs", "vert", "fedavg", "fedredefense", "krum", "ding13"],
-    "ratios": [0.0, 0.2, 0.4, 0.6, 0.8],
-    "partitions": ["iid", "dirichlet"],
+    "data_dir": "data/cifar10",
+    "output_dir": "outputs/cifar10_stable_official_fedre_20260810",
+
+    "methods": [
+      "sm9rrs",
+      "vert",
+      "fedavg",
+      "krum",
+      "ding13"
+    ],
+
+    "ratios": [
+      0.0,
+      0.2,
+      0.4,
+      0.6,
+      0.8
+    ],
+
+    "partitions": [
+      "iid",
+      "dirichlet"
+    ],
+
     "dirichlet_alpha": 0.5,
-    "client_counts": [100],
-    "rounds": 40,
-    "train_samples": 60000,
+    "client_counts": [
+      100
+    ],
+
+    "rounds": 50,
+    "train_samples": 50000,
     "test_samples": 10000,
     "local_epochs": 1,
     "batch_size": 32,
-    "lr": 0.03,
-    "lr_decay": 1.0,
+    "lr": 0.05,
+    "lr_decay": 0.99,
     "target_error": 0.12,
+
     "attack": "alternating_minimization",
-    "attack_boost": 15.0,
+    "attack_boost": 1.0,
     "attack_epochs": 1,
-    "attack_stealth_steps": 1,
-    "attack_distance_weight": 0.0001,
+    "attack_stealth_steps": 10,
+    "attack_distance_weight": 0.0002,
     "attack_source_label": 5,
     "attack_target_label": 7,
     "attack_target_count": 128,
-    "K": 5,
     "attack_start_round": 0,
-    "crypto_mode": "sm9",
-    "dkg_threshold": 2,
-    "dkg_nodes": 3,
-    "sm9_workers": "auto",
-    "compute_backend": "auto",
-    "device": "auto",
-    "jobs": "auto",
-    "eval_interval": 1,
-    "early_stop": false,
+
+    "K": 7,
     "z_threshold": 3.0,
     "suspicion_remove_after": 3,
     "suspicion_penalty_factor": 0.01,
-    "suspicion_recovery_factor": 5,
-    "vert_history_window": 5,
+    "suspicion_recovery_factor": 10.0,
+
+    "vert_history_window": 7,
     "vert_projection_dim": 128,
     "vert_predict_epochs": 5,
     "vert_predict_lr": 0.001,
     "vert_top_k": 0,
     "vert_use_ratio_prior": false,
+
     "fedre_threshold": 0.6,
-    "fedre_initial_iterations": 800,
-    "fedre_max_iterations": 2000,
+    "fedre_initial_iterations": 500,
+    "fedre_max_iterations": 1500,
     "fedre_synthetic_steps": 5,
     "fedre_images_per_class": 1,
-    "fedre_image_lr": 0.5,
-    "fedre_label_lr": 0.2,
-    "fedre_teacher_lr": 5.0,
-    "fedre_teacher_lr_lr": 0.000005,
-    "resume": false,
+    "fedre_image_lr": 0.1,
+    "fedre_label_lr": 0.05,
+    "fedre_teacher_lr": 0.05,
+    "fedre_teacher_lr_lr": 0.00005,
+
+    "crypto_mode": "sm9",
+    "dkg_threshold": 2,
+    "dkg_nodes": 3,
+    "sm9_workers": "auto",
+
+    "compute_backend": "auto",
+    "device": "auto",
+    "jobs": "auto",
+
+    "eval_interval": 1,
+    "early_stop": false,
+    "resume": true,
     "visualizations": true,
     "progress": true,
-    "seed": 42,
-    "progress_mode":"live"
+    "progress_mode": "live",
+    "seed": 42
   }
 }

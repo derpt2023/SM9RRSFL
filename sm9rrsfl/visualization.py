@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from html import escape
+import math
 from pathlib import Path
 
 from .fl import ExperimentResult
@@ -19,13 +20,18 @@ METHOD_LABELS = {
 }
 
 METHOD_COLORS = {
-    "sm9rrs": "#2563eb",
-    "vert": "#ea580c",
-    "fedredefense": "#0891b2",
-    "krum": "#dc2626",
-    "ding13": "#16a34a",
-    "fedavg": "#7c3aed",
+    "sm9rrs": "#8DBAD9",
+    "vert": "#E99092",
+    "fedredefense": "#8ADDE4",
+    "krum": "#DCDD8F",
+    "ding13": "#FEBD85",
+    "fedavg": "#C4A9A2",
 }
+
+THEME_INK = "#374151"
+THEME_TICK = "#64748B"
+THEME_GRID = "#D1D5DB"
+THEME_GRID_LIGHT = "#E5E7EB"
 
 METHOD_ORDER = ["sm9rrs", "vert", "fedredefense", "ding13", "krum", "fedavg"]
 
@@ -62,59 +68,35 @@ def generate_visualizations(results: list[ExperimentResult], output_dir: str | P
             prefix = f"{_partition_slug(scenario_results[0])}_"
         title_prefix = "" if single_scenario else f"{scenario_label}："
 
-        baseline = [
-            result for result in scenario_results if _is_ratio(result.config.malicious_ratio, 0.0)
-        ]
-        if baseline:
+        ratios = sorted({result.config.malicious_ratio for result in scenario_results})
+        if any(_is_ratio(ratio, 0.0) for ratio in ratios):
             baseline_found = True
-            path = plot_dir / f"{prefix}accuracy_baseline.svg"
-            _write_text(
-                path,
-                _line_chart(
-                    title=f"{title_prefix}无恶意节点时的模型收敛/准确率对比",
-                    series=_accuracy_series(baseline),
-                    target_rounds=_target_rounds(baseline),
-                    x_label="训练轮次",
-                    y_label="测试准确率",
-                    y_min=0.0,
-                    y_max=1.0,
-                ),
-            )
-            generated.append(
-                (f"{scenario_label} - 无恶意节点收敛曲线", path.relative_to(out).as_posix())
-            )
 
-        for ratio in sorted(
-            {
-                result.config.malicious_ratio
-                for result in scenario_results
-                if result.config.malicious_ratio > 0.0
-            }
-        ):
+        panels = []
+        for ratio in ratios:
             subset = [
                 result
                 for result in scenario_results
                 if _is_ratio(result.config.malicious_ratio, ratio)
             ]
-            path = plot_dir / f"{prefix}accuracy_ratio_{_ratio_slug(ratio)}.svg"
-            _write_text(
-                path,
-                _line_chart(
-                    title=f"{title_prefix}恶意节点比例 {_format_ratio(ratio)} 时的模型收敛/准确率对比",
-                    series=_accuracy_series(subset),
-                    target_rounds=_target_rounds(subset),
-                    x_label="训练轮次",
-                    y_label="测试准确率",
-                    y_min=0.0,
-                    y_max=1.0,
-                ),
+            panels.append((ratio, _accuracy_series(subset, pad_early_stop=False)))
+
+        _remove_legacy_accuracy_plots(plot_dir, prefix)
+        accuracy_path = plot_dir / f"{prefix}accuracy_comparison.svg"
+        _write_text(
+            accuracy_path,
+            _accuracy_comparison_chart(
+                title=f"{title_prefix}不同恶意节点比例下的模型收敛/准确率对比",
+                panels=panels,
+                target_rounds=_target_rounds(scenario_results),
+            ),
+        )
+        generated.append(
+            (
+                f"{scenario_label} - 不同恶意节点比例的收敛曲线",
+                accuracy_path.relative_to(out).as_posix(),
             )
-            generated.append(
-                (
-                    f"{scenario_label} - 恶意比例 {_format_ratio(ratio)} 收敛曲线",
-                    path.relative_to(out).as_posix(),
-                )
-            )
+        )
 
         fair_runtime_path = plot_dir / f"{prefix}runtime_without_crypto.svg"
         _write_text(
@@ -261,12 +243,20 @@ def generate_visualizations(results: list[ExperimentResult], output_dir: str | P
     return dashboard
 
 
-def _accuracy_series(results: list[ExperimentResult]) -> dict[str, list[tuple[float, float]]]:
+def _accuracy_series(
+    results: list[ExperimentResult],
+    *,
+    pad_early_stop: bool = True,
+) -> dict[str, list[tuple[float, float]]]:
     series: dict[str, list[tuple[float, float]]] = {}
     for result in sorted(results, key=lambda item: _method_index(item.config.method)):
         label = _method_label(result.config.method)
         points = [(record.round, record.accuracy) for record in result.records]
-        if result.config.early_stop and result.stopped_round < result.config.rounds:
+        if (
+            pad_early_stop
+            and result.config.early_stop
+            and result.stopped_round < result.config.rounds
+        ):
             points.append((result.config.rounds, result.final_accuracy))
         series[label] = points
     return series
@@ -318,6 +308,173 @@ def _group_by_partition_and_clients(
     return sorted(groups.items(), key=lambda item: (*_partition_sort_key(item[0][:2]), item[0][2]))
 
 
+def _accuracy_comparison_chart(
+    *,
+    title: str,
+    panels: list[tuple[float, dict[str, list[tuple[float, float]]]]],
+    target_rounds: int,
+) -> str:
+    """Render one paper-style panel per malicious-node ratio.
+
+    Every SVG polyline contains all recorded round/accuracy pairs. Markers are
+    thinned only for readability; the underlying curves are never smoothed,
+    averaged, or interpolated.
+    """
+
+    panel_count = max(1, len(panels))
+    outer_left, outer_right, gap, panel_width = 24, 20, 16, 330
+    width = outer_left + outer_right + panel_count * panel_width + (panel_count - 1) * gap
+    methods = sorted(
+        {method for _, series in panels for method in series},
+        key=_method_label_index,
+    )
+    legend_columns = min(
+        max(1, len(methods)),
+        max(1, int((width - 60) // 180)),
+    )
+    legend_rows = max(1, math.ceil(len(methods) / legend_columns))
+    plot_top = 76 + (legend_rows - 1) * 22
+    plot_height = 242
+    plot_bottom = plot_top + plot_height
+    height = plot_bottom + 98
+    max_x = max(
+        target_rounds,
+        max(
+            (x for _, series in panels for values in series.values() for x, _ in values),
+            default=1.0,
+        ),
+        1.0,
+    )
+
+    parts = [
+        _svg_open(width, height),
+        f'<title>{escape(title)}</title>',
+        '<desc>图中每条曲线均使用 rounds.csv 保存的逐轮测试准确率原始值，未进行平滑、平均或插值。</desc>',
+        (
+            '<style>text { font-family: Arial, "Helvetica Neue", "PingFang SC", '
+            '"Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }</style>'
+        ),
+        _chart_title(title, width, font_size=22),
+    ]
+
+    legend_item_width = min(210.0, (width - 60) / legend_columns)
+    legend_block_width = legend_columns * legend_item_width
+    legend_start_x = (width - legend_block_width) / 2
+    for idx, method in enumerate(methods):
+        row, column = divmod(idx, legend_columns)
+        y = 53 + row * 22
+        x = legend_start_x + column * legend_item_width
+        color = _color_for_label(method)
+        stroke_dash = LINE_STYLES.get(method, "")
+        dash_attr = f' stroke-dasharray="{stroke_dash}"' if stroke_dash else ""
+        parts.append(
+            f'<line x1="{x:.1f}" y1="{y:.1f}" x2="{x + 28:.1f}" y2="{y:.1f}" '
+            f'stroke="{color}" stroke-width="{2.2 if method == "Ours" else 1.7}"{dash_attr}/>'
+        )
+        parts.append(_marker(method, x + 14, y, color, filled=True))
+        parts.append(
+            f'<text x="{x + 36:.1f}" y="{y + 5:.1f}" font-size="14.5" '
+            f'font-weight="700" fill="{THEME_INK}">{escape(method)}</text>'
+        )
+
+    for panel_idx, (ratio, series) in enumerate(panels):
+        panel_x = outer_left + panel_idx * (panel_width + gap)
+        left = panel_x + 54
+        plot_width = panel_width - 64
+
+        def sx(value: float) -> float:
+            return left + (value / max_x) * plot_width
+
+        def sy(value: float) -> float:
+            bounded = min(max(value, 0.0), 1.0)
+            return plot_top + (1.0 - bounded) * plot_height
+
+        letter = chr(ord("a") + panel_idx)
+        ratio_label = _format_ratio(ratio)
+        parts.append(f'<g id="panel-{letter}" data-malicious-ratio="{ratio:g}">')
+        parts.append(f'<title>({letter}) 恶意节点比例 {escape(ratio_label)}</title>')
+
+        for tick in range(6):
+            value = tick / 5
+            y = sy(value)
+            parts.append(
+                f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_width}" y2="{y:.1f}" '
+                f'stroke="{THEME_GRID}" stroke-width="0.8" opacity="0.45"/>'
+            )
+            parts.append(
+                f'<text x="{left - 8}" y="{y + 4:.1f}" text-anchor="end" '
+                f'font-size="13.5" font-weight="600" fill="{THEME_TICK}">{value:.1f}</text>'
+            )
+        for tick in range(6):
+            value = max_x * tick / 5
+            x = sx(value)
+            parts.append(
+                f'<line x1="{x:.1f}" y1="{plot_top}" x2="{x:.1f}" y2="{plot_bottom}" '
+                f'stroke="{THEME_GRID_LIGHT}" stroke-width="0.7" opacity="0.45"/>'
+            )
+            parts.append(
+                f'<text x="{x:.1f}" y="{plot_bottom + 18}" text-anchor="middle" '
+                f'font-size="13.5" font-weight="600" fill="{THEME_TICK}">{value:.0f}</text>'
+            )
+
+        parts.extend(
+            [
+                f'<rect x="{left}" y="{plot_top}" width="{plot_width}" height="{plot_height}" '
+                f'fill="none" stroke="{THEME_INK}" stroke-width="1.4"/>',
+                (
+                    f'<text x="{left + plot_width / 2:.1f}" y="{plot_bottom + 41}" '
+                    f'text-anchor="middle" font-size="15" font-weight="700" '
+                    f'fill="{THEME_INK}">训练轮次</text>'
+                ),
+                (
+                    f'<text transform="translate({panel_x + 14} {plot_top + plot_height / 2:.1f}) '
+                    'rotate(-90)" text-anchor="middle" font-size="15" font-weight="700" '
+                    f'fill="{THEME_INK}">测试准确率</text>'
+                ),
+            ]
+        )
+
+        for method, points in sorted(series.items(), key=lambda item: _method_label_index(item[0])):
+            color = _color_for_label(method)
+            stroke_dash = LINE_STYLES.get(method, "")
+            dash_attr = f' stroke-dasharray="{stroke_dash}"' if stroke_dash else ""
+            real_points = points
+            real_text = " ".join(f"{sx(x):.2f},{sy(y):.2f}" for x, y in real_points)
+            if real_text:
+                stroke_width = 2.2 if method == "Ours" else 1.65
+                opacity = 1.0 if method == "Ours" else 0.9
+                parts.append(
+                    f'<polyline data-series="accuracy" data-method="{escape(method)}" '
+                    f'data-malicious-ratio="{ratio:g}" points="{real_text}" fill="none" '
+                    f'stroke="{color}" stroke-width="{stroke_width}"{dash_attr} opacity="{opacity}"/>'
+                )
+                marker_step = max(1, math.ceil((len(real_points) - 1) / 6))
+                marker_indices = set(range(0, len(real_points), marker_step))
+                if real_points:
+                    marker_indices.add(len(real_points) - 1)
+                for point_idx in sorted(marker_indices):
+                    x, y = real_points[point_idx]
+                    parts.append(
+                        _marker(
+                            method,
+                            sx(x),
+                            sy(y),
+                            color,
+                            filled=True,
+                        )
+                    )
+
+        parts.append(
+            f'<text x="{left + plot_width / 2:.1f}" y="{plot_bottom + 73}" '
+            f'text-anchor="middle" font-size="15.5" font-weight="700" fill="{THEME_INK}">'
+            f'({letter}) 恶意节点比例 {escape(ratio_label)}</text>'
+        )
+        parts.append("</g>")
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
 def _line_chart(
     *,
     title: str,
@@ -347,12 +504,12 @@ def _line_chart(
     for tick in range(0, 6):
         value = y_min + (y_max - y_min) * tick / 5
         y = sy(value)
-        parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_w}" y2="{y:.1f}" stroke="#e5e7eb"/>')
-        parts.append(f'<text x="{left - 10}" y="{y + 4:.1f}" text-anchor="end" font-size="12" fill="#475569">{value:.1f}</text>')
+        parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_w}" y2="{y:.1f}" stroke="{THEME_GRID_LIGHT}"/>')
+        parts.append(f'<text x="{left - 10}" y="{y + 4:.1f}" text-anchor="end" font-size="12" fill="{THEME_TICK}">{value:.1f}</text>')
     for tick in range(0, 6):
         value = max_x * tick / 5
         x = sx(value)
-        parts.append(f'<text x="{x:.1f}" y="{top + plot_h + 22}" text-anchor="middle" font-size="12" fill="#475569">{value:.0f}</text>')
+        parts.append(f'<text x="{x:.1f}" y="{top + plot_h + 22}" text-anchor="middle" font-size="12" fill="{THEME_TICK}">{value:.0f}</text>')
 
     for idx, (label, points) in enumerate(series.items()):
         color = _color_for_label(label)
@@ -372,10 +529,10 @@ def _line_chart(
             )
         legend_y = top + 24 + idx * 24
         parts.append(f'<rect x="{width - right + 24}" y="{legend_y - 10}" width="14" height="14" fill="{color}"/>')
-        parts.append(f'<text x="{width - right + 44}" y="{legend_y + 2}" font-size="13" fill="#0f172a">{escape(label)}</text>')
+        parts.append(f'<text x="{width - right + 44}" y="{legend_y + 2}" font-size="13" fill="{THEME_INK}">{escape(label)}</text>')
 
     parts.append(
-        f'<text x="{left}" y="{height - 8}" font-size="11" fill="#64748b">'
+        f'<text x="{left}" y="{height - 8}" font-size="11" fill="{THEME_TICK}">'
         "虚线平台段表示该方法已达到误差阈值并提前停止，图中延伸最终准确率便于横向比较。"
         "</text>"
     )
@@ -412,8 +569,8 @@ def _grouped_bar_chart(
     for tick in range(0, 6):
         value = y_max * tick / 5
         y = sy(value)
-        parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_w}" y2="{y:.1f}" stroke="#e5e7eb"/>')
-        parts.append(f'<text x="{left - 10}" y="{y + 4:.1f}" text-anchor="end" font-size="12" fill="#475569">{value:.2f}</text>')
+        parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_w}" y2="{y:.1f}" stroke="{THEME_GRID_LIGHT}"/>')
+        parts.append(f'<text x="{left - 10}" y="{y + 4:.1f}" text-anchor="end" font-size="12" fill="{THEME_TICK}">{value:.2f}</text>')
 
     for group_idx, (ratio_label, group_values) in enumerate(groups):
         center = left + group_idx * group_w + group_w / 2
@@ -430,15 +587,15 @@ def _grouped_bar_chart(
             if value > 0:
                 parts.append(
                     f'<text x="{x + (bar_w - 4) / 2:.1f}" y="{y - 5:.1f}" '
-                    f'text-anchor="middle" font-size="10" fill="#334155">{value:.2f}</text>'
+                    f'text-anchor="middle" font-size="10" fill="{THEME_INK}">{value:.2f}</text>'
                 )
-        parts.append(f'<text x="{center:.1f}" y="{top + plot_h + 24}" text-anchor="middle" font-size="12" fill="#475569">{escape(ratio_label)}</text>')
+        parts.append(f'<text x="{center:.1f}" y="{top + plot_h + 24}" text-anchor="middle" font-size="12" fill="{THEME_TICK}">{escape(ratio_label)}</text>')
 
     for idx, method in enumerate(methods):
         color = _color_for_label(method)
         legend_y = top + 24 + idx * 24
         parts.append(f'<rect x="{width - right + 24}" y="{legend_y - 10}" width="14" height="14" fill="{color}"/>')
-        parts.append(f'<text x="{width - right + 44}" y="{legend_y + 2}" font-size="13" fill="#0f172a">{escape(method)}</text>')
+        parts.append(f'<text x="{width - right + 44}" y="{legend_y + 2}" font-size="13" fill="{THEME_INK}">{escape(method)}</text>')
 
     parts.append("</svg>")
     return "\n".join(parts)
@@ -487,8 +644,8 @@ def _svg_open(width: int, height: int) -> str:
     )
 
 
-def _chart_title(title: str, width: int) -> str:
-    return f'<text x="{width / 2:.1f}" y="30" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">{escape(title)}</text>'
+def _chart_title(title: str, width: int, *, font_size: int = 18) -> str:
+    return f'<text x="{width / 2:.1f}" y="30" text-anchor="middle" font-size="{font_size}" font-weight="700" fill="{THEME_INK}">{escape(title)}</text>'
 
 
 def _axes(
@@ -503,10 +660,10 @@ def _axes(
 ) -> str:
     return "\n".join(
         [
-            f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="#334155" stroke-width="1.4"/>',
-            f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" stroke="#334155" stroke-width="1.4"/>',
-            f'<text x="{left + plot_w / 2:.1f}" y="{height - 20}" text-anchor="middle" font-size="13" fill="#334155">{escape(x_label)}</text>',
-            f'<text transform="translate(22 {top + plot_h / 2:.1f}) rotate(-90)" text-anchor="middle" font-size="13" fill="#334155">{escape(y_label)}</text>',
+            f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="{THEME_INK}" stroke-width="1.4"/>',
+            f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" stroke="{THEME_INK}" stroke-width="1.4"/>',
+            f'<text x="{left + plot_w / 2:.1f}" y="{height - 20}" text-anchor="middle" font-size="13" fill="{THEME_INK}">{escape(x_label)}</text>',
+            f'<text transform="translate(22 {top + plot_h / 2:.1f}) rotate(-90)" text-anchor="middle" font-size="13" fill="{THEME_INK}">{escape(y_label)}</text>',
         ]
     )
 
@@ -529,7 +686,7 @@ def _method_label_index(label: str) -> int:
 def _color_for_label(label: str) -> str:
     reverse = {value: key for key, value in METHOD_LABELS.items()}
     method = reverse.get(label, label)
-    return METHOD_COLORS.get(method, "#475569")
+    return METHOD_COLORS.get(method, THEME_TICK)
 
 
 def _format_ratio(ratio: float) -> str:
@@ -584,6 +741,16 @@ def _is_ratio(value: float, expected: float) -> bool:
 
 def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
+
+
+def _remove_legacy_accuracy_plots(plot_dir: Path, prefix: str) -> None:
+    """Remove superseded one-ratio accuracy SVGs before writing the panel figure."""
+
+    legacy_paths = [plot_dir / f"{prefix}accuracy_baseline.svg"]
+    legacy_paths.extend(plot_dir.glob(f"{prefix}accuracy_ratio_*.svg"))
+    for path in legacy_paths:
+        if path.exists():
+            path.unlink()
 
 
 def _split_padded_points(
