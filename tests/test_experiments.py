@@ -723,6 +723,27 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
         self.assertEqual(jobs, 4)
 
+    def test_auto_jobs_limits_single_mps_device_to_one_experiment(self):
+        args = parse_args(["--jobs", "auto", "--device", "auto"])
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=2)
+        configs = [ExperimentConfig(seed=index) for index in range(6)]
+
+        with (
+            mock.patch(
+                "sm9rrsfl.experiments.describe_compute_backend",
+                return_value="torch:mps",
+            ),
+            mock.patch("sm9rrsfl.experiments.available_cpu_count", return_value=12),
+            mock.patch("sm9rrsfl.experiments._physical_memory_mb", return_value=36 * 1024),
+            mock.patch(
+                "sm9rrsfl.experiments._estimated_parallel_worker_memory_mb",
+                return_value=4096,
+            ),
+        ):
+            jobs = resolve_parallel_jobs("auto", dataset, configs, args)
+
+        self.assertEqual(jobs, 1)
+
     def test_cgroup_memory_limit_ignores_unlimited_sentinel(self):
         with tempfile.TemporaryDirectory() as tmp:
             finite = Path(tmp) / "memory.max"
@@ -764,6 +785,21 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
         minimum = detector.estimated_state_bytes() + 256 * 1024**2
         self.assertGreaterEqual(estimate, int(minimum * 1.1))
+
+    def test_checkpoint_space_estimate_does_not_walk_foreign_object_graphs(self):
+        class ForeignObject:
+            def __getattribute__(self, name):
+                if name == "__dict__":
+                    raise AssertionError("foreign __dict__ must not be traversed")
+                return object.__getattribute__(self, name)
+
+        array = np.zeros(1024, dtype=np.float32)
+        estimate = _estimated_checkpoint_write_bytes(
+            {"params": array, "foreign": ForeignObject()}
+        )
+
+        minimum = array.nbytes + 256 * 1024**2
+        self.assertEqual(estimate, int(minimum * 1.1))
 
     def test_checkpoint_write_fails_before_pickle_when_disk_is_too_small(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch(

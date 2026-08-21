@@ -221,8 +221,8 @@ python -m sm9rrsfl.fair_tuning \
 ```
 
 - `compute_backend=auto, device=auto`：优先使用 CUDA，其次使用 Apple MPS，否则回落到 NumPy；也可显式指定 `compute_backend=torch, device=cuda|mps`。
-- `jobs=auto`：根据 CPU 配额、主存、CUDA 空闲显存、数据集和更新规模决定验证配置并发数；可填写正整数限制并发。
-- `progress=true`：启用两段进度条，先显示验证搜索，选参完成后显示独立最终评估。`progress_mode=live` 适合 PyCharm/IDE 控制台，`auto` 只在 TTY 原地刷新，`log` 输出离散状态行。
+- `jobs=auto`：根据 CPU 配额、主存、CUDA 空闲显存、数据集和更新规模决定验证配置并发数；CUDA 自动模式至多为每张可用物理卡安排一个配置，单块 Apple MPS 自动固定为一个配置，避免多个完整实验争用统一内存。可填写正整数显式覆盖并发数，但论文计时建议保持自动值。
+- `progress=true`：启用两段进度条，先显示验证搜索，选参完成后显示独立最终评估。外层进度单位是“完成一个完整实验配置”，不是通信轮；例如 `0/50` 会持续到首个 50 轮配置全部结束，并不表示内部训练停在第 0 轮。`progress_mode=live` 适合 PyCharm/IDE 控制台，`auto` 只在 TTY 原地刷新，`log` 输出离散状态行。
 - `resume=true`：默认启用调参专用断点恢复。轮次状态按 `checkpoint_interval` 原子保存，每完成一个配置就先更新阶段快照，再更新公开 CSV，最后删除该配置的终态检查点。重启完全相同的调参配置时，会跳过已经提交的候选场景，并从未完成配置最近一次耐久化轮继续；自动间隔大于 1 时，末尾尚未落盘的少量轮次会重算。
 - Ours 的 `sm9_workers=auto` 会按外层并发数重新分配 CPU 槽，避免网格并发与签名/验签线程相互过度订阅。
 
@@ -518,7 +518,7 @@ python -m sm9rrsfl.experiments \
 
 `--jobs auto` 会根据进程实际可用的 CPU 核（含 Linux 容器的 CPU 配额/亲和性）、主存、模型参数量、待运行配置数，以及 CUDA 当前可用显存估算配置级并发数。例如可用 `4` 核的环境有 60 个配置且内存充足时，自动计划可同时推进 4 个配置；完成一个后会继续领取剩余配置。`--jobs 1` 可显式恢复完全串行；`--jobs N` 则由用户明确指定最多 `N` 个并发配置。
 
-NumPy 及 CPU Torch 后端优先使用多进程，使独立配置能够占用多个 CPU 核；如果当前运行环境禁止系统 semaphore 或进程池初始化，会提示 `process_pool_unavailable=...` 并回退到线程池。CUDA/MPS 后端在同一进程中使用线程队列共享设备和驻留数据集，避免 CUDA fork/MPS 子进程初始化问题。CUDA 的 `auto` 会先以显存安全上限约束并发数，再以 CPU/主存预算约束；当进程可见多张 CUDA 卡且 `device=auto` 时，配置会轮转分配到各卡。单卡上的多个小型 CNN 配置可以交叠 CPU 准备与设备计算，但并发不是无限增益；运行日志中的 `resource_plan=...` 会给出实际 CPU 槽、设备、并发数和 SM9 线程数，出现显存不足时应显式降低 `--jobs`。
+NumPy 及 CPU Torch 后端优先使用多进程，使独立配置能够占用多个 CPU 核；如果当前运行环境禁止系统 semaphore 或进程池初始化，会提示 `process_pool_unavailable=...` 并回退到线程池。CUDA/MPS 后端需要并发时使用同一进程的线程队列，避免 CUDA fork/MPS 子进程初始化问题。CUDA 的 `auto` 会先以显存安全上限约束并发数，再以 CPU/主存预算约束；当进程可见多张 CUDA 卡且 `device=auto` 时，配置会轮转分配到各卡。Apple MPS 只有一个共享统一内存设备，`auto` 固定串行运行一个配置，避免多个完整实验争用 Metal；只有显式设置大于 1 的 `--jobs` 才会覆盖该保护。运行日志中的 `resource_plan=...` 会给出实际 CPU 槽、设备、并发数和 SM9 线程数。
 
 `--eval-interval 5` 表示每 5 轮评估一次测试集准确率，最后一轮始终评估。它不改变训练、投毒、防御、聚合和最终评估公式，但启用早停时判断粒度会变粗，可能多运行到下一个评估点；如果论文图表需要完整逐轮曲线，可改回 `--eval-interval 1`。
 
@@ -701,7 +701,7 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 - `--dkg-nodes 3`：D-KGC 节点总数，默认 `3`；门限至少为 $1$，且不得大于节点总数。
 - `--compute-backend numpy|auto|torch`：CNN 本地训练/评估后端，默认 `auto`；有 CUDA/MPS 时自动使用 PyTorch GPU，否则回落到 NumPy，`numpy` 和 `torch` 可强制指定实现。
 - `--device auto|cpu|cuda|mps`：PyTorch 设备，默认 `auto`；Mac Apple Silicon 可用 `mps`，Windows/Linux NVIDIA 可用 `cuda`，`auto` 优先 CUDA、其次 MPS。
-- `--jobs 1|auto|N`：外层实验配置并发数，默认 `auto`。CPU/NumPy 使用多进程，CUDA/MPS 使用同进程线程队列。自动值会综合进程可用 CPU、主存、每张 CUDA 卡的实时空闲显存和待运行配置数；`device=auto` 时仅在满足单实验显存估计及 `25%` 安全余量的 CUDA 卡之间轮转，并默认每张可用卡最多放置一个并发配置。其他进程已经占满的可见 GPU 不再被错误计为一个可用槽。`resource_plan` 会同时打印 `visible_cuda_devices`、`usable_cuda_devices`、各卡 `cuda_free_mb` 和单配置显存估计。该参数只改变实验网格的调度和总墙钟时间，不改变单个配置的实验变量；手动指定过大的并发数仍可能导致显存不足。
+- `--jobs 1|auto|N`：外层实验配置并发数，默认 `auto`。CPU/NumPy 使用多进程，CUDA/MPS 在需要并发时使用同进程线程队列。自动值会综合进程可用 CPU、主存、每张 CUDA 卡的实时空闲显存和待运行配置数；`device=auto` 时仅在满足单实验显存估计及 `25%` 安全余量的 CUDA 卡之间轮转，并默认每张可用 CUDA 卡最多放置一个并发配置；MPS 自动值固定为 `1`。其他进程已经占满的可见 GPU 不再被错误计为一个可用槽。`resource_plan` 会同时打印设备与单配置资源估计。该参数只改变实验网格的调度和总墙钟时间，不改变单个配置的实验变量；手动指定过大的并发数仍可能导致显存或统一内存不足。
 - `--sm9-workers 1|auto|N`：单个 SM9RRS 配置每轮内部的摘要、构包、签名和验签线程数，默认 `auto`；自动值不超过 `8`、每个并发配置分得的 CPU 槽和最大客户端数。SVD 检测器状态仍按客户端稳定顺序更新，不改变检测、降权或撤销规则。
 
 #### 断点、进度与可视化

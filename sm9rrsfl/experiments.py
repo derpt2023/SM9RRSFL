@@ -1125,6 +1125,13 @@ def _auto_parallel_jobs(dataset, configs: list[ExperimentConfig], args: argparse
             if cuda_limited < 1:
                 raise RuntimeError(_cuda_capacity_error(cuda_worker_mb))
             jobs = min(jobs, cuda_limited)
+    elif backend == "torch:mps":
+        # Apple exposes one shared MPS device backed by unified memory. Running
+        # several complete experiments in threads makes their resident models,
+        # client updates and autograd buffers contend for the same device and
+        # can be substantially slower than serial execution. Explicit --jobs
+        # remains authoritative; only auto mode is conservatively capped.
+        jobs = min(jobs, 1)
     return max(1, jobs)
 
 
@@ -2108,34 +2115,50 @@ def _estimated_checkpoint_write_bytes(state: dict[str, object]) -> int:
 
 
 def _unique_numpy_array_bytes(root: object) -> int:
-    """Count unique ndarray storage reachable from a checkpoint object graph."""
+    """Count unique ndarray storage reachable from project checkpoint state.
+
+    Only built-in containers and objects implemented by this package are
+    traversed. Walking arbitrary third-party ``__dict__`` mappings can escape
+    into complete module graphs; for PyTorch it also touches deprecated lazy
+    aliases such as ``torch.distributed.reduce_op`` and emits warnings.
+    """
 
     total = 0
     seen: set[int] = set()
     stack = [root]
-    scalar_types = (str, bytes, bytearray, int, float, bool, complex, type(None))
+    scalar_types = {str, bytes, bytearray, int, float, bool, complex, type(None)}
+    container_types = {list, tuple, set, frozenset, deque}
     while stack:
         value = stack.pop()
         identity = id(value)
         if identity in seen:
             continue
         seen.add(identity)
-        if isinstance(value, np.ndarray):
+        value_type = type(value)
+        value_module = getattr(value_type, "__module__", "")
+        if value_type is np.ndarray or (
+            value_module.startswith("numpy") and isinstance(value, np.ndarray)
+        ):
             total += int(value.nbytes)
             continue
-        if isinstance(value, scalar_types):
+        if value_type in scalar_types:
             continue
-        if isinstance(value, dict):
+        if value_type is dict:
             stack.extend(value.values())
             continue
-        if isinstance(value, (list, tuple, set, frozenset, deque)):
+        if value_type in container_types:
             stack.extend(value)
+            continue
+        if not value_module.startswith("sm9rrsfl."):
             continue
         if is_dataclass(value) and not isinstance(value, type):
             stack.extend(getattr(value, item.name) for item in fields(value))
             continue
-        attributes = getattr(value, "__dict__", None)
-        if isinstance(attributes, dict):
+        try:
+            attributes = vars(value)
+        except TypeError:
+            continue
+        if type(attributes) is dict:
             stack.extend(attributes.values())
     return total
 

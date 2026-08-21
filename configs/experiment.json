@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "name": "cifar10-v3-trusted-anchor-or-20260821",
+  "name": "v3",
   "description": "CIFAR-10 five-method experiment with the third-revision trusted-anchor SVD detector and an explicit, shared attack schedule.",
   "parameters": {
     "dataset": "cifar10",
     "download": true,
     "data_dir": "data/cifar10",
-    "output_dir": "outputs/cifar10_v3_trusted_anchor_or_20260821",
+    "output_dir": "outputs/cifar10_v320260821",
 
     "methods": [
       "sm9rrs",
@@ -31,7 +31,7 @@
 
     "dirichlet_alpha": 0.5,
     "client_counts": [
-      200
+      100
     ],
 
     "rounds": 50,
