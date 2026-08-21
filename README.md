@@ -140,7 +140,7 @@ python -m sm9rrsfl.experiments \
 ./run_experiments_from_config.py
 ```
 
-启动文件会优先自动使用项目 `.venv` 中的 Python；如果当前系统没有把该文件作为可执行脚本处理，也可以使用：
+启动文件会优先自动使用项目 `.venv` 中可执行且与当前系统兼容的 Python；若该虚拟环境不可执行或来自另一操作系统，脚本会输出警告并自动回退到当前命令中的 `python`。虚拟环境不可跨 macOS/Linux 复制，向 AI Station 覆盖项目时应排除 `.venv/`，并在目标机器上重新创建。也可以使用：
 
 ```bash
 python run_experiments_from_config.py
