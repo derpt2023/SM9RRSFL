@@ -47,6 +47,103 @@ class FairTuningTest(unittest.TestCase):
             {5.0, 6.0},
         )
 
+    def test_v3_detector_hyperparameters_are_valid_ours_only_search_axes(self):
+        payload = json.loads(
+            (PROJECT_ROOT / "configs" / "fair_tuning.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        payload["tuning"]["method_spaces"]["sm9rrs"] = {
+            "detector_subspace_dim": [2],
+            "detector_gap_threshold": [0.1],
+            "detector_adjacent_threshold": [2.5, 3.0],
+            "detector_anchor_threshold": [2.5, 3.0],
+            "detector_drift_memory": [0.9],
+            "detector_drift_allowance": [1.0],
+            "detector_drift_threshold": [5.0],
+            "suspicion_count_max": [3],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "v3-grid.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            spec = load_fair_tuning_config(path)
+
+        self.assertEqual(len(spec.candidates["sm9rrs"]), 4)
+        self.assertTrue(
+            all(
+                candidate["detector_subspace_dim"] == 2
+                and candidate["suspicion_count_max"] == 3
+                for candidate in spec.candidates["sm9rrs"]
+            )
+        )
+        self.assertEqual(spec.shared_parameters["detector_decision_rule"], "any")
+
+    def test_detector_decision_rule_is_fixed_shared_algorithm_semantics(self):
+        payload = json.loads(
+            (PROJECT_ROOT / "configs" / "fair_tuning.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        payload["tuning"]["method_spaces"]["sm9rrs"] = {
+            "detector_decision_rule": ["any"],
+            "detector_anchor_threshold": [2.5, 3.0],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "invalid-rule-grid.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(FairTuningError, "cannot tune shared or foreign"):
+                load_fair_tuning_config(path)
+
+    def test_tuning_detector_window_requires_one_fixed_safe_attack_round(self):
+        base_payload = json.loads(
+            (PROJECT_ROOT / "configs" / "fair_tuning.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        base_payload["shared_parameters"].pop("K", None)
+        base_payload["tuning"]["method_spaces"]["sm9rrs"] = {
+            "detector_window": [7, 10],
+            "detector_anchor_threshold": [2.5, 3.0],
+        }
+
+        invalid_cases = (
+            (0, "requires an explicit shared attack_start_round"),
+            (11, "must be at least max\\(detector_window\\) \\+ 2"),
+        )
+        for attack_start_round, error in invalid_cases:
+            payload = json.loads(json.dumps(base_payload))
+            payload["shared_parameters"]["attack_start_round"] = attack_start_round
+            with self.subTest(attack_start_round=attack_start_round):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "invalid-window-grid.json"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(FairTuningError, error):
+                        load_fair_tuning_config(path)
+
+        base_payload["shared_parameters"]["attack_start_round"] = 12
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "valid-window-grid.json"
+            path.write_text(json.dumps(base_payload), encoding="utf-8")
+            spec = load_fair_tuning_config(path)
+
+        args = parse_args(
+            [
+                "--methods",
+                *ALL_METHODS,
+                "--ratios",
+                "0.0",
+                "0.4",
+                "--num-clients",
+                "20",
+                "--attack-start-round",
+                "12",
+            ]
+        )
+        tasks = build_validation_tasks(spec, build_experiment_configs(args))
+        ours_tasks = [task for task in tasks if task.method == "sm9rrs"]
+        self.assertEqual({task.config.detector_window for task in ours_tasks}, {7, 10})
+        self.assertEqual({task.config.attack_start_round for task in ours_tasks}, {12})
+
     def test_validation_tasks_expand_every_candidate_seed_and_scenario(self):
         spec = load_fair_tuning_config(
             PROJECT_ROOT / "configs" / "fair_tuning.example.json"

@@ -46,6 +46,79 @@ class KrumTest(unittest.TestCase):
         self.assertTrue(np.isfinite(singulars).all())
         self.assertGreater(float(singulars[0]), 0.0)
 
+    def test_top_singular_subspace_returns_true_singular_values_and_projector(self):
+        from sm9rrsfl.torch_backend import numpy_top_singular_subspace
+
+        matrix = np.diag([5.0, 3.0, 1.0]).astype(np.float32)
+        singular_values, basis = numpy_top_singular_subspace(matrix, rank=2)
+
+        # The detector needs sigma rather than the eigenvalues sigma**2 of
+        # A.T@A, because it applies log(sigma + eps) and the q/(q+1) gap.
+        np.testing.assert_allclose(singular_values, [5.0, 3.0, 1.0], atol=1e-7)
+        np.testing.assert_allclose(basis.T @ basis, np.eye(2), atol=1e-7)
+        np.testing.assert_allclose(
+            basis @ basis.T,
+            np.diag([1.0, 1.0, 0.0]),
+            atol=1e-7,
+        )
+        gap = (singular_values[1] - singular_values[2]) / singular_values[1]
+        self.assertAlmostEqual(float(gap), 2.0 / 3.0)
+
+    def test_top_singular_subspace_falls_back_from_eigh_to_true_svd(self):
+        from sm9rrsfl.torch_backend import numpy_top_singular_subspace
+
+        matrix = np.diag([5.0, 3.0, 1.0]).astype(np.float32)
+        with mock.patch(
+            "numpy.linalg.eigh",
+            side_effect=np.linalg.LinAlgError("injected eigen failure"),
+        ):
+            singular_values, basis = numpy_top_singular_subspace(matrix, rank=2)
+
+        np.testing.assert_allclose(singular_values, [5.0, 3.0, 1.0], atol=1e-7)
+        np.testing.assert_allclose(basis.T @ basis, np.eye(2), atol=1e-7)
+        np.testing.assert_allclose(
+            basis @ basis.T,
+            np.diag([1.0, 1.0, 0.0]),
+            atol=1e-7,
+        )
+
+    def test_top_singular_subspace_requires_q_plus_one_value(self):
+        from sm9rrsfl.torch_backend import numpy_top_singular_subspace
+
+        with self.assertRaisesRegex(ValueError, r"min\(matrix.shape\) - 1"):
+            numpy_top_singular_subspace(np.eye(2, dtype=np.float32), rank=2)
+
+    def test_torch_top_singular_subspace_matches_numpy_on_cpu(self):
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("PyTorch is not installed")
+        from sm9rrsfl.torch_backend import (
+            numpy_top_singular_subspace,
+            torch_top_singular_subspace,
+        )
+
+        matrix = np.diag([5.0, 3.0, 1.0]).astype(np.float32)
+        expected_values, expected_basis = numpy_top_singular_subspace(matrix, rank=2)
+        actual_values, actual_basis = torch_top_singular_subspace(
+            matrix,
+            rank=2,
+            device="cpu",
+        )
+
+        np.testing.assert_allclose(actual_values, expected_values, atol=1e-6)
+        np.testing.assert_allclose(
+            actual_basis @ actual_basis.T,
+            expected_basis @ expected_basis.T,
+            atol=1e-6,
+        )
+        with self.assertRaisesRegex(ValueError, r"min\(matrix.shape\) - 1"):
+            torch_top_singular_subspace(
+                np.eye(2, dtype=np.float32),
+                rank=2,
+                device="cpu",
+            )
+
     def test_krum_selects_update_near_honest_cluster(self):
         updates = np.array(
             [

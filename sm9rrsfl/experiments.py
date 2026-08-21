@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import csv
-from dataclasses import asdict, fields, replace
+from dataclasses import asdict, fields, is_dataclass, replace
 import ctypes
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import math
@@ -15,10 +17,13 @@ import os
 from pathlib import Path
 import pickle
 import resource
+import shutil
 import sys
 from threading import Event, Lock, Thread
 from time import perf_counter
 import traceback
+
+import numpy as np
 
 from .datasets import load_image_dataset
 from .crypto import rrs_backend_name, sm3_backend_name
@@ -42,7 +47,8 @@ PROGRESS_BAR_WIDTH = 28
 _WORKER_DATASET = None
 _WORKER_CHECKPOINT_DIR = None
 _WORKER_RUN_FINGERPRINT = None
-CHECKPOINT_SCHEMA_VERSION = 10
+_CHECKPOINT_WRITE_LOCK = Lock()
+CHECKPOINT_SCHEMA_VERSION = 11
 COMPLETED_RESULTS_SNAPSHOT = ".completed_results.pickle"
 CUDA_MEMORY_SAFETY_FRACTION = 0.75
 DATASET_TRAINING_PRESETS = {
@@ -110,7 +116,7 @@ def main(argv: list[str] | None = None) -> None:
     started = perf_counter()
 
     configs = build_experiment_configs(args)
-    cuda_worker_mb = _estimated_parallel_worker_memory_mb(dataset, configs)
+    cuda_worker_mb = _estimated_cuda_worker_memory_mb(dataset, configs)
     usable_cuda_devices = (
         cuda_devices_with_capacity(cuda_worker_mb)
         if backend_description == "torch:cuda"
@@ -547,7 +553,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "each task-tag SVD baseline. Scoring starts at observation K + 1."
         ),
     )
-    parser.add_argument("--z-threshold", type=float, default=3.0)
+    parser.add_argument(
+        "--z-threshold",
+        type=float,
+        default=3.0,
+        help=(
+            "Compatibility threshold used for both theta_adj and theta_anc "
+            "when their explicit options are omitted."
+        ),
+    )
+    parser.add_argument("--detector-subspace-dim", type=int, default=2)
+    parser.add_argument("--detector-gap-threshold", type=float, default=0.1)
+    parser.add_argument("--detector-adjacent-threshold", type=float)
+    parser.add_argument("--detector-anchor-threshold", type=float)
+    parser.add_argument("--detector-drift-memory", type=float, default=0.9)
+    parser.add_argument("--detector-drift-allowance", type=float, default=1.0)
+    parser.add_argument("--detector-drift-threshold", type=float, default=5.0)
+    parser.add_argument(
+        "--detector-decision-rule",
+        choices=["any"],
+        default="any",
+        help="Fixed to any, implementing the v3 logical-OR formula.",
+    )
     parser.add_argument("--crypto-mode", choices=["sm9", "simulated"], default="sm9")
     parser.add_argument("--dkg-threshold", type=int, default=2)
     parser.add_argument("--dkg-nodes", type=int, default=3)
@@ -557,6 +584,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=1,
         help="Evaluate test accuracy every N rounds; the final round is always evaluated.",
+    )
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=0,
+        help=(
+            "Durable round-checkpoint interval. 0 selects a detector-state-size-aware "
+            "interval; positive values force an exact interval."
+        ),
     )
     parser.add_argument(
         "--sm9-workers",
@@ -576,9 +612,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=3,
         help=(
-            "Paper parameter C_tol: number of consecutive suspicious rounds "
-            "required before threshold trace and revocation are requested."
+            "Paper parameter C_tol: composite anomaly-evidence count required "
+            "before threshold trace and revocation are requested."
         ),
+    )
+    parser.add_argument(
+        "--C_max",
+        "--c-max",
+        "--suspicion-count-max",
+        dest="suspicion_count_max",
+        type=int,
+        default=0,
+        help="Paper C_max. 0 resolves to C_tol and avoids a redundant tuning axis.",
     )
     parser.add_argument(
         "--vert-history-window",
@@ -688,6 +733,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "--attack-scale does not control alternating minimization; "
             "use --attack-boost for lambda"
         )
+    if _has_any_option(raw_args, "--z-threshold") and _has_any_option(
+        raw_args,
+        "--detector-adjacent-threshold",
+        "--detector-anchor-threshold",
+    ):
+        parser.error(
+            "--z-threshold cannot be combined with explicit adjacent/anchor thresholds"
+        )
     max_clients = max(args.client_counts or [args.num_clients])
     args._sm9_workers_auto = (
         isinstance(args.sm9_workers, str)
@@ -759,7 +812,62 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
             math.isfinite(args.z_threshold) and args.z_threshold > 0.0,
             "--z-threshold must be finite and positive",
         ),
+        (
+            1 <= args.detector_subspace_dim < 10,
+            "--detector-subspace-dim must be in [1, 9] so lambda_(q+1) exists",
+        ),
+        (
+            math.isfinite(args.detector_gap_threshold)
+            and args.detector_gap_threshold > 0.0,
+            "--detector-gap-threshold must be finite and positive",
+        ),
+        (
+            args.detector_adjacent_threshold is None
+            or (
+                math.isfinite(args.detector_adjacent_threshold)
+                and args.detector_adjacent_threshold > 0.0
+            ),
+            "--detector-adjacent-threshold must be finite and positive",
+        ),
+        (
+            args.detector_anchor_threshold is None
+            or (
+                math.isfinite(args.detector_anchor_threshold)
+                and args.detector_anchor_threshold > 0.0
+            ),
+            "--detector-anchor-threshold must be finite and positive",
+        ),
+        (
+            math.isfinite(args.detector_drift_memory)
+            and 0.0 < args.detector_drift_memory <= 1.0,
+            "--detector-drift-memory must be in (0, 1]",
+        ),
+        (
+            math.isfinite(args.detector_drift_allowance)
+            and args.detector_drift_allowance > 0.0,
+            "--detector-drift-allowance must be finite and positive",
+        ),
+        (
+            math.isfinite(args.detector_drift_threshold)
+            and args.detector_drift_threshold > 0.0,
+            "--detector-drift-threshold must be finite and positive",
+        ),
         (args.suspicion_remove_after >= 1, "--C_tol must be at least 1"),
+        (
+            args.suspicion_count_max == 0
+            or args.suspicion_count_max >= args.suspicion_remove_after,
+            "--C_max must be 0 or at least --C_tol",
+        ),
+        (
+            math.isfinite(args.suspicion_penalty_factor)
+            and 0.0 < args.suspicion_penalty_factor < 1.0,
+            "--suspicion-penalty-factor must be in (0, 1)",
+        ),
+        (
+            math.isfinite(args.suspicion_recovery_factor)
+            and args.suspicion_recovery_factor > 1.0,
+            "--suspicion-recovery-factor must be greater than 1",
+        ),
         (
             args.vert_history_window >= 2,
             "--vert-history-window must be at least 2",
@@ -826,6 +934,10 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         ),
         (args.eval_interval >= 1, "--eval-interval must be at least 1"),
         (
+            args.checkpoint_interval >= 0,
+            "--checkpoint-interval must be non-negative",
+        ),
+        (
             args.train_samples is None or args.train_samples >= 1,
             "--train-samples must be at least 1",
         ),
@@ -874,15 +986,37 @@ def build_experiment_configs(args: argparse.Namespace) -> list[ExperimentConfig]
                             attack_start_round=args.attack_start_round,
                             detector_window=args.detector_window,
                             z_threshold=args.z_threshold,
+                            detector_subspace_dim=args.detector_subspace_dim,
+                            detector_gap_threshold=args.detector_gap_threshold,
+                            detector_adjacent_threshold=(
+                                args.z_threshold
+                                if args.detector_adjacent_threshold is None
+                                else args.detector_adjacent_threshold
+                            ),
+                            detector_anchor_threshold=(
+                                args.z_threshold
+                                if args.detector_anchor_threshold is None
+                                else args.detector_anchor_threshold
+                            ),
+                            detector_drift_memory=args.detector_drift_memory,
+                            detector_drift_allowance=args.detector_drift_allowance,
+                            detector_drift_threshold=args.detector_drift_threshold,
+                            detector_decision_rule=args.detector_decision_rule,
                             crypto_mode=args.crypto_mode,
                             dkg_threshold=args.dkg_threshold,
                             dkg_nodes=args.dkg_nodes,
                             early_stop=not args.no_early_stop,
                             eval_interval=args.eval_interval,
+                            checkpoint_interval=args.checkpoint_interval,
                             sm9_workers=args.sm9_workers,
                             suspicion_penalty_factor=args.suspicion_penalty_factor,
                             suspicion_recovery_factor=args.suspicion_recovery_factor,
                             suspicion_remove_after=args.suspicion_remove_after,
+                            suspicion_count_max=(
+                                args.suspicion_remove_after
+                                if args.suspicion_count_max == 0
+                                else args.suspicion_count_max
+                            ),
                             vert_history_window=args.vert_history_window,
                             vert_projection_dim=args.vert_projection_dim,
                             vert_predict_epochs=args.vert_predict_epochs,
@@ -985,16 +1119,17 @@ def _auto_parallel_jobs(dataset, configs: list[ExperimentConfig], args: argparse
     jobs = min(memory_limited, cpu_limited, len(configs))
     backend = describe_compute_backend(args.compute_backend, args.device)
     if backend == "torch:cuda":
-        cuda_limited = _cuda_memory_parallel_limit(per_worker_mb)
+        cuda_worker_mb = _estimated_cuda_worker_memory_mb(dataset, configs)
+        cuda_limited = _cuda_memory_parallel_limit(cuda_worker_mb)
         if cuda_limited is not None:
             if cuda_limited < 1:
-                raise RuntimeError(_cuda_capacity_error(per_worker_mb))
+                raise RuntimeError(_cuda_capacity_error(cuda_worker_mb))
             jobs = min(jobs, cuda_limited)
     return max(1, jobs)
 
 
 def _estimated_parallel_worker_memory_mb(dataset, configs: list[ExperimentConfig]) -> float:
-    """Estimate peak accelerator/host memory needed by one experiment config."""
+    """Estimate peak host memory needed by one experiment config."""
 
     if not configs:
         return 1024.0
@@ -1002,11 +1137,62 @@ def _estimated_parallel_worker_memory_mb(dataset, configs: list[ExperimentConfig
     max_params = _parameter_size_for_dataset(dataset)
     dataset_mb = _dataset_memory_mb(dataset)
     update_mb = max_clients * max_params * 4 / (1024 * 1024)
+    detector_state_mb = _detector_state_memory_mb(dataset, configs)
     # Besides the resident image tensors, a configuration retains client model
     # updates and temporary autograd/aggregation buffers.  Keep the existing
     # conservative host estimate and apply a separate 25% CUDA safety margin
     # when deciding whether a physical device can accept the configuration.
+    return max(
+        1024.0,
+        dataset_mb * 0.35 + update_mb * 2.5 + detector_state_mb * 1.1 + 768.0,
+    )
+
+
+def _estimated_cuda_worker_memory_mb(dataset, configs: list[ExperimentConfig]) -> float:
+    """Estimate accelerator memory without charging CPU-only detector history."""
+
+    if not configs:
+        return 1024.0
+    max_clients = max(config.num_clients for config in configs)
+    max_params = _parameter_size_for_dataset(dataset)
+    dataset_mb = _dataset_memory_mb(dataset)
+    update_mb = max_clients * max_params * 4 / (1024 * 1024)
     return max(1024.0, dataset_mb * 0.35 + update_mb * 2.5 + 768.0)
+
+
+def _detector_state_memory_mb(dataset, configs: list[ExperimentConfig]) -> float:
+    """Conservative host footprint of trusted/last-observed float32 thin bases."""
+
+    sm9_configs = [config for config in configs if config.method == "sm9rrs"]
+    if not sm9_configs:
+        return 0.0
+    max_params = _parameter_size_for_dataset(dataset)
+    classes = max(1, int(dataset.num_classes))
+    rows = math.ceil(max_params / classes)
+    return max(
+        config.num_clients
+        * (config.detector_window + 1)
+        * rows
+        * config.detector_subspace_dim
+        * 4
+        / (1024 * 1024)
+        for config in sm9_configs
+    )
+
+
+def _effective_checkpoint_interval(dataset, config: ExperimentConfig) -> int:
+    """Resolve 0=auto while bounding write amplification for large v3 state."""
+
+    if config.checkpoint_interval > 0 or config.method != "sm9rrs":
+        return max(1, config.checkpoint_interval)
+    state_mb = _detector_state_memory_mb(dataset, [config])
+    if state_mb > 2048.0:
+        return 25
+    if state_mb > 1024.0:
+        return 10
+    if state_mb > 256.0:
+        return 5
+    return 1
 
 
 def available_cpu_count() -> int:
@@ -1194,11 +1380,19 @@ def print_resource_plan(
         f"requested_jobs={requested_jobs}",
         f"jobs={jobs}",
         f"sm9_workers_per_experiment={sm9_workers}",
+        f"estimated_host_worker_mb={_estimated_parallel_worker_memory_mb(dataset, configs):.0f}",
+        "checkpoint_intervals="
+        + ",".join(
+            str(value)
+            for value in sorted(
+                {_effective_checkpoint_interval(dataset, config) for config in configs}
+            )
+        ),
         "assigned_devices=" + ",".join(assigned_devices),
     ]
     if cuda_devices:
         fields.append("visible_cuda_devices=" + ",".join(cuda_devices))
-        per_worker_mb = _estimated_parallel_worker_memory_mb(dataset, configs)
+        per_worker_mb = _estimated_cuda_worker_memory_mb(dataset, configs)
         usable_devices = cuda_devices_with_capacity(per_worker_mb)
         fields.append("usable_cuda_devices=" + ",".join(usable_devices))
         fields.append(f"estimated_cuda_worker_mb={per_worker_mb:.0f}")
@@ -1222,6 +1416,7 @@ def parallel_executor_kind(backend_description: str, jobs: int) -> str:
 
 
 def _physical_memory_mb() -> float:
+    physical_mb: float | None = None
     if sys.platform == "win32":
         class MEMORYSTATUSEX(ctypes.Structure):
             _fields_ = [
@@ -1239,15 +1434,51 @@ def _physical_memory_mb() -> float:
         status = MEMORYSTATUSEX()
         status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
         if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return status.ullTotalPhys / (1024 * 1024)
-    if hasattr(os, "sysconf"):
+            physical_mb = status.ullTotalPhys / (1024 * 1024)
+    if physical_mb is None and hasattr(os, "sysconf"):
         try:
             pages = os.sysconf("SC_PHYS_PAGES")
             page_size = os.sysconf("SC_PAGE_SIZE")
-            return float(pages * page_size) / (1024 * 1024)
+            physical_mb = float(pages * page_size) / (1024 * 1024)
         except (ValueError, OSError, AttributeError):
             pass
-    return 16 * 1024.0
+    if physical_mb is None:
+        physical_mb = 16 * 1024.0
+    cgroup_limit_mb = _cgroup_memory_limit_mb()
+    return (
+        physical_mb
+        if cgroup_limit_mb is None
+        else min(physical_mb, cgroup_limit_mb)
+    )
+
+
+def _cgroup_memory_limit_mb(
+    paths: tuple[Path, ...] | None = None,
+) -> float | None:
+    """Return a finite Linux cgroup v2/v1 memory limit when one is active."""
+
+    candidates = paths or (
+        Path("/sys/fs/cgroup/memory.max"),
+        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    )
+    limits: list[int] = []
+    for path in candidates:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not raw or raw.lower() == "max":
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        # cgroup v1 uses a near-2^63 sentinel for an unlimited hierarchy.
+        if 0 < value < (1 << 60):
+            limits.append(value)
+    if not limits:
+        return None
+    return min(limits) / (1024 * 1024)
 
 
 def _dataset_memory_mb(dataset) -> float:
@@ -1833,7 +2064,10 @@ def _write_round_checkpoint(
     peak_memory_mb: float,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    # A stable per-target temporary name is safe because one configuration has
+    # one writer.  It also lets a restart truncate/reuse a multi-GiB temporary
+    # file left by an interrupted pickle instead of leaking one file per PID.
+    temporary = path.with_name(f".{path.name}.tmp")
     payload = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "run_fingerprint": run_fingerprint,
@@ -1842,11 +2076,68 @@ def _write_round_checkpoint(
         "peak_memory_mb": peak_memory_mb,
         "state": state,
     }
-    with temporary.open("wb") as handle:
-        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        handle.flush()
-        os.fsync(handle.fileno())
-    _durable_replace(temporary, path)
+    with _CHECKPOINT_WRITE_LOCK:
+        reclaimable_bytes = (
+            temporary.stat().st_size if temporary.exists() else 0
+        )
+        free_bytes = shutil.disk_usage(path.parent).free + reclaimable_bytes
+        required_bytes = _estimated_checkpoint_write_bytes(state)
+        if free_bytes < required_bytes:
+            raise OSError(
+                errno.ENOSPC,
+                "insufficient free space for atomic checkpoint write: "
+                f"required~{required_bytes / (1024**3):.2f} GiB, "
+                f"free={free_bytes / (1024**3):.2f} GiB",
+                str(path),
+            )
+        with temporary.open("wb") as handle:
+            pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _durable_replace(temporary, path)
+
+
+def _estimated_checkpoint_write_bytes(state: dict[str, object]) -> int:
+    """Conservative temporary-file requirement before an atomic replacement."""
+
+    estimate = _unique_numpy_array_bytes(state) + 256 * 1024**2
+    # Pickle metadata, diagnostics and crypto scalar objects retain a fixed plus
+    # proportional margin.  Traversing the full object graph also counts model
+    # updates held in pending audit evidence, not only detector U_q factors.
+    return max(estimate, int(estimate * 1.1))
+
+
+def _unique_numpy_array_bytes(root: object) -> int:
+    """Count unique ndarray storage reachable from a checkpoint object graph."""
+
+    total = 0
+    seen: set[int] = set()
+    stack = [root]
+    scalar_types = (str, bytes, bytearray, int, float, bool, complex, type(None))
+    while stack:
+        value = stack.pop()
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(value, np.ndarray):
+            total += int(value.nbytes)
+            continue
+        if isinstance(value, scalar_types):
+            continue
+        if isinstance(value, dict):
+            stack.extend(value.values())
+            continue
+        if isinstance(value, (list, tuple, set, frozenset, deque)):
+            stack.extend(value)
+            continue
+        if is_dataclass(value) and not isinstance(value, type):
+            stack.extend(getattr(value, item.name) for item in fields(value))
+            continue
+        attributes = getattr(value, "__dict__", None)
+        if isinstance(attributes, dict):
+            stack.extend(attributes.values())
+    return total
 
 
 def run_measured_experiment(
@@ -1884,6 +2175,9 @@ def run_measured_experiment(
         return terminal_result
     latest_completed_round = int(resume_state.get("completed_round", 0)) if resume_state else 0
     latest_state = resume_state
+    last_checkpointed_round = latest_completed_round if resume_state is not None else -1
+    checkpoint_io_seconds = 0.0
+    checkpoint_interval = _effective_checkpoint_interval(dataset, config)
     if resume_state is not None:
         print(
             f"resuming {_format_config_key(config)} "
@@ -1895,16 +2189,30 @@ def run_measured_experiment(
     if checkpoint_path is not None and run_fingerprint is not None:
         def callback(state) -> None:
             nonlocal latest_completed_round, latest_state
+            nonlocal last_checkpointed_round, checkpoint_io_seconds
+            completed_round = int(state["completed_round"])
+            latest_state = state
+            if completed_round == last_checkpointed_round:
+                return
+            if completed_round != 0 and completed_round % checkpoint_interval != 0:
+                return
+            checkpoint_started = perf_counter()
             _write_round_checkpoint(
                 checkpoint_path,
                 config,
                 run_fingerprint,
                 state,
-                runtime_seconds=previous_runtime + perf_counter() - started,
+                runtime_seconds=(
+                    previous_runtime
+                    + perf_counter()
+                    - started
+                    - checkpoint_io_seconds
+                ),
                 peak_memory_mb=max(previous_peak, _peak_rss_mb()),
             )
-            latest_completed_round = int(state["completed_round"])
-            latest_state = state
+            checkpoint_io_seconds += perf_counter() - checkpoint_started
+            latest_completed_round = completed_round
+            last_checkpointed_round = completed_round
 
     try:
         result = run_experiment(
@@ -1927,11 +2235,12 @@ def run_measured_experiment(
             except OSError as record_error:
                 print(f"failed_to_write_error_record={record_error}", file=sys.stderr)
         raise
-    runtime = previous_runtime + perf_counter() - started
+    runtime = previous_runtime + perf_counter() - started - checkpoint_io_seconds
     final_result = replace(
         result,
         runtime_seconds=runtime,
         peak_memory_mb=max(previous_peak, _peak_rss_mb()),
+        checkpoint_io_seconds=checkpoint_io_seconds,
     )
     if (
         retain_success_checkpoint
@@ -1939,8 +2248,13 @@ def run_measured_experiment(
         and run_fingerprint is not None
         and latest_state is not None
     ):
-        terminal_state = dict(latest_state)
-        terminal_state["terminal_result"] = final_result
+        # The loader replays terminal_result directly.  Copying the multi-GiB
+        # detector history into the short-lived two-phase terminal checkpoint
+        # would add a redundant third full-state write on large CIFAR runs.
+        terminal_state = {
+            "completed_round": int(latest_state.get("completed_round", 0)),
+            "terminal_result": final_result,
+        }
         _write_round_checkpoint(
             checkpoint_path,
             config,
@@ -2239,6 +2553,7 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
                     row.get("attack_target_confidence")
                 ),
                 nonfinite_updates=int(row.get("nonfinite_updates") or 0),
+                attack_active=_parse_bool(row.get("attack_active", "False")),
             )
         )
 
@@ -2279,6 +2594,33 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             attack_start_round=int(row["attack_start_round"]),
             detector_window=int(row["detector_window"]),
             z_threshold=float(row["z_threshold"]),
+            checkpoint_interval=int(row.get("checkpoint_interval") or 0),
+            detector_subspace_dim=int(row.get("detector_subspace_dim") or 2),
+            detector_gap_threshold=float(
+                row.get("detector_gap_threshold") or 0.1
+            ),
+            detector_adjacent_threshold=float(
+                row.get("detector_adjacent_threshold")
+                or row.get("z_threshold")
+                or 3.0
+            ),
+            detector_anchor_threshold=float(
+                row.get("detector_anchor_threshold")
+                or row.get("z_threshold")
+                or 3.0
+            ),
+            detector_drift_memory=float(
+                row.get("detector_drift_memory") or 0.9
+            ),
+            detector_drift_allowance=float(
+                row.get("detector_drift_allowance") or 1.0
+            ),
+            detector_drift_threshold=float(
+                row.get("detector_drift_threshold") or 5.0
+            ),
+            detector_decision_rule=(
+                row.get("detector_decision_rule") or "any"
+            ),
             crypto_mode=row["crypto_mode"],
             dkg_threshold=int(row.get("dkg_threshold") or 2),
             dkg_nodes=int(row.get("dkg_nodes") or 3),
@@ -2288,6 +2630,11 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             suspicion_penalty_factor=float(row.get("suspicion_penalty_factor") or 0.5),
             suspicion_recovery_factor=float(row.get("suspicion_recovery_factor") or 2.0),
             suspicion_remove_after=int(row.get("suspicion_remove_after") or 3),
+            suspicion_count_max=int(
+                row.get("suspicion_count_max")
+                or row.get("suspicion_remove_after")
+                or 3
+            ),
             vert_history_window=int(row.get("vert_history_window") or 10),
             vert_projection_dim=int(row.get("vert_projection_dim") or 128),
             vert_predict_epochs=int(row.get("vert_predict_epochs") or 5),
@@ -2335,6 +2682,9 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
                 malicious_clients=tuple(filter(None, row["malicious_clients"].split(","))),
                 blacklisted_clients=tuple(filter(None, row["blacklisted_clients"].split(","))),
                 runtime_seconds=float(row.get("runtime_seconds") or 0.0),
+                checkpoint_io_seconds=float(
+                    row.get("checkpoint_io_seconds") or 0.0
+                ),
                 peak_memory_mb=float(row.get("peak_memory_mb") or 0.0),
                 nonfinite_updates=int(row.get("nonfinite_updates") or 0),
                 stage_timings=StageTimings(

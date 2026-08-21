@@ -31,6 +31,7 @@ class SuspicionWeightManager:
         penalty_factor: float = 0.5,
         recovery_factor: float = 2.0,
         remove_after: int = 3,
+        max_count: int | None = None,
     ) -> None:
         initial = tuple(dict.fromkeys(str(tag) for tag in tag_ids))
         if participant_count is None:
@@ -43,16 +44,20 @@ class SuspicionWeightManager:
             raise ValueError("recovery_factor must be greater than 1")
         if remove_after < 1:
             raise ValueError("remove_after must be positive")
+        if max_count is None:
+            max_count = remove_after
+        if max_count < remove_after:
+            raise ValueError("max_count must be at least remove_after")
         self.participant_count = participant_count
         self.penalty_factor = penalty_factor
         self.recovery_factor = recovery_factor
         self.remove_after = remove_after
+        self.max_count = max_count
         initial_weight = 1.0 / participant_count
         self.weights = {tag: initial_weight for tag in initial}
         # Keep the historical attribute name for checkpoint compatibility.
-        # Values are non-negative integer anomaly-evidence scores:
-        # dual-indicator rounds add one, while fully normal rounds retain the
-        # floor of half the accumulated evidence.
+        # Values are non-negative integer anomaly-evidence scores: a composite
+        # R=1 round adds one up to C_max, while R=0 floor-halves the evidence.
         self.consecutive_suspicions = {tag: 0 for tag in initial}
         self.pending_trace: set[str] = set()
         self.revoked: set[str] = set()
@@ -65,13 +70,10 @@ class SuspicionWeightManager:
     ) -> WeightUpdateResult:
         """Apply the paper's penalty/recovery/count equations for one round.
 
-        ``suspicious_tags`` contains tags for which either Z-Score exceeded
-        ``theta`` and therefore controls dynamic downweighting.
-        ``count_increment_tags`` is the stricter subset for which both
-        Z-Scores exceeded ``theta`` in the same round.  Such a round adds one
-        to ``Count_pi``; a fully normal round replaces ``Count_pi`` with
-        ``floor(Count_pi / 2)``; a single-indicator suspicious round leaves it
-        unchanged.
+        The third scheme revision has one composite decision ``R_pi``.
+        Consequently ``suspicious_tags`` and ``count_increment_tags`` must be
+        identical: R=1 both downweights and increments ``Count_pi``; R=0 both
+        recovers the weight and replaces Count with ``floor(Count / 2)``.
         """
 
         active = list(dict.fromkeys(active_tags))
@@ -83,8 +85,10 @@ class SuspicionWeightManager:
                 set(),
                 set(),
             )
-        if not count_increment_tags.issubset(suspicious_tags):
-            raise ValueError("count_increment_tags must be a subset of suspicious_tags")
+        if count_increment_tags != suspicious_tags:
+            raise ValueError(
+                "count_increment_tags must equal suspicious_tags for composite R"
+            )
         uniform_weight = 1.0 / len(active)
         trace_requested: set[str] = set()
 
@@ -104,12 +108,14 @@ class SuspicionWeightManager:
                     )
 
             if tag in count_increment_tags:
-                self.consecutive_suspicions[tag] += 1
-            elif tag not in suspicious_tags:
-                # A fully normal round weakens rather than erases historical
-                # anomaly evidence.  Single-indicator suspicious rounds are
-                # not normal, so they neither add dual-indicator evidence nor
-                # decay the existing score.
+                self.consecutive_suspicions[tag] = min(
+                    self.max_count,
+                    self.consecutive_suspicions[tag] + 1,
+                )
+            else:
+                # A normal round weakens rather than erases historical anomaly
+                # evidence, preventing one benign-looking update from clearing
+                # a persistent attack trajectory.
                 self.consecutive_suspicions[tag] //= 2
 
             if self.consecutive_suspicions[tag] >= self.remove_after:

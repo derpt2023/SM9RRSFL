@@ -28,6 +28,7 @@ from .experiments import (
     ProgressReporter,
     _cuda_capacity_error,
     _estimated_parallel_worker_memory_mb,
+    _estimated_cuda_worker_memory_mb,
     assign_auto_cuda_devices,
     available_cuda_devices,
     build_run_manifest,
@@ -64,9 +65,17 @@ METHOD_TUNABLE_PARAMETERS = {
         {
             "detector_window",
             "z_threshold",
+            "detector_subspace_dim",
+            "detector_gap_threshold",
+            "detector_adjacent_threshold",
+            "detector_anchor_threshold",
+            "detector_drift_memory",
+            "detector_drift_allowance",
+            "detector_drift_threshold",
             "suspicion_penalty_factor",
             "suspicion_recovery_factor",
             "suspicion_remove_after",
+            "suspicion_count_max",
         }
     ),
     "vert": frozenset(
@@ -318,6 +327,27 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
             raise FairTuningError(
                 f"{method} must declare a non-empty defense-parameter search space"
             )
+        if method == "sm9rrs" and "detector_window" in space:
+            window_values = space["detector_window"]
+            if not isinstance(window_values, list) or not window_values:
+                raise FairTuningError(
+                    "method_spaces.sm9rrs.detector_window must be a non-empty array"
+                )
+            try:
+                max_window = max(int(value) for value in window_values)
+            except (TypeError, ValueError) as exc:
+                raise FairTuningError(
+                    "detector_window candidates must be integers"
+                ) from exc
+            if args.attack_start_round == 0:
+                raise FairTuningError(
+                    "tuning detector_window requires an explicit shared "
+                    "attack_start_round so every candidate is attacked from the same round"
+                )
+            if args.attack_start_round < max_window + 2:
+                raise FairTuningError(
+                    "shared attack_start_round must be at least max(detector_window) + 2"
+                )
         method_candidates = tuple(_grid_candidates(space, method))
         if METHOD_TUNABLE_PARAMETERS[method] and len(method_candidates) != budget:
             raise FairTuningError(
@@ -589,7 +619,7 @@ def prepare_tuning_tasks(
         )
     configs = [replace(task.config, sm9_workers=sm9_workers) for task in tasks]
     if spread_cuda_devices:
-        estimated_worker_mb = _estimated_parallel_worker_memory_mb(dataset, configs)
+        estimated_worker_mb = _estimated_cuda_worker_memory_mb(dataset, configs)
         usable_cuda_devices = (
             cuda_devices_with_capacity(estimated_worker_mb)
             if backend_description == "torch:cuda"

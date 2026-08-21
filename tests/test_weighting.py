@@ -36,10 +36,16 @@ class SuspicionWeightManagerTest(unittest.TestCase):
             recovery_factor=2.0,
             remove_after=3,
         )
-        penalized = manager.update(["tag-0", "tag-1"], {"tag-0"}, set())
+        penalized = manager.update(
+            ["tag-0", "tag-1"],
+            {"tag-0"},
+            {"tag-0"},
+        )
         self.assertLess(penalized.weights["tag-0"], 0.5)
+        self.assertEqual(manager.consecutive_suspicions["tag-0"], 1)
         recovered = manager.update(["tag-0", "tag-1"], set(), set())
         self.assertGreaterEqual(recovered.weights["tag-0"], penalized.weights["tag-0"])
+        self.assertEqual(manager.consecutive_suspicions["tag-0"], 0)
 
     def test_ctol_trigger_is_zero_but_not_revoked_before_certificate(self):
         manager = SuspicionWeightManager(["tag-0", "tag-1"], remove_after=1)
@@ -50,40 +56,38 @@ class SuspicionWeightManagerTest(unittest.TestCase):
         self.assertIn("tag-0", manager.pending_trace)
         self.assertAlmostEqual(sum(manager.weights.values()), 1.0)
 
-    def test_single_indicator_suspicion_downweights_without_advancing_count(self):
+    def test_composite_r_downweights_and_advances_count(self):
         manager = SuspicionWeightManager(
             ["tag-0", "tag-1"],
             penalty_factor=0.5,
-            remove_after=2,
+            remove_after=3,
         )
 
-        for _ in range(3):
-            result = manager.update(["tag-0", "tag-1"], {"tag-0"}, set())
+        result = manager.update(
+            ["tag-0", "tag-1"],
+            {"tag-0"},
+            {"tag-0"},
+        )
 
         self.assertLess(result.weights["tag-0"], result.weights["tag-1"])
-        self.assertEqual(manager.consecutive_suspicions["tag-0"], 0)
+        self.assertEqual(manager.consecutive_suspicions["tag-0"], 1)
+        self.assertEqual(result.suspicious_tags, {"tag-0"})
+        self.assertEqual(result.count_increment_tags, {"tag-0"})
         self.assertEqual(result.trace_requested_tags, set())
         self.assertEqual(manager.pending_trace, set())
 
-    def test_single_indicator_round_preserves_dual_indicator_evidence(self):
+    def test_composite_r_sets_must_be_identical(self):
         manager = SuspicionWeightManager(
             ["tag-0", "tag-1"],
             remove_after=2,
         )
 
-        first = manager.update(["tag-0", "tag-1"], {"tag-0"}, {"tag-0"})
-        self.assertEqual(first.trace_requested_tags, set())
-        self.assertEqual(manager.consecutive_suspicions["tag-0"], 1)
+        with self.assertRaisesRegex(ValueError, "must equal"):
+            manager.update(["tag-0", "tag-1"], {"tag-0"}, set())
+        with self.assertRaisesRegex(ValueError, "must equal"):
+            manager.update(["tag-0", "tag-1"], set(), {"tag-0"})
 
-        single = manager.update(["tag-0", "tag-1"], {"tag-0"}, set())
-        self.assertEqual(single.trace_requested_tags, set())
-        self.assertEqual(manager.consecutive_suspicions["tag-0"], 1)
-
-        third = manager.update(["tag-0", "tag-1"], {"tag-0"}, {"tag-0"})
-        self.assertEqual(third.trace_requested_tags, {"tag-0"})
-        self.assertEqual(manager.consecutive_suspicions["tag-0"], 2)
-
-    def test_fully_normal_round_floor_halves_dual_indicator_evidence(self):
+    def test_fully_normal_round_floor_halves_composite_anomaly_evidence(self):
         manager = SuspicionWeightManager(
             ["tag-0", "tag-1"],
             remove_after=6,
@@ -102,11 +106,21 @@ class SuspicionWeightManagerTest(unittest.TestCase):
         manager.update(["tag-0", "tag-1"], set(), set())
         self.assertEqual(manager.consecutive_suspicions["tag-0"], 0)
 
-    def test_count_increment_tags_must_be_suspicious(self):
-        manager = SuspicionWeightManager(["tag-0", "tag-1"])
+    def test_composite_count_is_capped_at_cmax(self):
+        manager = SuspicionWeightManager(
+            ["tag-0", "tag-1"],
+            remove_after=2,
+            max_count=3,
+        )
 
-        with self.assertRaisesRegex(ValueError, "subset"):
-            manager.update(["tag-0", "tag-1"], set(), {"tag-0"})
+        for _ in range(5):
+            manager.update(
+                ["tag-0", "tag-1"],
+                {"tag-0"},
+                {"tag-0"},
+            )
+
+        self.assertEqual(manager.consecutive_suspicions["tag-0"], 3)
 
 if __name__ == "__main__":
     unittest.main()

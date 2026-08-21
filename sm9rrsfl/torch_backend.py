@@ -838,6 +838,70 @@ def torch_top_singular_feature(matrix: np.ndarray, *, device: str = "auto") -> t
     return sigma, u0
 
 
+def torch_top_singular_subspace(
+    matrix: np.ndarray,
+    *,
+    rank: int,
+    device: str = "auto",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return true singular values and a compact top-left-subspace basis.
+
+    The detector only needs ``rank + 1`` singular values and the first
+    ``rank`` left singular vectors.  Computing the eigendecomposition of the
+    small column Gram matrix avoids materializing the full left-singular
+    matrix for the tall ``ceil(d / c) x c`` update matrix.
+    """
+
+    torch = _torch_module()
+    torch_device = _resolve_device(torch, device)
+    matrix_np = np.asarray(matrix, dtype=np.float32)
+    if matrix_np.ndim != 2:
+        raise ValueError("SVD input must be a two-dimensional matrix")
+    if getattr(torch_device, "type", None) == "mps":
+        return _numpy_top_singular_subspace(matrix_np, rank=rank)
+    if rank < 1 or rank >= min(matrix_np.shape):
+        raise ValueError("rank must be in [1, min(matrix.shape) - 1]")
+    tensor = torch.as_tensor(matrix_np, dtype=torch.float32, device=torch_device)
+    if not bool(torch.isfinite(tensor).all().detach().cpu().item()):
+        raise ValueError("SVD input contains NaN or infinity")
+    scale = float(torch.amax(torch.abs(tensor)).detach().cpu().item())
+    if scale == 0.0:
+        return _zero_singular_subspace(matrix_np.shape, rank)
+    scaled = tensor / scale
+    try:
+        gram = scaled.transpose(0, 1).matmul(scaled)
+        eigenvalues, right = torch.linalg.eigh(gram)
+        order = torch.argsort(eigenvalues, descending=True)
+        eigenvalues = torch.clamp(eigenvalues.index_select(0, order), min=0.0)
+        right = right.index_select(1, order)
+        singular_scaled = torch.sqrt(eigenvalues)
+        # Rank-deficient directions are not uniquely defined.  The CPU helper
+        # supplies a deterministic orthonormal completion for that rare case.
+        tolerance = torch.finfo(scaled.dtype).eps * max(matrix_np.shape)
+        if float(singular_scaled[rank - 1].detach().cpu().item()) <= tolerance:
+            return _numpy_top_singular_subspace(matrix_np, rank=rank)
+        basis = scaled.matmul(right[:, :rank]) / singular_scaled[:rank]
+        basis, _ = torch.linalg.qr(basis, mode="reduced")
+    except (NotImplementedError, RuntimeError):
+        return _numpy_top_singular_subspace(matrix_np, rank=rank)
+
+    count = min(rank + 1, int(singular_scaled.numel()))
+    singular_values = np.zeros(rank + 1, dtype=np.float64)
+    singular_values[:count] = (
+        singular_scaled[:count].detach().cpu().numpy().astype(np.float64) * scale
+    )
+    singular_values = np.nan_to_num(
+        singular_values,
+        nan=0.0,
+        posinf=float(np.finfo(np.float32).max),
+        neginf=0.0,
+    )
+    return (
+        singular_values,
+        basis.detach().cpu().numpy().astype(np.float32),
+    )
+
+
 def torch_singular_values_from_gram(matrix, *, device: str = "auto") -> np.ndarray:
     torch = _torch_module()
     torch_device = _resolve_device(torch, device)
@@ -918,6 +982,16 @@ def numpy_top_singular_feature(matrix: np.ndarray) -> tuple[float, np.ndarray]:
     return _numpy_top_singular_feature(matrix)
 
 
+def numpy_top_singular_subspace(
+    matrix: np.ndarray,
+    *,
+    rank: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stable CPU counterpart of :func:`torch_top_singular_subspace`."""
+
+    return _numpy_top_singular_subspace(matrix, rank=rank)
+
+
 def numpy_singular_values_from_gram(matrix: np.ndarray) -> np.ndarray:
     """公开稳定 CPU 实现，返回与 Gram 矩阵 SVD 相同的奇异值。"""
 
@@ -936,6 +1010,102 @@ def _scaled_finite_matrix(matrix: np.ndarray) -> tuple[np.ndarray, float]:
     if scale == 0.0:
         return array, 0.0
     return array / scale, scale
+
+
+def _numpy_top_singular_subspace(
+    matrix: np.ndarray,
+    *,
+    rank: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    scaled, scale = _scaled_finite_matrix(matrix)
+    if rank < 1 or rank >= min(scaled.shape):
+        raise ValueError("rank must be in [1, min(matrix.shape) - 1]")
+    if scale == 0.0:
+        return _zero_singular_subspace(scaled.shape, rank)
+
+    try:
+        gram = scaled.T @ scaled
+        eigenvalues, right = np.linalg.eigh(gram)
+        order = np.argsort(eigenvalues)[::-1]
+        eigenvalues = np.maximum(eigenvalues[order], 0.0)
+        right = right[:, order]
+        singular_scaled = np.sqrt(eigenvalues)
+        basis = _left_basis_from_right(
+            scaled,
+            right[:, :rank],
+            singular_scaled[:rank],
+            rank=rank,
+        )
+    except np.linalg.LinAlgError:
+        # SVD is a slower but independent LAPACK path; if it also fails the
+        # caller receives the original numerical error rather than a silently
+        # fabricated trajectory feature.
+        u, singular_scaled, _ = np.linalg.svd(scaled, full_matrices=False)
+        basis = np.asarray(u[:, :rank], dtype=np.float64)
+
+    count = min(rank + 1, len(singular_scaled))
+    singular_values = np.zeros(rank + 1, dtype=np.float64)
+    singular_values[:count] = np.asarray(singular_scaled[:count]) * scale
+    singular_values = np.nan_to_num(
+        singular_values,
+        nan=0.0,
+        posinf=float(np.finfo(np.float32).max),
+        neginf=0.0,
+    )
+    return singular_values, np.asarray(basis, dtype=np.float32)
+
+
+def _left_basis_from_right(
+    matrix: np.ndarray,
+    right: np.ndarray,
+    singular_values: np.ndarray,
+    *,
+    rank: int,
+) -> np.ndarray:
+    """Build a deterministic orthonormal left basis, including null modes."""
+
+    rows = matrix.shape[0]
+    basis = np.zeros((rows, rank), dtype=np.float64)
+    tolerance = np.finfo(np.float64).eps * max(matrix.shape)
+    for index in range(rank):
+        if singular_values[index] > tolerance:
+            candidate = matrix @ right[:, index] / singular_values[index]
+        else:
+            candidate = np.zeros(rows, dtype=np.float64)
+        for previous in range(index):
+            candidate -= np.dot(basis[:, previous], candidate) * basis[:, previous]
+        norm = float(np.linalg.norm(candidate))
+        if norm <= tolerance:
+            candidate = _orthogonal_canonical_vector(basis[:, :index], tolerance)
+            norm = float(np.linalg.norm(candidate))
+        basis[:, index] = candidate / norm
+    return basis
+
+
+def _orthogonal_canonical_vector(existing: np.ndarray, tolerance: float) -> np.ndarray:
+    rows = existing.shape[0]
+    for index in range(rows):
+        candidate = np.zeros(rows, dtype=np.float64)
+        candidate[index] = 1.0
+        if existing.size:
+            candidate -= existing @ (existing.T @ candidate)
+        norm = float(np.linalg.norm(candidate))
+        if norm > tolerance:
+            return candidate / norm
+    raise np.linalg.LinAlgError("could not construct an orthogonal SVD basis")
+
+
+def _zero_singular_subspace(
+    shape: tuple[int, int],
+    rank: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    rows, columns = shape
+    if rank < 1 or rank >= min(rows, columns):
+        raise ValueError("rank must be in [1, min(matrix.shape) - 1]")
+    basis = np.zeros((rows, rank), dtype=np.float32)
+    for index in range(rank):
+        basis[index, index] = 1.0
+    return np.zeros(rank + 1, dtype=np.float64), basis
 
 
 def _power_top_singular_feature(matrix: np.ndarray) -> tuple[float, np.ndarray]:

@@ -60,15 +60,25 @@ class ExperimentConfig:
     attack_start_round: int = 0
     detector_window: int = 3
     z_threshold: float = 3.0
+    detector_subspace_dim: int = 2
+    detector_gap_threshold: float = 0.1
+    detector_adjacent_threshold: float | None = None
+    detector_anchor_threshold: float | None = None
+    detector_drift_memory: float = 0.9
+    detector_drift_allowance: float = 1.0
+    detector_drift_threshold: float = 5.0
+    detector_decision_rule: str = "any"
     crypto_mode: str = "sm9"
     dkg_threshold: int = 2
     dkg_nodes: int = 3
     early_stop: bool = True
     eval_interval: int = 1
+    checkpoint_interval: int = 0
     sm9_workers: int = 1
     suspicion_penalty_factor: float = 0.5
     suspicion_recovery_factor: float = 2.0
     suspicion_remove_after: int = 3
+    suspicion_count_max: int = 0
     vert_history_window: int = 10
     vert_projection_dim: int = 128
     vert_predict_epochs: int = 5
@@ -103,6 +113,7 @@ class RoundRecord:
     attack_target_success_rate: float | None = None
     attack_target_confidence: float | None = None
     nonfinite_updates: int = 0
+    attack_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -130,6 +141,24 @@ class ClientDiagnosticRecord:
     trace_requested: bool
     trace_pending: bool
     revoked: bool
+    spectrum_adjacent_distance: float
+    subspace_adjacent_distance: float
+    spectrum_anchor_distance: float
+    subspace_anchor_distance: float
+    z_spectrum_adjacent: float
+    z_subspace_adjacent: float
+    z_spectrum_anchor: float
+    z_subspace_anchor: float
+    adjacent_score: float
+    anchor_score: float
+    cumulative_drift: float
+    spectral_gap: float
+    direction_reliability: float
+    adjacent_exceeded: bool
+    anchor_exceeded: bool
+    drift_exceeded: bool
+    trusted_history_size: int
+    attack_active: bool
 
 
 @dataclass(frozen=True)
@@ -186,6 +215,7 @@ class ExperimentResult:
     peak_memory_mb: float = 0.0
     stage_timings: StageTimings = field(default_factory=StageTimings)
     nonfinite_updates: int = 0
+    checkpoint_io_seconds: float = 0.0
 
     @property
     def runtime_without_crypto_seconds(self) -> float:
@@ -210,10 +240,14 @@ class ExperimentResult:
                 else None
             ),
             "stopped_round": self.stopped_round,
+            "effective_attack_start_round": (
+                self.config.attack_start_round or self.config.detector_window + 2
+            ),
             "malicious_clients": ",".join(self.malicious_clients),
             "blacklisted_clients": ",".join(self.blacklisted_clients),
             "runtime_seconds": self.runtime_seconds,
             "runtime_without_crypto_seconds": self.runtime_without_crypto_seconds,
+            "checkpoint_io_seconds": self.checkpoint_io_seconds,
             "nonfinite_updates": self.nonfinite_updates,
             "peak_memory_mb": self.peak_memory_mb,
             **self.stage_timings.summary_dict(),
@@ -345,6 +379,55 @@ def run_experiment(
         )
     if config.attack_start_round < 0:
         raise ValueError("attack_start_round must be non-negative")
+    if config.detector_window < 2:
+        raise ValueError("detector_window must be at least 2")
+    if not np.isfinite(config.z_threshold) or config.z_threshold <= 0.0:
+        raise ValueError("z_threshold must be finite and positive")
+    if config.detector_subspace_dim < 1:
+        raise ValueError("detector_subspace_dim must be at least 1")
+    if config.detector_subspace_dim >= dataset.num_classes:
+        raise ValueError(
+            "detector_subspace_dim must leave room for the q+1 singular value"
+        )
+    if (
+        not np.isfinite(config.detector_gap_threshold)
+        or config.detector_gap_threshold <= 0.0
+    ):
+        raise ValueError("detector_gap_threshold must be finite and positive")
+    for name, value in {
+        "detector_adjacent_threshold": config.detector_adjacent_threshold,
+        "detector_anchor_threshold": config.detector_anchor_threshold,
+    }.items():
+        if value is not None and (not np.isfinite(value) or value <= 0.0):
+            raise ValueError(f"{name} must be finite and positive")
+    if (
+        not np.isfinite(config.detector_drift_memory)
+        or not 0.0 < config.detector_drift_memory <= 1.0
+    ):
+        raise ValueError("detector_drift_memory must be in (0, 1]")
+    for name, value in {
+        "detector_drift_allowance": config.detector_drift_allowance,
+        "detector_drift_threshold": config.detector_drift_threshold,
+    }.items():
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
+    if config.detector_decision_rule != "any":
+        raise ValueError(
+            "detector_decision_rule must be 'any' (the v3 OR formula)"
+        )
+    if config.checkpoint_interval < 0:
+        raise ValueError("checkpoint_interval must be non-negative")
+    if not 0.0 < config.suspicion_penalty_factor < 1.0:
+        raise ValueError("suspicion_penalty_factor must be in (0, 1)")
+    if config.suspicion_recovery_factor <= 1.0:
+        raise ValueError("suspicion_recovery_factor must be greater than 1")
+    if config.suspicion_remove_after < 1:
+        raise ValueError("suspicion_remove_after must be at least 1")
+    if (
+        config.suspicion_count_max != 0
+        and config.suspicion_count_max < config.suspicion_remove_after
+    ):
+        raise ValueError("suspicion_count_max must be 0 or at least C_tol")
     if config.vert_history_window < 2:
         raise ValueError("vert_history_window must be at least 2")
     if config.vert_projection_dim < 2:
@@ -397,6 +480,17 @@ def run_experiment(
         dataset,
         config,
     )
+    adjacent_threshold = (
+        z_threshold
+        if config.detector_adjacent_threshold is None
+        else config.detector_adjacent_threshold
+    )
+    anchor_threshold = (
+        z_threshold
+        if config.detector_anchor_threshold is None
+        else config.detector_anchor_threshold
+    )
+    suspicion_count_max = config.suspicion_count_max or suspicion_remove_after
     attack_start = config.attack_start_round or (detector_window + 2)
 
     model_spec = model_spec_for_dataset(dataset)
@@ -533,6 +627,14 @@ def run_experiment(
         detector = LongitudinalSVDDetector(
             window_size=detector_window,
             z_threshold=z_threshold,
+            subspace_dim=config.detector_subspace_dim,
+            gap_threshold=config.detector_gap_threshold,
+            adjacent_threshold=adjacent_threshold,
+            anchor_threshold=anchor_threshold,
+            drift_memory=config.detector_drift_memory,
+            drift_allowance=config.detector_drift_allowance,
+            drift_threshold=config.detector_drift_threshold,
+            decision_rule=config.detector_decision_rule,
             num_classes=model_spec.num_classes,
             expected_update_size=model_spec.parameter_size,
             compute_backend=config.compute_backend,
@@ -543,6 +645,7 @@ def run_experiment(
             penalty_factor=config.suspicion_penalty_factor,
             recovery_factor=config.suspicion_recovery_factor,
             remove_after=suspicion_remove_after,
+            max_count=suspicion_count_max,
         )
     elif config.method == "ding13":
         ding13_detector = Ding13TrajectoryDetector(
@@ -606,6 +709,7 @@ def run_experiment(
             crypto is not None
             and as_verifier is not None
             and auditor is not None
+            and detector is not None
             and sm9_weight_manager is not None
         )
         # A failed audit is checkpointed with its complete immutable evidence.
@@ -631,6 +735,7 @@ def run_experiment(
                     "a restored SM9-RRS audit is still unresolved; task remains active"
                 ) from exc
             sm9_weight_manager.confirm_revocation(tag)
+            detector.forget(tag)
             blacklisted.add(trace_result.identity)
             if trace_result.identity in malicious_set:
                 true_positive_revocations += 1
@@ -886,6 +991,7 @@ def run_experiment(
                         unresolved_audit_error = exc
                         continue
                     sm9_weight_manager.confirm_revocation(tag)
+                    detector.forget(tag)
                     accepted_trace_identities.add(trace_result.identity)
                     blacklisted.add(trace_result.identity)
                     if trace_result.identity in malicious_set:
@@ -921,6 +1027,21 @@ def run_experiment(
                     z_direction = float(
                         getattr(decision, "z_direction", 0.0)
                     )
+                    z_spectrum_adjacent = float(
+                        getattr(decision, "z_spectrum_adjacent", 0.0)
+                    )
+                    z_subspace_adjacent = float(
+                        getattr(decision, "z_subspace_adjacent", 0.0)
+                    )
+                    z_spectrum_anchor = float(
+                        getattr(decision, "z_spectrum_anchor", 0.0)
+                    )
+                    z_subspace_anchor = float(
+                        getattr(decision, "z_subspace_anchor", 0.0)
+                    )
+                    direction_reliability = float(
+                        getattr(decision, "direction_reliability", 0.0)
+                    )
                     diagnostics.append(
                         ClientDiagnosticRecord(
                             round=round_id,
@@ -938,8 +1059,16 @@ def run_experiment(
                             cosine_similarity=float(
                                 getattr(decision, "cosine_similarity", 0.0)
                             ),
-                            sigma_exceeded=z_sigma > z_threshold,
-                            direction_exceeded=z_direction > z_threshold,
+                            sigma_exceeded=(
+                                z_spectrum_adjacent > adjacent_threshold
+                                or z_spectrum_anchor > anchor_threshold
+                            ),
+                            direction_exceeded=(
+                                direction_reliability * z_subspace_adjacent
+                                > adjacent_threshold
+                                or direction_reliability * z_subspace_anchor
+                                > anchor_threshold
+                            ),
                             suspicious=tag in suspicious_tags,
                             count_increment=tag in count_increment_tags,
                             weight_before=float(weight_before_by_tag[tag]),
@@ -958,6 +1087,68 @@ def run_experiment(
                             ),
                             trace_pending=tag in sm9_weight_manager.pending_trace,
                             revoked=tag in sm9_weight_manager.revoked,
+                            spectrum_adjacent_distance=float(
+                                getattr(
+                                    decision,
+                                    "spectrum_adjacent_distance",
+                                    0.0,
+                                )
+                            ),
+                            subspace_adjacent_distance=float(
+                                getattr(
+                                    decision,
+                                    "subspace_adjacent_distance",
+                                    0.0,
+                                )
+                            ),
+                            spectrum_anchor_distance=float(
+                                getattr(
+                                    decision,
+                                    "spectrum_anchor_distance",
+                                    0.0,
+                                )
+                            ),
+                            subspace_anchor_distance=float(
+                                getattr(
+                                    decision,
+                                    "subspace_anchor_distance",
+                                    0.0,
+                                )
+                            ),
+                            z_spectrum_adjacent=z_spectrum_adjacent,
+                            z_subspace_adjacent=z_subspace_adjacent,
+                            z_spectrum_anchor=z_spectrum_anchor,
+                            z_subspace_anchor=z_subspace_anchor,
+                            adjacent_score=float(
+                                getattr(decision, "adjacent_score", 0.0)
+                            ),
+                            anchor_score=float(
+                                getattr(decision, "anchor_score", 0.0)
+                            ),
+                            cumulative_drift=float(
+                                getattr(decision, "cumulative_drift", 0.0)
+                            ),
+                            spectral_gap=float(
+                                getattr(decision, "spectral_gap", 0.0)
+                            ),
+                            direction_reliability=direction_reliability,
+                            adjacent_exceeded=bool(
+                                getattr(decision, "adjacent_exceeded", False)
+                            ),
+                            anchor_exceeded=bool(
+                                getattr(decision, "anchor_exceeded", False)
+                            ),
+                            drift_exceeded=bool(
+                                getattr(decision, "drift_exceeded", False)
+                            ),
+                            trusted_history_size=int(
+                                getattr(decision, "trusted_history_size", 0)
+                            ),
+                            attack_active=(
+                                identity in malicious_set
+                                and round_id >= attack_start
+                                and config.attack != "none"
+                            ),
                         )
                     )
 
@@ -1372,7 +1563,11 @@ def _process_sm9_candidates(
             continue
         detection_started = perf_counter()
         try:
-            decision = detector.evaluate(tag, candidate.cpu_delta)
+            decision = detector.evaluate(
+                tag,
+                candidate.cpu_delta,
+                round_id=round_id,
+            )
         except (TypeError, ValueError):
             # A correctly signed but schema-invalid model vector is not a
             # valid G_pi^(r); reject it without mutating the tag trajectory.
@@ -1883,4 +2078,9 @@ def _make_record(
             else None
         ),
         nonfinite_updates=nonfinite_updates,
+        attack_active=(
+            config.malicious_ratio > 0.0
+            and config.attack != "none"
+            and round_id >= (config.attack_start_round or config.detector_window + 2)
+        ),
     )

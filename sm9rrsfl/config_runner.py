@@ -31,6 +31,15 @@ PARAMETER_ALIASES = {
     "k": "detector_window",
     "C_tol": "suspicion_remove_after",
     "c_tol": "suspicion_remove_after",
+    "q": "detector_subspace_dim",
+    "g0": "detector_gap_threshold",
+    "theta_adj": "detector_adjacent_threshold",
+    "theta_anc": "detector_anchor_threshold",
+    "beta": "detector_drift_memory",
+    "kappa": "detector_drift_allowance",
+    "h": "detector_drift_threshold",
+    "C_max": "suspicion_count_max",
+    "c_max": "suspicion_count_max",
 }
 
 
@@ -199,6 +208,36 @@ def main(
         print(
             "resolved_parameters="
             + json.dumps(resolved, ensure_ascii=False, sort_keys=True),
+            flush=True,
+        )
+        effective_detector = {
+            "detector_adjacent_threshold": (
+                resolved_args.z_threshold
+                if resolved_args.detector_adjacent_threshold is None
+                else resolved_args.detector_adjacent_threshold
+            ),
+            "detector_anchor_threshold": (
+                resolved_args.z_threshold
+                if resolved_args.detector_anchor_threshold is None
+                else resolved_args.detector_anchor_threshold
+            ),
+            "suspicion_count_max": (
+                resolved_args.suspicion_remove_after
+                if resolved_args.suspicion_count_max == 0
+                else resolved_args.suspicion_count_max
+            ),
+            "effective_attack_start_round": (
+                resolved_args.attack_start_round
+                or resolved_args.detector_window + 2
+            ),
+        }
+        print(
+            "effective_detector_parameters="
+            + json.dumps(
+                effective_detector,
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
             flush=True,
         )
         return

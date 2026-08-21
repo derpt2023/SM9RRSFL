@@ -3,16 +3,30 @@ import csv
 import io
 import json
 import os
+import pickle
 import tempfile
 from threading import Event
 import unittest
+from dataclasses import asdict, replace
 from pathlib import Path
+from time import perf_counter, sleep
 from unittest import mock
 
+import numpy as np
+
 from sm9rrsfl.experiments import (
+    CHECKPOINT_SCHEMA_VERSION,
     ProgressReporter,
     _cuda_memory_parallel_limit,
     _format_duration,
+    _checkpoint_path,
+    _cgroup_memory_limit_mb,
+    _effective_checkpoint_interval,
+    _estimated_cuda_worker_memory_mb,
+    _estimated_parallel_worker_memory_mb,
+    _estimated_checkpoint_write_bytes,
+    _load_round_checkpoint,
+    _write_round_checkpoint,
     _manifests_differ_only_by_indexed_cuda_device,
     assign_auto_cuda_devices,
     build_experiment_configs,
@@ -31,14 +45,16 @@ from sm9rrsfl.experiments import (
     run_measured_experiment,
     write_result_files,
 )
-from sm9rrsfl.datasets import make_synthetic_mnist_like
+from sm9rrsfl.datasets import ImageDataset, make_synthetic_mnist_like
 from sm9rrsfl.fl import (
     ExperimentConfig,
     StageTimings,
+    _make_record,
     experiment_config_error,
     malicious_client_count,
     run_experiment,
 )
+from sm9rrsfl.svd_detector import LongitudinalSVDDetector
 
 
 class ExperimentOutputDirTest(unittest.TestCase):
@@ -157,11 +173,55 @@ class ExperimentOutputDirTest(unittest.TestCase):
             self.assertEqual(first.records, replayed.records)
             self.assertEqual(len(list(checkpoint_dir.glob("*.pickle"))), 0)
 
+    def test_checkpoint_interval_writes_only_durable_rounds_and_compact_terminal(self):
+        dataset = make_synthetic_mnist_like(train_samples=40, test_samples=10, seed=19)
+        config = ExperimentConfig(
+            method="fedavg",
+            num_clients=2,
+            rounds=4,
+            checkpoint_interval=3,
+            early_stop=False,
+            seed=19,
+        )
+        written_states = []
+
+        def delayed_write(_path, _config, _fingerprint, state, **_kwargs):
+            written_states.append(state)
+            sleep(0.02)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "sm9rrsfl.experiments._write_round_checkpoint",
+            side_effect=delayed_write,
+        ):
+            started = perf_counter()
+            result = run_measured_experiment(
+                dataset,
+                config,
+                checkpoint_dir=Path(tmp) / ".checkpoints",
+                run_fingerprint="interval-test",
+                retain_success_checkpoint=True,
+            )
+            elapsed = perf_counter() - started
+
+        self.assertEqual(
+            [state["completed_round"] for state in written_states],
+            [0, 3, 4],
+        )
+        self.assertIn("params", written_states[0])
+        self.assertIn("params", written_states[1])
+        self.assertEqual(
+            set(written_states[2]),
+            {"completed_round", "terminal_result"},
+        )
+        self.assertGreaterEqual(result.checkpoint_io_seconds, 0.035)
+        self.assertLess(result.runtime_seconds, elapsed - 0.035)
+
     def test_invalid_numeric_arguments_fail_during_preflight(self):
         invalid_commands = (
             ["--ratios", "1.0"],
             ["--client-counts", "0"],
             ["--rounds", "0"],
+            ["--checkpoint-interval", "-1"],
             ["--batch-size", "0"],
             ["--lr", "0"],
             ["--dirichlet-alpha", "0"],
@@ -183,7 +243,26 @@ class ExperimentOutputDirTest(unittest.TestCase):
             ],
             ["--attack-start-round", "-1"],
             ["--K", "1"],
+            ["--detector-subspace-dim", "0"],
+            ["--detector-subspace-dim", "10"],
+            ["--detector-gap-threshold", "0"],
+            ["--detector-adjacent-threshold", "0"],
+            ["--detector-anchor-threshold", "0"],
+            ["--detector-drift-memory", "0"],
+            ["--detector-drift-memory", "1.01"],
+            ["--detector-drift-allowance", "0"],
+            ["--detector-drift-threshold", "0"],
             ["--C_tol", "0"],
+            ["--C_tol", "3", "--C_max", "2"],
+            ["--suspicion-penalty-factor", "0"],
+            ["--suspicion-penalty-factor", "1"],
+            ["--suspicion-recovery-factor", "1"],
+            [
+                "--z-threshold",
+                "3",
+                "--detector-adjacent-threshold",
+                "3",
+            ],
             ["--vert-history-window", "1"],
             ["--vert-projection-dim", "1"],
             ["--vert-predict-epochs", "0"],
@@ -444,23 +523,136 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(args.sm9_workers, 3)
 
     def test_paper_k_and_c_tol_cli_names_map_to_internal_config_fields(self):
-        args = parse_args(["--K", "10", "--C_tol", "6"])
+        args = parse_args(
+            [
+                "--K",
+                "10",
+                "--detector-subspace-dim",
+                "2",
+                "--detector-gap-threshold",
+                "0.15",
+                "--detector-adjacent-threshold",
+                "2.5",
+                "--detector-anchor-threshold",
+                "3.5",
+                "--detector-drift-memory",
+                "0.8",
+                "--detector-drift-allowance",
+                "0.75",
+                "--detector-drift-threshold",
+                "4.5",
+                "--detector-decision-rule",
+                "any",
+                "--C_tol",
+                "6",
+                "--C_max",
+                "8",
+            ]
+        )
         config = build_experiment_configs(args)[0]
 
         self.assertEqual(args.detector_window, 10)
         self.assertEqual(args.suspicion_remove_after, 6)
         self.assertEqual(config.detector_window, 10)
+        self.assertEqual(config.detector_subspace_dim, 2)
+        self.assertAlmostEqual(config.detector_gap_threshold, 0.15)
+        self.assertAlmostEqual(config.detector_adjacent_threshold, 2.5)
+        self.assertAlmostEqual(config.detector_anchor_threshold, 3.5)
+        self.assertAlmostEqual(config.detector_drift_memory, 0.8)
+        self.assertAlmostEqual(config.detector_drift_allowance, 0.75)
+        self.assertAlmostEqual(config.detector_drift_threshold, 4.5)
+        self.assertEqual(config.detector_decision_rule, "any")
         self.assertEqual(config.suspicion_remove_after, 6)
+        self.assertEqual(config.suspicion_count_max, 8)
 
         legacy = parse_args(
             ["--detector-window", "8", "--suspicion-remove-after", "5"]
         )
         self.assertEqual(legacy.detector_window, 8)
         self.assertEqual(legacy.suspicion_remove_after, 5)
+        self.assertEqual(legacy.detector_decision_rule, "any")
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(["--detector-decision-rule", "all"])
 
         lowercase = parse_args(["--k", "7", "--c-tol", "4"])
         self.assertEqual(lowercase.detector_window, 7)
         self.assertEqual(lowercase.suspicion_remove_after, 4)
+
+    def test_legacy_z_threshold_sets_both_v3_thresholds_and_cannot_be_mixed(self):
+        args = parse_args(["--z-threshold", "2.75", "--C_tol", "5"])
+        config = build_experiment_configs(args)[0]
+
+        self.assertAlmostEqual(config.detector_adjacent_threshold, 2.75)
+        self.assertAlmostEqual(config.detector_anchor_threshold, 2.75)
+        self.assertEqual(config.suspicion_count_max, 5)
+
+        for option in (
+            "--detector-adjacent-threshold",
+            "--detector-anchor-threshold",
+        ):
+            with self.subTest(option=option):
+                with mock.patch("sys.stderr", new=io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parse_args(["--z-threshold", "3", option, "3"])
+
+    def test_checkpoint_schema_is_v11_for_the_v3_detector_state(self):
+        self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 11)
+
+    def test_v10_binary_checkpoints_are_not_loaded_as_v3_state(self):
+        config = ExperimentConfig(method="fedavg")
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            checkpoint_dir = output_dir / ".checkpoints"
+            checkpoint_dir.mkdir()
+            checkpoint_path = _checkpoint_path(checkpoint_dir, config)
+            with checkpoint_path.open("wb") as handle:
+                pickle.dump(
+                    {
+                        "schema_version": 10,
+                        "run_fingerprint": "v3-test",
+                        "config": asdict(config),
+                        "state": {"completed_round": 1},
+                    },
+                    handle,
+                )
+            with (output_dir / ".completed_results.pickle").open("wb") as handle:
+                pickle.dump({"schema_version": 10, "results": []}, handle)
+
+            state, runtime, peak = _load_round_checkpoint(
+                checkpoint_path,
+                config,
+                "v3-test",
+            )
+            completed = load_completed_results_snapshot(output_dir)
+
+        self.assertIsNone(state)
+        self.assertEqual(runtime, 0.0)
+        self.assertEqual(peak, 0.0)
+        self.assertIsNone(completed)
+
+    def test_default_effective_attack_start_uses_k_plus_two(self):
+        config = ExperimentConfig(
+            method="fedavg",
+            malicious_ratio=0.5,
+            attack="sign_flip",
+            attack_start_round=0,
+            detector_window=3,
+        )
+        common = {
+            "acc": 0.5,
+            "accepted": 2,
+            "rejected": 0,
+            "blacklisted": 0,
+            "tp": 0,
+            "fp": 0,
+            "krum_selected": "",
+        }
+
+        before = _make_record(config, round_id=4, **common)
+        active = _make_record(config, round_id=5, **common)
+
+        self.assertFalse(before.attack_active)
+        self.assertTrue(active.attack_active)
 
     def test_vert_ratio_prior_flag_maps_to_every_experiment_config(self):
         args = parse_args(
@@ -530,6 +722,101 @@ class ExperimentOutputDirTest(unittest.TestCase):
             jobs = resolve_parallel_jobs("auto", dataset, configs, args)
 
         self.assertEqual(jobs, 4)
+
+    def test_cgroup_memory_limit_ignores_unlimited_sentinel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            finite = Path(tmp) / "memory.max"
+            unlimited = Path(tmp) / "memory.limit_in_bytes"
+            finite.write_text(str(8 * 1024**3), encoding="utf-8")
+            unlimited.write_text(str(1 << 62), encoding="utf-8")
+
+            limit_mb = _cgroup_memory_limit_mb((unlimited, finite))
+
+        self.assertEqual(limit_mb, 8192.0)
+
+    def test_checkpoint_space_estimate_counts_pending_arrays_once(self):
+        shared = np.zeros(1024, dtype=np.float32)
+        distinct = np.zeros(2048, dtype=np.float32)
+        state = {
+            "params": shared,
+            "pending": [shared, {"model_update": distinct}],
+        }
+
+        estimate = _estimated_checkpoint_write_bytes(state)
+
+        minimum = shared.nbytes + distinct.nbytes + 256 * 1024**2
+        self.assertEqual(estimate, int(minimum * 1.1))
+
+    def test_checkpoint_space_estimate_traverses_detector_deques(self):
+        detector = LongitudinalSVDDetector(
+            window_size=3,
+            num_classes=3,
+            subspace_dim=2,
+        )
+        for round_id in range(1, 4):
+            detector.evaluate(
+                "tag",
+                (np.eye(3, dtype=np.float32) * round_id).reshape(-1),
+                round_id=round_id,
+            )
+
+        estimate = _estimated_checkpoint_write_bytes({"detector": detector})
+
+        minimum = detector.estimated_state_bytes() + 256 * 1024**2
+        self.assertGreaterEqual(estimate, int(minimum * 1.1))
+
+    def test_checkpoint_write_fails_before_pickle_when_disk_is_too_small(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "sm9rrsfl.experiments.shutil.disk_usage",
+            return_value=mock.Mock(free=0),
+        ):
+            target = Path(tmp) / ".checkpoints" / "state.pickle"
+            with self.assertRaisesRegex(OSError, "insufficient free space"):
+                _write_round_checkpoint(
+                    target,
+                    ExperimentConfig(method="fedavg"),
+                    "disk-test",
+                    {"completed_round": 0, "params": np.zeros(1, dtype=np.float32)},
+                    runtime_seconds=0.0,
+                    peak_memory_mb=0.0,
+                )
+            self.assertFalse(target.exists())
+
+    def test_large_cifar_detector_uses_host_budget_and_sparse_checkpoints(self):
+        dataset = ImageDataset(
+            x_train=np.zeros((1, 3, 32, 32), dtype=np.float32),
+            y_train=np.zeros(1, dtype=np.int64),
+            x_test=np.zeros((1, 3, 32, 32), dtype=np.float32),
+            y_test=np.zeros(1, dtype=np.int64),
+            name="cifar10",
+        )
+        config = ExperimentConfig(
+            method="sm9rrs",
+            num_clients=100,
+            detector_window=10,
+            detector_subspace_dim=2,
+            checkpoint_interval=0,
+        )
+
+        host_mb = _estimated_parallel_worker_memory_mb(dataset, [config])
+        cuda_mb = _estimated_cuda_worker_memory_mb(dataset, [config])
+
+        self.assertGreater(host_mb, cuda_mb + 1024.0)
+        self.assertEqual(_effective_checkpoint_interval(dataset, config), 10)
+        self.assertEqual(
+            _effective_checkpoint_interval(
+                dataset,
+                replace(config, num_clients=200),
+            ),
+            25,
+        )
+        self.assertEqual(
+            _effective_checkpoint_interval(
+                dataset,
+                replace(config, checkpoint_interval=3),
+            ),
+            3,
+        )
 
     def test_auto_sm9_workers_share_cpu_budget_with_parallel_experiments(self):
         with mock.patch("sm9rrsfl.experiments.available_cpu_count", return_value=4):
@@ -639,6 +926,8 @@ class ExperimentOutputDirTest(unittest.TestCase):
             restored = read_results(output_dir / "summary.csv", output_dir / "rounds.csv")
             with (output_dir / "summary.csv").open(newline="", encoding="utf-8") as handle:
                 row = next(csv.DictReader(handle))
+            with (output_dir / "rounds.csv").open(newline="", encoding="utf-8") as handle:
+                round_row = next(csv.DictReader(handle))
 
         self.assertEqual(len(restored), 1)
         self.assertIsNotNone(snapshot)
@@ -646,8 +935,65 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertIn("training_seconds", row)
         self.assertIn("runtime_without_crypto_seconds", row)
         self.assertIn("crypto_wall_seconds", row)
+        self.assertIn("checkpoint_io_seconds", row)
         self.assertIn("nonfinite_updates", row)
+        self.assertEqual(int(row["effective_attack_start_round"]), 5)
+        self.assertEqual(round_row["attack_active"], "False")
         self.assertGreaterEqual(restored[0].stage_timings.training_seconds, 0.0)
+
+    def test_legacy_summary_uses_z_threshold_and_c_tol_for_v3_fallbacks(self):
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=73)
+        result = run_experiment(
+            dataset,
+            ExperimentConfig(
+                method="fedavg",
+                num_clients=2,
+                rounds=1,
+                z_threshold=2.75,
+                suspicion_remove_after=4,
+                early_stop=False,
+                seed=73,
+            ),
+        )
+        v3_only_fields = {
+            "detector_subspace_dim",
+            "detector_gap_threshold",
+            "detector_adjacent_threshold",
+            "detector_anchor_threshold",
+            "detector_drift_memory",
+            "detector_drift_allowance",
+            "detector_drift_threshold",
+            "detector_decision_rule",
+            "suspicion_count_max",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            write_result_files(output_dir, [result])
+            summary_path = output_dir / "summary.csv"
+            with summary_path.open(newline="", encoding="utf-8") as handle:
+                current_rows = list(csv.DictReader(handle))
+            legacy_rows = [
+                {key: value for key, value in row.items() if key not in v3_only_fields}
+                for row in current_rows
+            ]
+            with summary_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(legacy_rows[0]))
+                writer.writeheader()
+                writer.writerows(legacy_rows)
+
+            restored = read_results(summary_path, output_dir / "rounds.csv")
+
+        self.assertEqual(len(restored), 1)
+        config = restored[0].config
+        self.assertEqual(config.detector_subspace_dim, 2)
+        self.assertAlmostEqual(config.detector_gap_threshold, 0.1)
+        self.assertAlmostEqual(config.detector_adjacent_threshold, 2.75)
+        self.assertAlmostEqual(config.detector_anchor_threshold, 2.75)
+        self.assertAlmostEqual(config.detector_drift_memory, 0.9)
+        self.assertAlmostEqual(config.detector_drift_allowance, 1.0)
+        self.assertAlmostEqual(config.detector_drift_threshold, 5.0)
+        self.assertEqual(config.detector_decision_rule, "any")
+        self.assertEqual(config.suspicion_count_max, 4)
 
     def test_protocol_free_runtime_uses_wall_spans_not_parallel_operation_sums(self):
         timings = StageTimings(

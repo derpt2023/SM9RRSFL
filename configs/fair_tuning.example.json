@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "name": "MNIST unified fair grid search",
-  "description": "Select every method on a training holdout, then rerun the unified main evaluation on the untouched official test set.",
+  "description": "Select every method on a training holdout with the v3 OR detector and a fixed attack schedule, then rerun the unified main evaluation on the untouched official test set.",
   "shared_parameters": {
     "dataset": "mnist",
-    "output_dir": "outputs/mnist_fair_tuning",
+    "output_dir": "outputs/mnist_v3_or_fair_tuning",
     "methods": [
       "sm9rrs",
       "vert",
@@ -33,7 +33,18 @@
     "attack_source_label": 5,
     "attack_target_label": 7,
     "attack_target_count": 1,
-    "attack_start_round": 0,
+    "attack_start_round": 12,
+    "K": 10,
+    "detector_subspace_dim": 2,
+    "detector_gap_threshold": 0.1,
+    "detector_adjacent_threshold": 3.0,
+    "detector_drift_memory": 0.9,
+    "detector_drift_allowance": 1.0,
+    "detector_decision_rule": "any",
+    "C_tol": 3,
+    "suspicion_count_max": 3,
+    "suspicion_penalty_factor": 0.01,
+    "suspicion_recovery_factor": 10.0,
     "crypto_mode": "sm9",
     "early_stop": false,
     "eval_interval": 1,
@@ -41,6 +52,7 @@
     "visualizations": true,
     "progress": true,
     "progress_mode": "live",
+    "checkpoint_interval": 0,
     "seed": 42
   },
   "tuning": {
@@ -61,8 +73,8 @@
     },
     "method_spaces": {
       "sm9rrs": {
-        "detector_window": [3, 5],
-        "z_threshold": [2.5, 3.0]
+        "detector_anchor_threshold": [2.5, 3.0],
+        "detector_drift_threshold": [4.0, 6.0]
       },
       "vert": {
         "vert_history_window": [5, 10],

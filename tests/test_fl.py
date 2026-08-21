@@ -8,6 +8,43 @@ from sm9rrsfl.fl import ExperimentConfig, run_experiment
 from sm9rrsfl.svd_detector import DetectionResult
 
 
+def _composite_detection_result(
+    *,
+    anomalous: bool,
+    **overrides,
+) -> DetectionResult:
+    """Build one complete third-revision detector decision for FL integration tests."""
+
+    values = {
+        "accepted": not anomalous,
+        "reason": "composite_threshold_any" if anomalous else "accepted",
+        "count_increment": anomalous,
+        "z_sigma": 5.0 if anomalous else 1.0,
+        "z_direction": 4.0 if anomalous else 1.0,
+        "sigma_delta": 0.4 if anomalous else 0.1,
+        "cosine_similarity": 0.75 if anomalous else 0.99,
+        "spectrum_adjacent_distance": 0.4 if anomalous else 0.1,
+        "subspace_adjacent_distance": 0.5 if anomalous else 0.1,
+        "spectrum_anchor_distance": 0.8 if anomalous else 0.1,
+        "subspace_anchor_distance": 0.9 if anomalous else 0.1,
+        "z_spectrum_adjacent": 4.0 if anomalous else 1.0,
+        "z_subspace_adjacent": 5.0 if anomalous else 1.0,
+        "z_spectrum_anchor": 6.0 if anomalous else 1.0,
+        "z_subspace_anchor": 7.0 if anomalous else 1.0,
+        "adjacent_score": 4.0 if anomalous else 1.0,
+        "anchor_score": 6.0 if anomalous else 1.0,
+        "cumulative_drift": 8.0 if anomalous else 0.0,
+        "spectral_gap": 0.7,
+        "direction_reliability": 0.5,
+        "adjacent_exceeded": anomalous,
+        "anchor_exceeded": anomalous,
+        "drift_exceeded": anomalous,
+        "trusted_history_size": 3,
+    }
+    values.update(overrides)
+    return DetectionResult(**values)
+
+
 class FederatedLoopTest(unittest.TestCase):
     def test_nonfinite_client_update_is_rejected_before_aggregation(self):
         from sm9rrsfl import fl as fl_module
@@ -83,21 +120,31 @@ class FederatedLoopTest(unittest.TestCase):
             run_experiment(dataset, config)
 
     def test_round_checkpoint_resume_matches_uninterrupted_run(self):
+        from sm9rrsfl import fl as fl_module
+
         dataset = make_synthetic_mnist_like(train_samples=80, test_samples=20, seed=13)
         config = ExperimentConfig(
             method="sm9rrs",
             malicious_ratio=0.25,
             num_clients=4,
-            rounds=3,
+            rounds=4,
             local_epochs=1,
             batch_size=16,
             attack="sign_flip",
-            attack_start_round=1,
+            attack_start_round=0,
+            detector_window=2,
+            detector_decision_rule="any",
             crypto_mode="simulated",
             early_stop=False,
             seed=13,
         )
-        uninterrupted = run_experiment(dataset, config)
+        with mock.patch.object(
+            fl_module,
+            "_poison_client_update",
+            wraps=fl_module._poison_client_update,
+        ) as poison:
+            uninterrupted = run_experiment(dataset, config)
+        self.assertEqual(poison.call_count, 1)
         saved = {}
 
         class SimulatedInterruption(Exception):
@@ -110,6 +157,14 @@ class FederatedLoopTest(unittest.TestCase):
 
         with self.assertRaises(SimulatedInterruption):
             run_experiment(dataset, config, checkpoint_callback=stop_after_first_round)
+        self.assertEqual(saved["state"]["detector"].decision_rule, "any")
+        self.assertEqual(
+            {
+                state.last_observed.round_id
+                for state in saved["state"]["detector"]._states.values()
+            },
+            {1},
+        )
         resumed = run_experiment(dataset, config, resume_state=saved["state"])
 
         self.assertEqual(
@@ -118,6 +173,18 @@ class FederatedLoopTest(unittest.TestCase):
         )
         self.assertEqual(resumed.blacklisted_clients, uninterrupted.blacklisted_clients)
         self.assertEqual(resumed.diagnostics, uninterrupted.diagnostics)
+        self.assertEqual(
+            [record.attack_active for record in resumed.records],
+            [False, False, False, False, True],
+        )
+        self.assertEqual(resumed.summary_dict()["effective_attack_start_round"], 4)
+        malicious = set(resumed.malicious_clients)
+        self.assertTrue(malicious)
+        for diagnostic in resumed.diagnostics:
+            self.assertEqual(
+                diagnostic.attack_active,
+                diagnostic.client_id in malicious and diagnostic.round >= 4,
+            )
 
     def test_alternating_minimization_runs_inside_local_training(self):
         from sm9rrsfl import fl as fl_module
@@ -279,13 +346,7 @@ class FederatedLoopTest(unittest.TestCase):
             mock.patch.object(
                 fl_module.LongitudinalSVDDetector,
                 "evaluate",
-                return_value=DetectionResult(
-                    accepted=False,
-                    reason="z_score_threshold",
-                    count_increment=True,
-                    z_sigma=4.0,
-                    z_direction=5.0,
-                ),
+                return_value=_composite_detection_result(anomalous=True),
             ),
             mock.patch.object(
                 fl_module,
@@ -333,13 +394,7 @@ class FederatedLoopTest(unittest.TestCase):
         with mock.patch.object(
             fl_module.LongitudinalSVDDetector,
             "evaluate",
-            return_value=DetectionResult(
-                accepted=False,
-                reason="z_score_threshold",
-                count_increment=True,
-                z_sigma=4.0,
-                z_direction=5.0,
-            ),
+            return_value=_composite_detection_result(anomalous=True),
         ):
             result = run_experiment(
                 dataset,
@@ -363,19 +418,24 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertIn(dataset.name, terminal.finalized_task_ids)
         self.assertNotIn(dataset.name, {task.task_id for task in terminal.tasks})
 
-    def test_single_indicator_suspicion_does_not_trigger_trace(self):
+    def test_composite_suspicion_updates_count_weight_and_v3_diagnostics(self):
         from sm9rrsfl import fl as fl_module
 
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=123)
         with mock.patch.object(
             fl_module.LongitudinalSVDDetector,
             "evaluate",
-            return_value=DetectionResult(
-                accepted=False,
-                reason="z_score_threshold",
-                count_increment=False,
-                z_sigma=4.0,
-                z_direction=1.0,
+            return_value=_composite_detection_result(
+                anomalous=True,
+                z_sigma=6.0,
+                z_direction=2.5,
+                z_spectrum_adjacent=4.5,
+                z_subspace_adjacent=2.0,
+                z_spectrum_anchor=5.5,
+                z_subspace_anchor=3.0,
+                adjacent_score=4.5,
+                anchor_score=5.5,
+                cumulative_drift=9.0,
             ),
         ):
             result = run_experiment(
@@ -384,11 +444,11 @@ class FederatedLoopTest(unittest.TestCase):
                     method="sm9rrs",
                     malicious_ratio=0.0,
                     num_clients=1,
-                    rounds=2,
+                    rounds=1,
                     local_epochs=1,
                     batch_size=16,
                     crypto_mode="simulated",
-                    suspicion_remove_after=1,
+                    suspicion_remove_after=2,
                     early_stop=False,
                     seed=123,
                 ),
@@ -397,15 +457,16 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertEqual(result.blacklisted_clients, tuple())
         self.assertEqual(result.records[-1].accepted_updates, 1)
         self.assertEqual(result.records[-1].rejected_updates, 0)
-        self.assertEqual(len(result.diagnostics), 2)
-        diagnostic = result.diagnostics[-1]
-        self.assertEqual(diagnostic.z_sigma, 4.0)
-        self.assertEqual(diagnostic.z_direction, 1.0)
+        self.assertEqual(len(result.diagnostics), 1)
+        diagnostic = result.diagnostics[0]
+        self.assertEqual(diagnostic.decision_reason, "composite_threshold_any")
+        self.assertEqual(diagnostic.z_sigma, 6.0)
+        self.assertEqual(diagnostic.z_direction, 2.5)
         self.assertTrue(diagnostic.sigma_exceeded)
         self.assertFalse(diagnostic.direction_exceeded)
         self.assertTrue(diagnostic.suspicious)
-        self.assertFalse(diagnostic.count_increment)
-        self.assertEqual(diagnostic.count_after, 0)
+        self.assertTrue(diagnostic.count_increment)
+        self.assertEqual(diagnostic.count_after, 1)
         self.assertAlmostEqual(
             diagnostic.weight_after_penalty_recovery,
             0.5,
@@ -413,6 +474,24 @@ class FederatedLoopTest(unittest.TestCase):
         # A single remaining client is normalized back to aggregate weight 1;
         # retaining the pre-normalization value makes this visible.
         self.assertAlmostEqual(diagnostic.aggregation_weight, 1.0)
+        self.assertAlmostEqual(diagnostic.spectrum_adjacent_distance, 0.4)
+        self.assertAlmostEqual(diagnostic.subspace_adjacent_distance, 0.5)
+        self.assertAlmostEqual(diagnostic.spectrum_anchor_distance, 0.8)
+        self.assertAlmostEqual(diagnostic.subspace_anchor_distance, 0.9)
+        self.assertAlmostEqual(diagnostic.z_spectrum_adjacent, 4.5)
+        self.assertAlmostEqual(diagnostic.z_subspace_adjacent, 2.0)
+        self.assertAlmostEqual(diagnostic.z_spectrum_anchor, 5.5)
+        self.assertAlmostEqual(diagnostic.z_subspace_anchor, 3.0)
+        self.assertAlmostEqual(diagnostic.adjacent_score, 4.5)
+        self.assertAlmostEqual(diagnostic.anchor_score, 5.5)
+        self.assertAlmostEqual(diagnostic.cumulative_drift, 9.0)
+        self.assertAlmostEqual(diagnostic.spectral_gap, 0.7)
+        self.assertAlmostEqual(diagnostic.direction_reliability, 0.5)
+        self.assertTrue(diagnostic.adjacent_exceeded)
+        self.assertTrue(diagnostic.anchor_exceeded)
+        self.assertTrue(diagnostic.drift_exceeded)
+        self.assertEqual(diagnostic.trusted_history_size, 3)
+        self.assertFalse(diagnostic.attack_active)
 
     def test_normal_round_reports_floor_halved_count_evidence(self):
         from sm9rrsfl import fl as fl_module
@@ -423,20 +502,8 @@ class FederatedLoopTest(unittest.TestCase):
             seed=126,
         )
         decisions = [
-            DetectionResult(
-                accepted=False,
-                reason="z_score_threshold",
-                count_increment=True,
-                z_sigma=4.0,
-                z_direction=5.0,
-            ),
-            DetectionResult(
-                accepted=True,
-                reason="accepted",
-                count_increment=False,
-                z_sigma=1.0,
-                z_direction=1.0,
-            ),
+            _composite_detection_result(anomalous=True),
+            _composite_detection_result(anomalous=False),
         ]
         with mock.patch.object(
             fl_module.LongitudinalSVDDetector,

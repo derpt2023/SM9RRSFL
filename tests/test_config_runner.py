@@ -53,15 +53,49 @@ class ConfigRunnerTest(unittest.TestCase):
         self.assertTrue(args.vert_use_ratio_prior)
 
     def test_paper_parameter_aliases_map_to_their_cli_destinations(self):
-        argv = parameters_to_argv({"K": 10, "C_tol": 4})
+        argv = parameters_to_argv(
+            {
+                "K": 10,
+                "q": 2,
+                "g0": 0.15,
+                "theta_adj": 2.5,
+                "theta_anc": 3.5,
+                "beta": 0.8,
+                "kappa": 0.75,
+                "h": 4.5,
+                "C_tol": 4,
+                "C_max": 6,
+            }
+        )
         args = parse_args(argv)
 
         self.assertEqual(args.detector_window, 10)
+        self.assertEqual(args.detector_subspace_dim, 2)
+        self.assertAlmostEqual(args.detector_gap_threshold, 0.15)
+        self.assertAlmostEqual(args.detector_adjacent_threshold, 2.5)
+        self.assertAlmostEqual(args.detector_anchor_threshold, 3.5)
+        self.assertAlmostEqual(args.detector_drift_memory, 0.8)
+        self.assertAlmostEqual(args.detector_drift_allowance, 0.75)
+        self.assertAlmostEqual(args.detector_drift_threshold, 4.5)
         self.assertEqual(args.suspicion_remove_after, 4)
+        self.assertEqual(args.suspicion_count_max, 6)
 
     def test_paper_alias_and_canonical_key_cannot_conflict(self):
-        with self.assertRaisesRegex(ConfigError, "configured more than once"):
-            parameters_to_argv({"K": 10, "detector_window": 5})
+        conflicts = (
+            {"K": 10, "detector_window": 5},
+            {"q": 2, "detector_subspace_dim": 3},
+            {"g0": 0.1, "detector_gap_threshold": 0.2},
+            {"theta_adj": 3.0, "detector_adjacent_threshold": 2.5},
+            {"theta_anc": 3.0, "detector_anchor_threshold": 2.5},
+            {"beta": 0.9, "detector_drift_memory": 0.8},
+            {"kappa": 1.0, "detector_drift_allowance": 0.5},
+            {"h": 5.0, "detector_drift_threshold": 4.0},
+            {"C_max": 3, "suspicion_count_max": 4},
+        )
+        for parameters in conflicts:
+            with self.subTest(parameters=parameters):
+                with self.assertRaisesRegex(ConfigError, "configured more than once"):
+                    parameters_to_argv(parameters)
 
     def test_unknown_or_duplicate_parameter_is_rejected(self):
         with self.assertRaisesRegex(ConfigError, "unknown experiment parameter"):
@@ -106,6 +140,9 @@ class ConfigRunnerTest(unittest.TestCase):
         self.assertIn("config_execution_request=", text)
         self.assertIn("progress=live", text)
         self.assertIn("resolved_parameters=", text)
+        self.assertIn("effective_detector_parameters=", text)
+        self.assertIn('"effective_attack_start_round": 12', text)
+        self.assertIn('"suspicion_count_max": 3', text)
         self.assertIn('"dataset":', text)
 
     def test_non_dry_run_dispatches_to_authoritative_experiment_entry(self):
