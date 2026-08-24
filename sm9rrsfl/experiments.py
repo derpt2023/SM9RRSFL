@@ -48,7 +48,7 @@ _WORKER_DATASET = None
 _WORKER_CHECKPOINT_DIR = None
 _WORKER_RUN_FINGERPRINT = None
 _CHECKPOINT_WRITE_LOCK = Lock()
-CHECKPOINT_SCHEMA_VERSION = 11
+CHECKPOINT_SCHEMA_VERSION = 12
 COMPLETED_RESULTS_SNAPSHOT = ".completed_results.pickle"
 CUDA_MEMORY_SAFETY_FRACTION = 0.75
 DATASET_TRAINING_PRESETS = {
@@ -113,6 +113,35 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    ours_calibration = None
+    if "sm9rrs" in args.methods and args.ours_parameter_mode == "auto":
+        # Import lazily: the calibrator reuses the experiment/tuning execution
+        # machinery, while the ordinary fixed-parameter path pays no import or
+        # data-splitting cost.
+        from .ours_calibration import (
+            apply_ours_parameters,
+            calibration_metadata,
+            resolve_or_run_ours_calibration,
+        )
+
+        dataset, ours_calibration = resolve_or_run_ours_calibration(
+            dataset,
+            args,
+            output_dir,
+        )
+        apply_ours_parameters(args, ours_calibration)
+        print(
+            "ours_calibration="
+            + json.dumps(
+                calibration_metadata(ours_calibration),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+    # Main-run timing intentionally excludes the one-time offline calibration.
     started = perf_counter()
 
     configs = build_experiment_configs(args)
@@ -152,7 +181,16 @@ def main(argv: list[str] | None = None) -> None:
     runnable_configs = [
         config for config in configs if experiment_config_error(config) is None
     ]
-    manifest = build_run_manifest(args, dataset, configs)
+    manifest = build_run_manifest(
+        args,
+        dataset,
+        configs,
+        calibration=(
+            calibration_metadata(ours_calibration)
+            if ours_calibration is not None
+            else None
+        ),
+    )
     previous_manifest = read_run_manifest(output_dir)
     exact_manifest_match = bool(
         args.resume
@@ -554,6 +592,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--ours-parameter-mode",
+        choices=["fixed", "auto"],
+        default="fixed",
+        help=(
+            "Ours detector parameter policy. 'auto' runs or reuses one "
+            "training-only global offline calibration, then freezes the selected "
+            "parameters across every formal main-run scenario. 'fixed' preserves "
+            "manual/default values for ablations and legacy reproduction."
+        ),
+    )
+    parser.add_argument(
         "--z-threshold",
         type=float,
         default=3.0,
@@ -741,6 +790,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(
             "--z-threshold cannot be combined with explicit adjacent/anchor thresholds"
         )
+    auto_ours_options = (
+        "--z-threshold",
+        "--detector-subspace-dim",
+        "--detector-gap-threshold",
+        "--detector-adjacent-threshold",
+        "--detector-anchor-threshold",
+        "--detector-drift-memory",
+        "--detector-drift-allowance",
+        "--detector-drift-threshold",
+        "--C_tol",
+        "--c-tol",
+        "--suspicion-remove-after",
+        "--C_max",
+        "--c-max",
+        "--suspicion-count-max",
+        "--suspicion-penalty-factor",
+        "--suspicion-recovery-factor",
+    )
+    explicitly_fixed = tuple(
+        option for option in auto_ours_options if _has_any_option(raw_args, option)
+    )
+    if (
+        args.ours_parameter_mode == "auto"
+        and "sm9rrs" in args.methods
+        and explicitly_fixed
+    ):
+        parser.error(
+            "--ours-parameter-mode auto cannot be combined with manually fixed "
+            "Ours parameters (K remains user-controlled): "
+            + ", ".join(explicitly_fixed)
+        )
     max_clients = max(args.client_counts or [args.num_clients])
     args._sm9_workers_auto = (
         isinstance(args.sm9_workers, str)
@@ -758,6 +838,8 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
     """在加载数据或启动长任务前统一拒绝明显不可执行的数值组合。"""
 
     client_counts = args.client_counts or [args.num_clients]
+    auto_ours = args.ours_parameter_mode == "auto" and "sm9rrs" in args.methods
+    effective_attack_start = args.attack_start_round or args.detector_window + 2
     checks = (
         (all(0.0 <= ratio < 1.0 for ratio in args.ratios), "--ratios must be in [0, 1)"),
         (all(count >= 1 for count in client_counts), "client counts must be at least 1"),
@@ -808,6 +890,39 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
             "--attack-start-round must be non-negative",
         ),
         (args.detector_window >= 2, "--K must be at least 2"),
+        (
+            not auto_ours or args.rounds > args.detector_window,
+            "automatic Ours calibration requires --rounds > --K",
+        ),
+        (
+            not auto_ours or any(abs(ratio) < 1e-12 for ratio in args.ratios),
+            "automatic Ours calibration requires a 0% clean-control ratio",
+        ),
+        (
+            not auto_ours or any(ratio > 0.0 for ratio in args.ratios),
+            "automatic Ours calibration requires at least one attacked ratio",
+        ),
+        (
+            not auto_ours or args.attack != "none",
+            "automatic Ours calibration requires an enabled attack",
+        ),
+        (
+            not auto_ours
+            or effective_attack_start >= args.detector_window + 2,
+            "automatic Ours calibration requires attack_start_round >= K + 2",
+        ),
+        (
+            not auto_ours or effective_attack_start <= args.rounds,
+            "automatic Ours calibration requires attack start within --rounds",
+        ),
+        (
+            not auto_ours or args.no_early_stop,
+            "automatic Ours calibration requires --no-early-stop",
+        ),
+        (
+            not auto_ours or args.eval_interval == 1,
+            "automatic Ours calibration requires --eval-interval 1",
+        ),
         (
             math.isfinite(args.z_threshold) and args.z_threshold > 0.0,
             "--z-threshold must be finite and positive",
@@ -1743,6 +1858,8 @@ def build_run_manifest(
     args: argparse.Namespace,
     dataset,
     configs: list[ExperimentConfig],
+    *,
+    calibration: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """记录会影响实验结果的数据与配置，防止错误复用旧检查点。"""
 
@@ -1756,14 +1873,47 @@ def build_run_manifest(
             "num_classes": int(dataset.num_classes),
             "data_dir": str(Path(args.data_dir).expanduser().resolve()) if args.data_dir else None,
             "seed": int(args.seed),
+            "train_content_digest": _array_content_digest(
+                dataset.x_train,
+                dataset.y_train,
+            ),
+            "test_content_digest": _array_content_digest(
+                dataset.x_test,
+                dataset.y_test,
+            ),
+            "attack_auxiliary_content_digest": (
+                _array_content_digest(dataset.x_attack, dataset.y_attack)
+                if getattr(dataset, "x_attack", None) is not None
+                and getattr(dataset, "y_attack", None) is not None
+                else None
+            ),
         },
         "configs": [asdict(config) for config in configs],
     }
+    if calibration is not None:
+        payload["ours_calibration"] = calibration
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return {
         **payload,
         "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
     }
+
+
+def _array_content_digest(*values: np.ndarray) -> str:
+    """Hash array dtype, shape and bytes for checkpoint-safe data identity."""
+
+    digest = hashlib.sha256()
+    for value in values:
+        array = np.asarray(value)
+        digest.update(array.dtype.str.encode("ascii"))
+        digest.update(
+            json.dumps(list(array.shape), separators=(",", ":")).encode("ascii")
+        )
+        contiguous = np.ascontiguousarray(array).view(np.uint8).reshape(-1)
+        block_size = 8 * 1024 * 1024
+        for start in range(0, contiguous.size, block_size):
+            digest.update(memoryview(contiguous[start : start + block_size]))
+    return digest.hexdigest()
 
 
 def _normalized_cuda_device(value: object) -> object:
@@ -2644,6 +2794,7 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             detector_decision_rule=(
                 row.get("detector_decision_rule") or "any"
             ),
+            detector_enforce=_parse_bool(row.get("detector_enforce", "True")),
             crypto_mode=row["crypto_mode"],
             dkg_threshold=int(row.get("dkg_threshold") or 2),
             dkg_nodes=int(row.get("dkg_nodes") or 3),

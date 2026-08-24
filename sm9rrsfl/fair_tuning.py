@@ -121,6 +121,9 @@ TUNING_KEYS = {
     "trials_per_tunable_method",
     "require_finite_updates",
     "require_clean_acceptance",
+    "max_clean_false_positive_rate",
+    "min_clean_round_acceptance_rate",
+    "require_full_rounds",
     "run_final_evaluation",
     "objective",
     "method_spaces",
@@ -146,6 +149,9 @@ class FairTuningConfig:
     trials_per_tunable_method: int
     require_finite_updates: bool
     require_clean_acceptance: bool
+    max_clean_false_positive_rate: float
+    min_clean_round_acceptance_rate: float
+    require_full_rounds: bool
     run_final_evaluation: bool
     objective: dict[str, float]
     candidates: dict[str, tuple[dict[str, Any], ...]]
@@ -163,6 +169,9 @@ class TrialScore:
     attack_success_rate: float
     false_positive_rate: float
     clean_acceptance_rate: float
+    worst_clean_false_positive_rate: float
+    min_clean_round_acceptance_rate: float
+    all_runs_completed: bool
     nonfinite_updates: int
     result_count: int
 
@@ -183,6 +192,9 @@ class TrialScore:
             "attack_success_rate": self.attack_success_rate,
             "false_positive_rate": self.false_positive_rate,
             "clean_acceptance_rate": self.clean_acceptance_rate,
+            "worst_clean_false_positive_rate": self.worst_clean_false_positive_rate,
+            "min_clean_round_acceptance_rate": self.min_clean_round_acceptance_rate,
+            "all_runs_completed": self.all_runs_completed,
             "nonfinite_updates": self.nonfinite_updates,
             "result_count": self.result_count,
         }
@@ -285,16 +297,30 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
         raise FairTuningError("trials_per_tunable_method must be at least 1")
     require_finite = tuning.get("require_finite_updates", True)
     require_clean_acceptance = tuning.get("require_clean_acceptance", True)
+    max_clean_false_positive_rate = _finite_float(
+        tuning.get("max_clean_false_positive_rate", 0.01),
+        "max_clean_false_positive_rate",
+    )
+    min_clean_round_acceptance_rate = _finite_float(
+        tuning.get("min_clean_round_acceptance_rate", 0.95),
+        "min_clean_round_acceptance_rate",
+    )
+    require_full_rounds = tuning.get("require_full_rounds", True)
     run_final = tuning.get("run_final_evaluation", True)
     if (
         not isinstance(require_finite, bool)
         or not isinstance(require_clean_acceptance, bool)
+        or not isinstance(require_full_rounds, bool)
         or not isinstance(run_final, bool)
     ):
         raise FairTuningError(
-            "require_finite_updates, require_clean_acceptance and "
-            "run_final_evaluation must be boolean"
+            "require_finite_updates, require_clean_acceptance, "
+            "require_full_rounds and run_final_evaluation must be boolean"
         )
+    if not 0.0 <= max_clean_false_positive_rate <= 1.0:
+        raise FairTuningError("max_clean_false_positive_rate must be in [0, 1]")
+    if not 0.0 <= min_clean_round_acceptance_rate <= 1.0:
+        raise FairTuningError("min_clean_round_acceptance_rate must be in [0, 1]")
 
     objective = dict(OBJECTIVE_DEFAULTS)
     objective_payload = tuning.get("objective", {})
@@ -377,6 +403,9 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
         trials_per_tunable_method=budget,
         require_finite_updates=require_finite,
         require_clean_acceptance=require_clean_acceptance,
+        max_clean_false_positive_rate=max_clean_false_positive_rate,
+        min_clean_round_acceptance_rate=min_clean_round_acceptance_rate,
+        require_full_rounds=require_full_rounds,
         run_final_evaluation=run_final,
         objective=objective,
         candidates=candidates,
@@ -453,6 +482,9 @@ def score_trial(
     objective: dict[str, float],
     require_finite_updates: bool,
     require_clean_acceptance: bool = True,
+    max_clean_false_positive_rate: float = 0.01,
+    min_clean_round_acceptance_rate: float = 0.95,
+    require_full_rounds: bool = True,
 ) -> TrialScore:
     clean = [result for result in results if abs(result.config.malicious_ratio) < 1e-12]
     attacked = [result for result in results if result.config.malicious_ratio > 0.0]
@@ -478,8 +510,20 @@ def score_trial(
             / max(1, honest)
         )
     false_positive_rate = fmean(false_positive_rates)
+    clean_false_positive_rates = []
+    for result in clean:
+        final_record = result.records[-1] if result.records else None
+        honest = result.config.num_clients - malicious_client_count(
+            result.config.num_clients,
+            result.config.malicious_ratio,
+        )
+        clean_false_positive_rates.append(
+            (final_record.false_positive_revocations if final_record is not None else 0)
+            / max(1, honest)
+        )
+    worst_clean_false_positive_rate = max(clean_false_positive_rates, default=0.0)
     clean_acceptance_rates = [
-        max(
+        min(
             (
                 record.accepted_updates / max(1, result.config.num_clients)
                 for record in result.records
@@ -490,12 +534,33 @@ def score_trial(
         for result in clean
     ]
     clean_acceptance_rate = fmean(clean_acceptance_rates)
+    min_observed_clean_acceptance_rate = min(clean_acceptance_rates, default=0.0)
+    all_runs_completed = all(
+        result.stopped_round == result.config.rounds
+        and bool(result.records)
+        and result.records[-1].round == result.config.rounds
+        for result in results
+    )
     nonfinite_updates = sum(result.nonfinite_updates for result in results)
     finite_valid = not require_finite_updates or nonfinite_updates == 0
     clean_acceptance_valid = not require_clean_acceptance or all(
         rate > 0.0 for rate in clean_acceptance_rates
     )
-    valid = finite_valid and clean_acceptance_valid
+    clean_false_positive_valid = (
+        worst_clean_false_positive_rate <= max_clean_false_positive_rate + 1e-12
+    )
+    clean_round_acceptance_valid = (
+        min_observed_clean_acceptance_rate
+        >= min_clean_round_acceptance_rate - 1e-12
+    )
+    full_rounds_valid = not require_full_rounds or all_runs_completed
+    valid = (
+        finite_valid
+        and clean_acceptance_valid
+        and clean_false_positive_valid
+        and clean_round_acceptance_valid
+        and full_rounds_valid
+    )
     score = (
         objective["clean_accuracy_weight"] * clean_accuracy
         + objective["robust_accuracy_weight"] * robust_accuracy
@@ -515,6 +580,9 @@ def score_trial(
         attack_success_rate=attack_success,
         false_positive_rate=false_positive_rate,
         clean_acceptance_rate=clean_acceptance_rate,
+        worst_clean_false_positive_rate=worst_clean_false_positive_rate,
+        min_clean_round_acceptance_rate=min_observed_clean_acceptance_rate,
+        all_runs_completed=all_runs_completed,
         nonfinite_updates=nonfinite_updates,
         result_count=len(results),
     )
@@ -527,8 +595,9 @@ def select_best_trials(trials: list[TrialScore]) -> dict[str, TrialScore]:
         if not method_trials:
             raise FairTuningError(
                 f"no valid candidate remains for {method}; fix the shared attack/training "
-                "configuration or the method grid instead of selecting a NaN run or a "
-                "candidate that rejects every clean client"
+                "configuration or the method grid instead of selecting a run that "
+                "violates finite-update, clean false-positive, clean acceptance, or "
+                "full-round constraints"
             )
         selected[method] = max(
             method_trials,
@@ -1076,6 +1145,11 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
                 objective=spec.objective,
                 require_finite_updates=spec.require_finite_updates,
                 require_clean_acceptance=spec.require_clean_acceptance,
+                max_clean_false_positive_rate=spec.max_clean_false_positive_rate,
+                min_clean_round_acceptance_rate=(
+                    spec.min_clean_round_acceptance_rate
+                ),
+                require_full_rounds=spec.require_full_rounds,
             )
             trial_scores.append(trial)
             print(
@@ -1100,6 +1174,18 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         "trials_per_tunable_method": spec.trials_per_tunable_method,
         "require_finite_updates": spec.require_finite_updates,
         "require_clean_acceptance": spec.require_clean_acceptance,
+        "max_clean_false_positive_rate": spec.max_clean_false_positive_rate,
+        "min_clean_round_acceptance_rate": spec.min_clean_round_acceptance_rate,
+        "require_full_rounds": spec.require_full_rounds,
+        "hard_constraints": {
+            "require_finite_updates": spec.require_finite_updates,
+            "require_clean_acceptance": spec.require_clean_acceptance,
+            "max_clean_false_positive_rate": spec.max_clean_false_positive_rate,
+            "min_clean_round_acceptance_rate": (
+                spec.min_clean_round_acceptance_rate
+            ),
+            "require_full_rounds": spec.require_full_rounds,
+        },
         "validation_fingerprint": validation_fingerprint,
         "shared_parameters": spec.shared_parameters,
         "selected": {
@@ -1107,6 +1193,15 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
                 "candidate_id": trial.candidate_id,
                 "parameters": trial.parameters,
                 "validation_score": trial.score,
+                "validation_constraints": {
+                    "worst_clean_false_positive_rate": (
+                        trial.worst_clean_false_positive_rate
+                    ),
+                    "min_clean_round_acceptance_rate": (
+                        trial.min_clean_round_acceptance_rate
+                    ),
+                    "all_runs_completed": trial.all_runs_completed,
+                },
             }
             for method, trial in selected.items()
         },
@@ -1322,6 +1417,24 @@ def main(argv: list[str] | None = None) -> None:
     print(
         f"validation_seeds={list(spec.validation_seeds)} final_seeds={list(spec.final_seeds)} "
         "official_test_used_for_selection=false",
+        flush=True,
+    )
+    print(
+        "hard_constraints="
+        + json.dumps(
+            {
+                "require_finite_updates": spec.require_finite_updates,
+                "require_clean_acceptance": spec.require_clean_acceptance,
+                "max_clean_false_positive_rate": (
+                    spec.max_clean_false_positive_rate
+                ),
+                "min_clean_round_acceptance_rate": (
+                    spec.min_clean_round_acceptance_rate
+                ),
+                "require_full_rounds": spec.require_full_rounds,
+            },
+            sort_keys=True,
+        ),
         flush=True,
     )
     resolved_args = parse_args(parameters_to_argv(spec.shared_parameters))

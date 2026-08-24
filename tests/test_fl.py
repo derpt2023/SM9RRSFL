@@ -3,7 +3,10 @@ from unittest import mock
 
 import numpy as np
 
-from sm9rrsfl.datasets import make_synthetic_mnist_like
+from sm9rrsfl.datasets import (
+    make_synthetic_mnist_like,
+    stratified_training_three_way_split,
+)
 from sm9rrsfl.fl import ExperimentConfig, run_experiment
 from sm9rrsfl.svd_detector import DetectionResult
 
@@ -46,6 +49,60 @@ def _composite_detection_result(
 
 
 class FederatedLoopTest(unittest.TestCase):
+    def test_alternating_attack_uses_training_auxiliary_not_official_test(self):
+        from sm9rrsfl import fl as fl_module
+        from sm9rrsfl.model import TrainStats, init_params, model_spec_for_dataset
+
+        original = make_synthetic_mnist_like(
+            train_samples=400,
+            test_samples=80,
+            seed=219,
+        )
+        dataset = stratified_training_three_way_split(
+            original,
+            seed=991,
+        ).main_dataset
+        config = ExperimentConfig(
+            method="sm9rrs",
+            attack="alternating_minimization",
+            attack_source_label=5,
+            attack_target_label=7,
+            attack_target_count=1,
+            seed=219,
+        )
+        target_indices = fl_module._select_attack_target_indices(dataset, config)
+        captured = {}
+
+        def fake_attack(global_vector, _x, _y, auxiliary_x, target_labels, **_kwargs):
+            captured["auxiliary_x"] = np.asarray(auxiliary_x).copy()
+            captured["target_labels"] = np.asarray(target_labels).copy()
+            return np.zeros_like(global_vector), TrainStats(loss=0.0, samples=len(_y))
+
+        spec = model_spec_for_dataset(dataset)
+        params = init_params(seed=config.seed, spec=spec)
+        with mock.patch.object(
+            fl_module,
+            "alternating_minimization_delta",
+            side_effect=fake_attack,
+        ):
+            fl_module._alternating_minimization_client_delta(
+                params,
+                dataset,
+                np.arange(8, dtype=np.int64),
+                attack_target_indices=target_indices,
+                client_idx=0,
+                round_id=1,
+                model_spec=spec,
+                config=config,
+                torch_context=None,
+            )
+
+        np.testing.assert_array_equal(
+            captured["auxiliary_x"],
+            dataset.x_attack[target_indices],
+        )
+        self.assertTrue(np.all(captured["target_labels"] == 7))
+
     def test_nonfinite_client_update_is_rejected_before_aggregation(self):
         from sm9rrsfl import fl as fl_module
 

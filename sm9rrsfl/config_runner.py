@@ -205,32 +205,66 @@ def main(
             for key, value in vars(resolved_args).items()
             if not key.startswith("_")
         }
+        if (
+            resolved_args.ours_parameter_mode == "auto"
+            and "sm9rrs" in resolved_args.methods
+        ):
+            for key in (
+                "z_threshold",
+                "detector_subspace_dim",
+                "detector_gap_threshold",
+                "detector_adjacent_threshold",
+                "detector_anchor_threshold",
+                "detector_drift_memory",
+                "detector_drift_allowance",
+                "detector_drift_threshold",
+                "suspicion_remove_after",
+                "suspicion_count_max",
+                "suspicion_penalty_factor",
+                "suspicion_recovery_factor",
+            ):
+                resolved[key] = "<pending_global_offline_calibration>"
         print(
             "resolved_parameters="
             + json.dumps(resolved, ensure_ascii=False, sort_keys=True),
             flush=True,
         )
-        effective_detector = {
-            "detector_adjacent_threshold": (
-                resolved_args.z_threshold
-                if resolved_args.detector_adjacent_threshold is None
-                else resolved_args.detector_adjacent_threshold
-            ),
-            "detector_anchor_threshold": (
-                resolved_args.z_threshold
-                if resolved_args.detector_anchor_threshold is None
-                else resolved_args.detector_anchor_threshold
-            ),
-            "suspicion_count_max": (
-                resolved_args.suspicion_remove_after
-                if resolved_args.suspicion_count_max == 0
-                else resolved_args.suspicion_count_max
-            ),
-            "effective_attack_start_round": (
-                resolved_args.attack_start_round
-                or resolved_args.detector_window + 2
-            ),
-        }
+        if (
+            resolved_args.ours_parameter_mode == "auto"
+            and "sm9rrs" in resolved_args.methods
+        ):
+            effective_detector = {
+                "status": "pending_global_offline_calibration",
+                "frozen_scope": "all main ratios/partitions/client counts",
+                "K": resolved_args.detector_window,
+                "effective_attack_start_round": (
+                    resolved_args.attack_start_round
+                    or resolved_args.detector_window + 2
+                ),
+            }
+        else:
+            effective_detector = {
+                "status": "fixed",
+                "detector_adjacent_threshold": (
+                    resolved_args.z_threshold
+                    if resolved_args.detector_adjacent_threshold is None
+                    else resolved_args.detector_adjacent_threshold
+                ),
+                "detector_anchor_threshold": (
+                    resolved_args.z_threshold
+                    if resolved_args.detector_anchor_threshold is None
+                    else resolved_args.detector_anchor_threshold
+                ),
+                "suspicion_count_max": (
+                    resolved_args.suspicion_remove_after
+                    if resolved_args.suspicion_count_max == 0
+                    else resolved_args.suspicion_count_max
+                ),
+                "effective_attack_start_round": (
+                    resolved_args.attack_start_round
+                    or resolved_args.detector_window + 2
+                ),
+            }
         print(
             "effective_detector_parameters="
             + json.dumps(

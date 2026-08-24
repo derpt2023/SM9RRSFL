@@ -152,6 +152,27 @@ class SVDDetectorTest(unittest.TestCase):
             atol=1e-6,
         )
 
+    def test_shadow_records_would_flag_and_keeps_extreme_point_trusted(self):
+        detector = _detector(decision_rule="any")
+        detector.enforce = False
+        _warm_with_clean_updates(detector)
+        before_history = len(detector._states["tag-1"].trusted_history)
+
+        result = detector.evaluate("tag-1", _attack_update(), round_id=7)
+
+        self.assertTrue(result.would_flag)
+        self.assertTrue(result.accepted)
+        self.assertFalse(result.count_increment)
+        self.assertEqual(result.reason, "shadow_would_flag")
+        self.assertEqual(
+            len(detector._states["tag-1"].trusted_history),
+            before_history,
+        )
+        self.assertEqual(
+            detector._states["tag-1"].trusted_history[-1].round_id,
+            7,
+        )
+
     def test_any_rule_rejects_similar_attack_to_attack_via_trusted_anchor(self):
         detector = _detector(decision_rule="any")
         _warm_with_clean_updates(detector)

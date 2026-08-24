@@ -29,6 +29,7 @@ from sm9rrsfl.experiments import (
     _write_round_checkpoint,
     _manifests_differ_only_by_indexed_cuda_device,
     assign_auto_cuda_devices,
+    build_run_manifest,
     build_experiment_configs,
     confirm_matching_checkpoints,
     cuda_devices_with_capacity,
@@ -58,6 +59,129 @@ from sm9rrsfl.svd_detector import LongitudinalSVDDetector
 
 
 class ExperimentOutputDirTest(unittest.TestCase):
+    def test_manifest_binds_calibration_and_official_test_content(self):
+        dataset = make_synthetic_mnist_like(
+            train_samples=40,
+            test_samples=20,
+            seed=220,
+        )
+        args = parse_args(["--dataset", "synthetic", "--methods", "fedavg"])
+        configs = build_experiment_configs(args)
+        calibration = {
+            "artifact_fingerprint": "a" * 64,
+            "selected_parameters": {"q": 2, "C_tol": 3},
+        }
+        first = build_run_manifest(
+            args,
+            dataset,
+            configs,
+            calibration=calibration,
+        )
+        repeated = build_run_manifest(
+            args,
+            dataset,
+            configs,
+            calibration=calibration,
+        )
+        changed_calibration = build_run_manifest(
+            args,
+            dataset,
+            configs,
+            calibration={
+                "artifact_fingerprint": "b" * 64,
+                "selected_parameters": {"q": 1, "C_tol": 5},
+            },
+        )
+        changed_x_test = dataset.x_test.copy()
+        changed_x_test[0, 0, 0, 0] += np.float32(0.25)
+        changed_dataset = ImageDataset(
+            x_train=dataset.x_train,
+            y_train=dataset.y_train,
+            x_test=changed_x_test,
+            y_test=dataset.y_test,
+            name=dataset.name,
+            input_shape=dataset.input_shape,
+            num_classes=dataset.num_classes,
+        )
+        changed_test = build_run_manifest(
+            args,
+            changed_dataset,
+            configs,
+            calibration=calibration,
+        )
+
+        self.assertEqual(first["fingerprint"], repeated["fingerprint"])
+        self.assertNotEqual(
+            first["fingerprint"],
+            changed_calibration["fingerprint"],
+        )
+        self.assertNotEqual(first["fingerprint"], changed_test["fingerprint"])
+        self.assertEqual(first["ours_calibration"], calibration)
+
+    def test_one_applied_auto_parameter_set_is_frozen_across_main_grid(self):
+        from types import SimpleNamespace
+
+        from sm9rrsfl.ours_calibration import OursParameters, apply_ours_parameters
+
+        args = parse_args(
+            [
+                "--methods",
+                "sm9rrs",
+                "fedavg",
+                "--ratios",
+                "0",
+                "0.2",
+                "--partitions",
+                "iid",
+                "dirichlet",
+                "--ours-parameter-mode",
+                "auto",
+                "--no-early-stop",
+            ]
+        )
+        selected = OursParameters(
+            q=1,
+            g0=0.23,
+            theta_adj=8.0,
+            theta_anc=9.0,
+            beta=0.8,
+            kappa=1.5,
+            h=12.0,
+            C_tol=5,
+            C_max=5,
+            penalty_factor=0.05,
+            recovery_factor=4.0,
+        )
+        apply_ours_parameters(
+            args,
+            SimpleNamespace(selected_parameters=selected),
+        )
+        ours = [
+            config
+            for config in build_experiment_configs(args)
+            if config.method == "sm9rrs"
+        ]
+
+        self.assertEqual(len(ours), 4)
+        frozen = {
+            (
+                item.detector_subspace_dim,
+                item.detector_gap_threshold,
+                item.detector_adjacent_threshold,
+                item.detector_anchor_threshold,
+                item.detector_drift_memory,
+                item.detector_drift_allowance,
+                item.detector_drift_threshold,
+                item.suspicion_remove_after,
+                item.suspicion_count_max,
+                item.suspicion_penalty_factor,
+                item.suspicion_recovery_factor,
+            )
+            for item in ours
+        }
+        self.assertEqual(len(frozen), 1)
+        self.assertTrue(all(item.detector_enforce for item in ours))
+
     def test_matching_checkpoint_prompts_for_resume_or_restart(self):
         dataset = make_synthetic_mnist_like(train_samples=40, test_samples=10, seed=18)
         config = ExperimentConfig(
@@ -278,6 +402,62 @@ class ExperimentOutputDirTest(unittest.TestCase):
             ["--fedre-label-lr", "0"],
             ["--fedre-teacher-lr", "0"],
             ["--fedre-teacher-lr-lr", "0"],
+            [
+                "--ours-parameter-mode",
+                "auto",
+                "--no-early-stop",
+                "--rounds",
+                "3",
+                "--K",
+                "3",
+            ],
+            [
+                "--ours-parameter-mode",
+                "auto",
+                "--no-early-stop",
+                "--ratios",
+                "0",
+            ],
+            [
+                "--ours-parameter-mode",
+                "auto",
+                "--no-early-stop",
+                "--ratios",
+                "0.2",
+            ],
+            [
+                "--ours-parameter-mode",
+                "auto",
+                "--no-early-stop",
+                "--attack",
+                "none",
+            ],
+            [
+                "--ours-parameter-mode",
+                "auto",
+                "--no-early-stop",
+                "--K",
+                "7",
+                "--attack-start-round",
+                "8",
+            ],
+            [
+                "--ours-parameter-mode",
+                "auto",
+                "--no-early-stop",
+                "--K",
+                "7",
+                "--rounds",
+                "8",
+            ],
+            ["--ours-parameter-mode", "auto"],
+            [
+                "--ours-parameter-mode",
+                "auto",
+                "--no-early-stop",
+                "--eval-interval",
+                "2",
+            ],
         )
         for command in invalid_commands:
             with self.subTest(command=command):
@@ -595,10 +775,10 @@ class ExperimentOutputDirTest(unittest.TestCase):
                     with self.assertRaises(SystemExit):
                         parse_args(["--z-threshold", "3", option, "3"])
 
-    def test_checkpoint_schema_is_v11_for_the_v3_detector_state(self):
-        self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 11)
+    def test_checkpoint_schema_is_v12_for_shadow_calibration_state(self):
+        self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 12)
 
-    def test_v10_binary_checkpoints_are_not_loaded_as_v3_state(self):
+    def test_v11_binary_checkpoints_are_not_loaded_as_shadow_state(self):
         config = ExperimentConfig(method="fedavg")
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -608,7 +788,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
             with checkpoint_path.open("wb") as handle:
                 pickle.dump(
                     {
-                        "schema_version": 10,
+                        "schema_version": 11,
                         "run_fingerprint": "v3-test",
                         "config": asdict(config),
                         "state": {"completed_round": 1},
@@ -616,7 +796,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
                     handle,
                 )
             with (output_dir / ".completed_results.pickle").open("wb") as handle:
-                pickle.dump({"schema_version": 10, "results": []}, handle)
+                pickle.dump({"schema_version": 11, "results": []}, handle)
 
             state, runtime, peak = _load_round_checkpoint(
                 checkpoint_path,

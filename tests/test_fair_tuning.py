@@ -39,6 +39,9 @@ class FairTuningTest(unittest.TestCase):
         self.assertEqual(len(spec.candidates["fedavg"]), 1)
         self.assertTrue(set(spec.validation_seeds).isdisjoint(spec.final_seeds))
         self.assertTrue(spec.require_clean_acceptance)
+        self.assertAlmostEqual(spec.max_clean_false_positive_rate, 0.01)
+        self.assertAlmostEqual(spec.min_clean_round_acceptance_rate, 0.95)
+        self.assertTrue(spec.require_full_rounds)
         self.assertEqual(
             {
                 candidate["fedre_teacher_lr"]
@@ -77,6 +80,44 @@ class FairTuningTest(unittest.TestCase):
             )
         )
         self.assertEqual(spec.shared_parameters["detector_decision_rule"], "any")
+
+    def test_hard_constraint_defaults_and_ranges_are_validated(self):
+        template = json.loads(
+            (PROJECT_ROOT / "configs" / "fair_tuning.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for key in (
+            "max_clean_false_positive_rate",
+            "min_clean_round_acceptance_rate",
+            "require_full_rounds",
+        ):
+            template["tuning"].pop(key, None)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "defaults.json"
+            path.write_text(json.dumps(template), encoding="utf-8")
+            spec = load_fair_tuning_config(path)
+
+        self.assertAlmostEqual(spec.max_clean_false_positive_rate, 0.01)
+        self.assertAlmostEqual(spec.min_clean_round_acceptance_rate, 0.95)
+        self.assertTrue(spec.require_full_rounds)
+
+        invalid_cases = (
+            ("max_clean_false_positive_rate", -0.01, "must be in \\[0, 1\\]"),
+            ("max_clean_false_positive_rate", 1.01, "must be in \\[0, 1\\]"),
+            ("min_clean_round_acceptance_rate", -0.01, "must be in \\[0, 1\\]"),
+            ("min_clean_round_acceptance_rate", 1.01, "must be in \\[0, 1\\]"),
+            ("require_full_rounds", 1, "must be boolean"),
+        )
+        for key, value, error in invalid_cases:
+            payload = json.loads(json.dumps(template))
+            payload["tuning"][key] = value
+            with self.subTest(key=key, value=value):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "invalid-hard-constraint.json"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(FairTuningError, error):
+                        load_fair_tuning_config(path)
 
     def test_detector_decision_rule_is_fixed_shared_algorithm_semantics(self):
         payload = json.loads(
@@ -473,6 +514,128 @@ class FairTuningTest(unittest.TestCase):
         self.assertFalse(trial.valid)
         self.assertEqual(trial.clean_acceptance_rate, 0.0)
 
+    def test_clean_acceptance_gate_uses_the_worst_formal_round(self):
+        trial = score_trial(
+            "sm9rrs",
+            "late-collapse",
+            {},
+            [
+                _result(0.0, 0.8, 0, "sm9rrs", accepted_updates=[10, 9]),
+                _result(0.4, 0.7, 0, "sm9rrs", accepted_updates=[10, 10]),
+            ],
+            objective={
+                "clean_accuracy_weight": 0.25,
+                "robust_accuracy_weight": 0.5,
+                "attack_success_weight": 0.2,
+                "false_positive_weight": 0.05,
+            },
+            require_finite_updates=True,
+            require_clean_acceptance=True,
+            min_clean_round_acceptance_rate=0.95,
+        )
+
+        self.assertFalse(trial.valid)
+        self.assertAlmostEqual(trial.clean_acceptance_rate, 0.9)
+        self.assertAlmostEqual(trial.min_clean_round_acceptance_rate, 0.9)
+
+        relaxed = score_trial(
+            "sm9rrs",
+            "late-collapse-relaxed",
+            {},
+            [
+                _result(0.0, 0.8, 0, "sm9rrs", accepted_updates=[10, 9]),
+                _result(0.4, 0.7, 0, "sm9rrs", accepted_updates=[10, 10]),
+            ],
+            objective={
+                "clean_accuracy_weight": 0.25,
+                "robust_accuracy_weight": 0.5,
+                "attack_success_weight": 0.2,
+                "false_positive_weight": 0.05,
+            },
+            require_finite_updates=True,
+            require_clean_acceptance=True,
+            min_clean_round_acceptance_rate=0.9,
+        )
+        self.assertTrue(relaxed.valid)
+
+    def test_worst_clean_false_positive_rate_is_a_hard_constraint(self):
+        trial = score_trial(
+            "sm9rrs",
+            "clean-false-positive",
+            {},
+            [
+                _result(
+                    0.0,
+                    0.8,
+                    0,
+                    "sm9rrs",
+                    false_positive_revocations=1,
+                ),
+                _result(0.4, 0.7, 0, "sm9rrs"),
+            ],
+            objective={
+                "clean_accuracy_weight": 0.25,
+                "robust_accuracy_weight": 0.5,
+                "attack_success_weight": 0.2,
+                "false_positive_weight": 0.05,
+            },
+            require_finite_updates=True,
+            max_clean_false_positive_rate=0.01,
+        )
+
+        self.assertFalse(trial.valid)
+        self.assertAlmostEqual(trial.worst_clean_false_positive_rate, 0.1)
+        self.assertAlmostEqual(trial.row()["worst_clean_false_positive_rate"], 0.1)
+
+    def test_any_incomplete_validation_run_is_invalid_when_required(self):
+        incomplete_attack = _result(
+            0.4,
+            0.7,
+            0,
+            "sm9rrs",
+            config=ExperimentConfig(
+                method="sm9rrs",
+                malicious_ratio=0.4,
+                num_clients=10,
+                rounds=2,
+            ),
+            stopped_round=1,
+        )
+        trial = score_trial(
+            "sm9rrs",
+            "incomplete",
+            {},
+            [_result(0.0, 0.8, 0, "sm9rrs"), incomplete_attack],
+            objective={
+                "clean_accuracy_weight": 0.25,
+                "robust_accuracy_weight": 0.5,
+                "attack_success_weight": 0.2,
+                "false_positive_weight": 0.05,
+            },
+            require_finite_updates=True,
+            require_full_rounds=True,
+        )
+
+        self.assertFalse(trial.valid)
+        self.assertFalse(trial.all_runs_completed)
+        self.assertFalse(trial.row()["all_runs_completed"])
+
+        relaxed = score_trial(
+            "sm9rrs",
+            "incomplete-relaxed",
+            {},
+            [_result(0.0, 0.8, 0, "sm9rrs"), incomplete_attack],
+            objective={
+                "clean_accuracy_weight": 0.25,
+                "robust_accuracy_weight": 0.5,
+                "attack_success_weight": 0.2,
+                "false_positive_weight": 0.05,
+            },
+            require_finite_updates=True,
+            require_full_rounds=False,
+        )
+        self.assertTrue(relaxed.valid)
+
 
 def _result(
     ratio,
@@ -481,34 +644,45 @@ def _result(
     method="fedavg",
     *,
     accepted_updates=10,
+    false_positive_revocations=0,
+    stopped_round=None,
     config=None,
 ):
+    accepted_by_round = (
+        list(accepted_updates)
+        if isinstance(accepted_updates, (list, tuple))
+        else [accepted_updates]
+    )
     config = config or ExperimentConfig(
         method=method,
         malicious_ratio=ratio,
         num_clients=10,
+        rounds=len(accepted_by_round),
     )
-    record = RoundRecord(
-        method,
-        ratio,
-        1,
-        accuracy,
-        1.0 - accuracy,
-        accepted_updates,
-        nonfinite,
-        0,
-        0,
-        0,
-        "",
-        attack_target_success_rate=0.1 if ratio > 0.0 else 0.0,
-        nonfinite_updates=nonfinite,
-    )
+    records = [
+        RoundRecord(
+            method,
+            ratio,
+            round_id,
+            accuracy,
+            1.0 - accuracy,
+            accepted,
+            max(0, config.num_clients - accepted),
+            false_positive_revocations,
+            0,
+            false_positive_revocations,
+            "",
+            attack_target_success_rate=0.1 if ratio > 0.0 else 0.0,
+            nonfinite_updates=nonfinite,
+        )
+        for round_id, accepted in enumerate(accepted_by_round, start=1)
+    ]
     return ExperimentResult(
         config=config,
-        records=[record],
+        records=records,
         final_accuracy=accuracy,
         final_error=1.0 - accuracy,
-        stopped_round=1,
+        stopped_round=(len(records) if stopped_round is None else stopped_round),
         malicious_clients=tuple(),
         blacklisted_clients=tuple(),
         nonfinite_updates=nonfinite,

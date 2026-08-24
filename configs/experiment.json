@@ -1,19 +1,20 @@
 {
   "schema_version": 1,
-  "name": "v3",
-  "description": "CIFAR-10 five-method experiment with the third-revision trusted-anchor SVD detector and an explicit, shared attack schedule.",
+  "name": "mnist-v3-auto-calibrated",
+  "description": "MNIST six-method study using the 2026-08-23 shared hyperparameter schedule under the new leakage-free 90/5/5 training split. Ours is calibrated once and frozen within this seed-bound experiment; FedREDefense uses the previously omitted teacher learning rate.",
   "parameters": {
-    "dataset": "cifar10",
+    "dataset": "mnist",
     "download": true,
-    "data_dir": "data/cifar10",
-    "output_dir": "outputs/cifar10_v320260821",
+    "data_dir": "data/mnist",
+    "output_dir": "outputs/mnist_v3_20260824",
 
     "methods": [
       "sm9rrs",
       "vert",
-      "fedavg",
+      "fedredefense",
       "krum",
-      "ding13"
+      "ding13",
+      "fedavg"
     ],
 
     "ratios": [
@@ -44,35 +45,34 @@
     "target_error": 0.12,
 
     "attack": "alternating_minimization",
-    "attack_boost": 7.5,
+    "attack_boost": 15.0,
     "attack_epochs": 1,
-    "attack_stealth_steps": 8,
+    "attack_stealth_steps": 1,
     "attack_distance_weight": 0.0001,
     "attack_source_label": 5,
     "attack_target_label": 7,
     "attack_target_count": 128,
     "attack_start_round": 12,
 
-    "K": 10,
-    "detector_subspace_dim": 2,
-    "detector_gap_threshold": 0.1,
-    "detector_adjacent_threshold": 3.0,
-    "detector_anchor_threshold": 3.0,
-    "detector_drift_memory": 0.9,
-    "detector_drift_allowance": 1.0,
-    "detector_drift_threshold": 5.0,
-    "detector_decision_rule": "any",
-    "suspicion_remove_after": 3,
-    "suspicion_count_max": 3,
-    "suspicion_penalty_factor": 0.01,
-    "suspicion_recovery_factor": 10.0,
+    "K": 7,
+    "ours_parameter_mode": "auto",
 
-    "vert_history_window": 10,
+    "vert_history_window": 7,
     "vert_projection_dim": 128,
     "vert_predict_epochs": 5,
     "vert_predict_lr": 0.001,
     "vert_top_k": 0,
     "vert_use_ratio_prior": false,
+
+    "fedre_threshold": 0.6,
+    "fedre_initial_iterations": 800,
+    "fedre_max_iterations": 2000,
+    "fedre_synthetic_steps": 5,
+    "fedre_images_per_class": 1,
+    "fedre_image_lr": 0.5,
+    "fedre_label_lr": 0.2,
+    "fedre_teacher_lr": 5.0,
+    "fedre_teacher_lr_lr": 0.000005,
 
     "crypto_mode": "sm9",
     "dkg_threshold": 2,

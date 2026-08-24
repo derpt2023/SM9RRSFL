@@ -28,6 +28,8 @@ class ConfigRunnerTest(unittest.TestCase):
         self.assertTrue(args.ratios)
         self.assertTrue(args.client_counts or [args.num_clients])
         self.assertTrue(args.partitions or [args.partition])
+        self.assertEqual(args.ours_parameter_mode, "auto")
+        self.assertEqual(args.fedre_teacher_lr, 5.0)
 
     def test_boolean_aliases_and_store_false_option_are_supported(self):
         argv = parameters_to_argv(
@@ -142,8 +144,49 @@ class ConfigRunnerTest(unittest.TestCase):
         self.assertIn("resolved_parameters=", text)
         self.assertIn("effective_detector_parameters=", text)
         self.assertIn('"effective_attack_start_round": 12', text)
-        self.assertIn('"suspicion_count_max": 3', text)
+        self.assertIn('"status": "pending_global_offline_calibration"', text)
+        self.assertIn('"detector_subspace_dim": "<pending_global_offline_calibration>"', text)
         self.assertIn('"dataset":', text)
+
+    def test_auto_mode_rejects_every_manual_ours_parameter_but_allows_k(self):
+        allowed = parameters_to_argv(
+            {
+                "dataset": "synthetic",
+                "methods": ["sm9rrs", "fedavg"],
+                "ours_parameter_mode": "auto",
+                "K": 7,
+                "early_stop": False,
+            }
+        )
+        self.assertEqual(parse_args(allowed).detector_window, 7)
+
+        for name, value in (
+            ("q", 2),
+            ("g0", 0.1),
+            ("theta_adj", 3.0),
+            ("theta_anc", 3.0),
+            ("beta", 0.9),
+            ("kappa", 1.0),
+            ("h", 5.0),
+            ("C_tol", 3),
+            ("C_max", 3),
+            ("suspicion_penalty_factor", 0.5),
+            ("suspicion_recovery_factor", 2.0),
+        ):
+            with self.subTest(name=name), mock.patch(
+                "sys.stderr",
+                new=io.StringIO(),
+            ), self.assertRaises(SystemExit):
+                parse_args(
+                    parameters_to_argv(
+                        {
+                            "methods": ["sm9rrs"],
+                            "ours_parameter_mode": "auto",
+                            "early_stop": False,
+                            name: value,
+                        }
+                    )
+                )
 
     def test_non_dry_run_dispatches_to_authoritative_experiment_entry(self):
         config = PROJECT_ROOT / "configs" / "experiment.json"

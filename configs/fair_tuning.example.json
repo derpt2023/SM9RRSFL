@@ -64,6 +64,9 @@
     "trials_per_tunable_method": 4,
     "require_finite_updates": true,
     "require_clean_acceptance": true,
+    "max_clean_false_positive_rate": 0.01,
+    "min_clean_round_acceptance_rate": 0.95,
+    "require_full_rounds": true,
     "run_final_evaluation": true,
     "objective": {
       "clean_accuracy_weight": 0.25,

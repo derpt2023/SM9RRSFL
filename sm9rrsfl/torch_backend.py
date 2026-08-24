@@ -217,6 +217,22 @@ def _resident_dataset_tensors(torch, dataset, spec: ModelSpec, device) -> tuple[
             dtype=torch.long,
             device=device,
         )
+        attack_x_np = (
+            dataset.x_test
+            if getattr(dataset, "x_attack", None) is None
+            else dataset.x_attack
+        )
+        attack_y_np = (
+            dataset.y_test
+            if getattr(dataset, "y_attack", None) is None
+            else dataset.y_attack
+        )
+        x_attack = _torch_data(torch, attack_x_np, spec, device)
+        y_attack = torch.as_tensor(
+            np.asarray(attack_y_np, dtype=np.int64),
+            dtype=torch.long,
+            device=device,
+        )
 
         def clear_cache(_reference, cache_key=key):
             with _DATASET_TENSOR_CACHE_LOCK:
@@ -228,8 +244,10 @@ def _resident_dataset_tensors(torch, dataset, spec: ModelSpec, device) -> tuple[
             y_train,
             x_test,
             y_test,
+            x_attack,
+            y_attack,
         )
-        return x_train, y_train, x_test, y_test
+        return x_train, y_train, x_test, y_test, x_attack, y_attack
 
 
 class TorchTrainingContext:
@@ -256,6 +274,8 @@ class TorchTrainingContext:
             self.y_train,
             self.x_test,
             self.y_test,
+            self.x_attack,
+            self.y_attack,
         ) = _resident_dataset_tensors(torch, dataset, self.spec, self.device)
         self.client_indices = [
             torch.as_tensor(np.asarray(indices, dtype=np.int64), dtype=torch.long, device=self.device)
@@ -564,7 +584,7 @@ class TorchTrainingContext:
             dtype=self.torch.long,
             device=self.device,
         )
-        target_features = self.x_test.index_select(0, target_index)
+        target_features = self.x_attack.index_select(0, target_index)
         target_labels = self.torch.full(
             (len(target_index_array),),
             int(target_label),

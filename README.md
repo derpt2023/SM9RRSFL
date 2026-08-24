@@ -1,6 +1,6 @@
 # SM9-RRS-FL 实验复现
 
-本项目根据 2026-08-21 的 `方案第三版（计算机学报排版）.pdf` 中 SM9-RRS-FL 方案，提供一套可执行的联邦学习投毒防御实验框架，用于论文实验和对比研究。
+本项目根据 2026-08-24 提供的最新版 `方案第三版（计算机学报排版）.pdf` 中 SM9-RRS-FL 方案，提供一套可执行的联邦学习投毒防御实验框架，用于论文实验和对比研究。
 
 ## 已实现内容
 
@@ -8,9 +8,10 @@
 - 默认基于 NumPy 的卷积神经网络（CNN）联邦训练，并提供可选 PyTorch 后端用于 GPU 加速：MNIST 使用轻量 compact CNN，CIFAR-10 使用参考 FedAvg/CIFAR-10 经验配置的 `Conv-Conv-FC-FC-Logits` CNN 与按通道标准化输入；支持单个客户端数量或 `20/50/100` 等多客户端数量对比、本地训练轮次、批大小、学习率、学习率衰减、IID 独立同分布/Dirichlet 非 IID 划分和误差阈值早停。
 - 默认实验比例：`0%`、`10%`、`20%`、`40%`、`45%`、`60%`、`80%`，其中 `0%` 用于无恶意节点收敛对比。
 - SM9-RRS-FL v3 流程：固定任务环、常数大小签名 `σ=(c,A,B,C)`、任务级匿名标签、两个签名验证等式、可信锚定双参考纵向 SVD 检测、D-KGC 门限追踪、门限 Schnorr 证书确认和任务环更新。
+- Ours 支持“正式主实验前一次全局离线校准 + 主实验统一冻结”：训练集按类别分层为联邦训练、校准评价和攻击辅助三份，clean shadow 只观测轨迹而不降权/撤销；闭环验证通过硬约束后生成带协议指纹的参数工件，同一主实验的 IID/Non-IID、全部恶意比例和客户端数量统一复用，配置中无需手填 `q/g0/theta/beta/kappa/h/C_tol/C_max/penalty/recovery`。
 - 纵向检测把完整一维模型更新按 `ceil(|G|/num_classes) × num_classes` 重构并补零，提取前 `q` 维对数奇异谱、主左奇异子空间及第 `q+1` 个奇异值形成的相对谱间隙。每个 `Tag_π` 同时维护最近观测与仅含 `R=0` 更新的可信历史；相邻参考捕获单轮突变，可信锚点与累计漂移捕获彼此相似但持续偏离正常轨迹的 `attack→attack` 更新。实现仅保存薄基 `U_q`，通过严格等价的 Gram/主角度公式计算投影矩阵距离，不会构造不可执行的 `m×m` 投影矩阵。
 - 四类非负距离采用单侧 MAD 稳健标准化；方向证据按相对谱间隙和当前更新尺度得到的 `χ` 相乘降权。最终复合变量 `R` 同时控制动态降权与异常计数：`R=1` 时权重乘惩罚因子且 `Count=min(C_max,Count+1)`，`R=0` 时恢复权重且 `Count=floor(Count/2)`。达到 `C_tol` 后立即拒绝触发轮更新并请求门限追踪，只有证书验证成功后才永久撤销身份。
-- 攻击端实现 Bhagoji 等人的带距离约束交替最小化：恶意客户端在本地训练中交替优化目标误分类损失与正常任务/距离隐蔽损失，并只对目标攻击步进行显式提升；Ding 等人的实验以该攻击为基础。旧版“轮换参数分片并注入随机扰动”的实现已经删除，不再把一般向量噪声称为交替最小化攻击。
+- 攻击端实现 Bhagoji 等人的带距离约束交替最小化：恶意客户端在本地训练中交替优化目标误分类损失与正常任务/距离隐蔽损失，并只对目标攻击步进行显式提升；自动校准的正式流程从训练集独立攻击辅助子集取目标样本，官方测试集只用于最终 accuracy/ASR。Ding 等人的实验以该攻击为基础。旧版“轮换参数分片并注入随机扰动”的实现已经删除，不再把一般向量噪声称为交替最小化攻击。
 - 联邦学习主流程通过 `ClientSigner`、`ASVerifier` 和 `AuditorService` 角色对象分别调用签名、完整验签和门限追踪。客户端对象只保存本客户端私钥和成员见证；AS 对象保存验签所需公开参数、非公开任务点、TPK、审计台账和独立的审计提交认证密钥，但不含任何客户端签名私钥或 D-KGC 追踪份额。AS 候选状态仅按不透明任务标签索引，不保存标签到真实身份的映射。
 - Krum 与 FedAvg baseline，对照实验使用相同数据划分、恶意比例和攻击方式；FedAvg/加权聚合按客户端本地样本数加权，Krum 保持原始单更新选择语义。
 - TAD（Trajectory Anomaly Detection，文献 [13]）对照实验：复现其“奇异值轨迹差分 + Isolation Forest + 动态权重惩罚/恢复 + 连续异常剔除”的在线投毒检测流程。
@@ -36,6 +37,7 @@ AS 创建追踪证据时会把完整不可变证据、摘要和控制面授权�
 - `sm9rrsfl/sm9_backend.py`、`sm9rrsfl/_native_sm9.c`：定长字节接口和基于 GmSSL 的国标 SM9 `G1/G2/GT`、配对及 `H_v` 原生桥。
 - `sm9rrsfl/_native_sm3.c`：大更新 SM3 摘要的可选原生加速器。`_native_rrs.c` 是已停用的 v1 源码，不参与 v2 构建或运行。
 - `sm9rrsfl/fl.py`、`sm9rrsfl/experiments.py`：联邦训练主流程和 MNIST/CIFAR-10 对比实验入口。
+- `sm9rrsfl/ours_calibration.py`：Ours 的训练集三分、clean shadow、闭环候选筛选、协议指纹与冻结工件管理。
 - `sm9rrsfl/vert.py`、`sm9rrsfl/fedredefense.py`：VERT 纵向历史梯度预测基线和 FedREDefense 更新重构误差基线。
 - `sm9rrsfl/benchmarks/`：独立微基准实验入口，不混入 CNN 训练时间；目前包含签名与验签开销测试。
 - `gmssl/`：历史 Python 兼容代码；v2 的真实 SM9 群运算不使用其中的旧双线性曲线，而由 `_native_sm9` 调用用户提供的 GmSSL C 源码。
@@ -152,7 +154,7 @@ python run_experiments_from_config.py
 python -m sm9rrsfl.config_runner --config configs/experiment.json
 ```
 
-正式启动前，建议先进行只校验、不训练的预检查。它会打印转换后的原始实验命令、解析参数，以及把兼容哨兵解析后的 `effective_detector_parameters`（两个实际阈值、`C_max` 和实际起攻轮）；`jobs=auto`、`sm9_workers=auto` 等依赖实际 CPU 配额、内存和 CUDA 空闲显存的值会在正式启动、数据集加载后写入 `resource_plan=...`：
+正式启动前，建议先进行只校验、不训练的预检查。它会打印转换后的原始实验命令和解析参数。`ours_parameter_mode=auto` 时，Ours 专属字段会显示为 `<pending_global_offline_calibration>`，不会把 argparse 的兼容默认值误报成正式实验参数；真正选定值、工件指纹和实际起攻轮会在数据加载及校准后写入校准工件与 `run_manifest.json`。`jobs=auto`、`sm9_workers=auto` 等依赖实际 CPU 配额、内存和 CUDA 空闲显存的值会在正式启动后写入 `resource_plan=...`：
 
 ```bash
 python -m sm9rrsfl.config_runner \
@@ -164,13 +166,25 @@ python -m sm9rrsfl.config_runner \
 
 - 顶层必须包含 `"schema_version": 1` 和 `"parameters": { ... }`。
 - 参数名对应主实验长参数去掉 `--` 后将连字符改成下划线，例如 `--vert-top-k` 写成 `"vert_top_k"`，`--client-counts` 写成 `"client_counts"`。
-- 论文符号可直接写成 `"K"`、`"q"`、`"g0"`、`"theta_adj"`、`"theta_anc"`、`"beta"`、`"kappa"`、`"h"`、`"C_tol"` 和 `"C_max"`；它们分别映射到对应的 `detector_*`、`suspicion_remove_after` 与 `suspicion_count_max` 字段。同一份配置不能同时写别名与规范名。
+- `"ours_parameter_mode": "auto"` 是正式主实验推荐模式。此时只保留公共参数 `K`，不得再填写 `q`、`g0`、`theta_adj`、`theta_anc`、`beta`、`kappa`、`h`、`C_tol`、`C_max`、`suspicion_penalty_factor` 或 `suspicion_recovery_factor`；发现任一手填项会在加载数据前直接报错。`"fixed"` 仅用于旧结果复现和消融，此时上述论文符号仍可映射到对应内部字段。
 - 旧字段 `z_threshold` 仍可作为 `theta_adj` 与 `theta_anc` 的共同兼容值；它不能与任一显式新阈值同时配置，避免覆盖顺序不透明。
 - `methods`、`ratios`、`client_counts`、`partitions` 使用 JSON 数组；普通数值和字符串直接填写。
 - 布尔参数可直接填写 `true/false`。配置入口额外支持较直观的 `early_stop`、`visualizations`、`progress` 和 `resume`；例如 `"early_stop": false` 等价于命令行 `--no-early-stop`。`"progress_mode"` 可取 `"auto"`、`"live"` 或 `"log"`；本示例使用 `"live"`，以兼容 PyCharm 等不报告 TTY 的本地控制台。
 - 未填写的参数继续使用原命令行默认值和数据集训练预设；未知参数、空数组、非法取值或冲突组合会在加载数据和开始训练前报错。
 
 配置入口最终仍调用 `sm9rrsfl.experiments`，因此命令行模式原有的参数校验、数据集预设、并行执行、断点恢复、可视化和输出格式全部保持一致。每次实际生效的完整参数仍会写入输出目录的 `run_manifest.json`、`summary.csv` 和 `summary.json`。
+
+## Ours 全局自动校准与冻结
+
+正式实验只需在 JSON 中设置公共训练/攻击参数、`K` 和 `"ours_parameter_mode": "auto"`。启动器会在构造主实验配置和主运行指纹之前自动完成以下流程：
+
+1. 对配置加载到的训练样本执行确定性分层 `90% / 5% / 5%` 三分，分别用于正式联邦训练、校准评价和攻击辅助；官方测试集不参与参数选择或攻击优化。当前示例的 `train_samples=50000` 是加载上限，因此实际三份约为 `45000 / 2500 / 2500`，不是完整 MNIST 的 `54000 / 3000 / 3000`。
+2. 在全部已声明的 IID/Dirichlet 划分和客户端数量上，对 `q` 候选执行 `0%` 恶意 clean shadow。影子检测仍计算 SVD、稳健分数和漂移轨迹，但强制信任全部有限更新，不触发降权、计数、追踪或撤销。
+3. 从 clean 轨迹自动计算 `g0`、`beta`、`kappa`、`theta_adj`、`theta_anc` 和 `h`，并自动生成 `C_tol/C_max` 与惩罚/恢复因子。每个候选先只跑强制执行检测决策的干净闭环；若仅因误撤销率、逐轮接纳率、逐轮疑似率或有效样本量（ESS）失败，则分别把三类证据阈值单调提高到“本轮干净最大分数 × 1.05”以上并从头重放，最多修正 4 次，以消除误疑似冻结可信历史造成的级联。未满轮默认视为结构性失败；只有结果同时证明“关闭提前停止、没有非有限更新、0% 场景的全部客户端均被记录为误撤销且任务环耗尽”时，才允许按同一规则修复。干净硬约束通过后才运行全部攻击比例，最终无可行候选时失败关闭。
+4. 选中的唯一参数集写入 `输出目录/.ours_calibration/<协议指纹>/ours_parameters.json`，同时把当前完整快照写入 `输出目录/ours_calibration.json`。长校准过程复用主运行的轮级检查点；只有两个工件均原子落盘后才清理已提交终态检查点。参数值和工件指纹一并进入主 `run_manifest.json`，因此同一指纹可安全复用；数据、主 `seed`、`K`、学习率、划分、客户端数量、轮数或攻击参数变化会产生新指纹并重新校准。
+5. 校准结束后从头启动正式主实验；同一次主 `seed` 执行中的 Ours 在 `0%–80%`、IID/Non-IID 和全部客户端数量下使用完全相同的冻结参数。更换最终 `seed` 会生成并审计新的校准工件，不宣称一份工件跨不同最终种子复用。校准耗时不混入主实验在线运行时间。
+
+当前 `configs/experiment.json` 沿用 `outputs/mnist_v3_20260823_1` 的共享超参数日程，并应用新的训练集 `90/5/5` 隔离协议、输出目录和自动校准流程；它不是可与旧曲线逐点拼接的原样复跑。配置已删除全部 Ours 手工参数，并显式设置 `fedre_threshold=0.6` 和 `fedre_teacher_lr=5.0`：旧批次遗漏后者而落回 `0.1`，会使 FedREDefense 第一轮拒绝并屏蔽全部客户端，准确率因此保持水平直线。`5.0` 是此前训练留出校准得到的已知可运行点；若论文要宣称所有方法具有同等调参预算，应继续使用 `configs/fair_tuning.example.json` 对六种方法统一验证，而不是观察正式测试曲线后再改值。
 
 ## 分数据集的统一公平调参和主实验
 
@@ -181,7 +195,7 @@ python -m sm9rrsfl.config_runner \
 3. Ours、VERT 和 FedREDefense 等确有暴露超参数的方法必须具有完全相同的网格候选数 `trials_per_tunable_method`。FedAvg、Krum 和当前 TAD 实现没有额外的可调防御参数，因此各自只有一个空候选，但仍完整参加验证和最终主实验。
 4. 所有候选使用同一组 `validation_seeds` 和场景，最终主实验使用与之不重叠的 `final_seeds`。配置强制 `early_stop=false` 和 `eval_interval=1`，避免某个候选少跑轮次，并完整审计非有限更新。
 5. 默认 `require_finite_updates=true`：只要候选产生任何 NaN/Inf 更新，该候选即无效，不能因恶意更新被自动丢弃而获得虚假的高分。如果某方法全部候选无效，搜索会直接失败并要求先修正共享训练/攻击配置。
-6. 默认 `require_clean_acceptance=true`：每个候选必须在每个 `0%` 恶意验证场景中至少有一次实际聚合。像 FedREDefense 第一轮拒绝并永久屏蔽全部正常客户端的候选会直接判为无效，不能再从一组全部崩溃的参数中强行选出“最优值”。
+6. 干净稳定性采用最坏情况硬约束，而不是“任一轮曾接纳过客户端”即可通过：默认要求 `max_clean_false_positive_rate=0.01`、`min_clean_round_acceptance_rate=0.95` 和 `require_full_rounds=true`。逐轮接纳率对每个 `0%` 运行先取最小值，再跨 seed/partition 取最差值；误撤销率同样取最坏干净运行。像 FedREDefense 第一轮接纳、随后永久屏蔽全部正常客户端的候选会直接无效。
 7. 选参前预先声明统一目标：干净准确率、攻击场景准确率、目标攻击成功率和误撤销率的固定权重。最终论文表格使用独立 `final_seeds` 的均值/标准差，不从最终测试集反向选择候选。
 8. 参数选择阶段把“候选 × 验证种子 × 场景”展开为独立配置，复用主实验的资源规划：CUDA/MPS 使用线程队列和设备端 Torch 训练，多个 CUDA 设备自动轮转；NumPy/Torch CPU 使用多进程。进度条按实际配置数显示完成比例、已用时间和 ETA。最终论文计时阶段固定 `jobs=1` 且不跨 GPU 轮转，避免并发竞争或不同 GPU 性能污染时间公平性；单个配置仍可使用 CUDA/MPS 加速。
 
@@ -420,43 +434,54 @@ python -m sm9rrsfl.experiments \
   --dataset mnist \
   --download \
   --data-dir data/mnist \
+  --output-dir outputs/mnist_v3_auto_20260824 \
   --methods sm9rrs vert fedredefense krum ding13 fedavg \
-  --ratios 0.00 0.10 0.20 0.40 0.45 0.60 0.80 \
+  --ratios 0.00 0.20 0.40 0.60 0.80 \
   --partitions iid dirichlet \
   --dirichlet-alpha 0.5 \
-  --client-counts 20 50 100 \
+  --client-counts 100 \
   --rounds 30 \
+  --train-samples 50000 \
+  --test-samples 10000 \
   --local-epochs 1 \
   --batch-size 32 \
   --lr 0.05 \
-  --lr-decay 1.0 \
+  --lr-decay 0.99 \
   --attack alternating_minimization \
-  --attack-boost 10 \
-  --attack-epochs 10 \
-  --attack-stealth-steps 10 \
+  --attack-boost 15 \
+  --attack-epochs 1 \
+  --attack-stealth-steps 1 \
   --attack-distance-weight 1e-4 \
   --attack-source-label 5 \
   --attack-target-label 7 \
-  --attack-target-count 1 \
+  --attack-target-count 128 \
   --attack-start-round 12 \
-  --K 10 \
-  --detector-subspace-dim 2 \
-  --detector-gap-threshold 0.1 \
-  --detector-adjacent-threshold 3.0 \
-  --detector-anchor-threshold 3.0 \
-  --detector-drift-memory 0.9 \
-  --detector-drift-allowance 1.0 \
-  --detector-drift-threshold 5.0 \
-  --detector-decision-rule any \
-  --C_tol 3 \
-  --C_max 3 \
+  --K 7 \
+  --ours-parameter-mode auto \
+  --vert-history-window 7 \
+  --vert-projection-dim 128 \
+  --vert-predict-epochs 5 \
+  --vert-predict-lr 0.001 \
+  --fedre-threshold 0.6 \
+  --fedre-initial-iterations 800 \
+  --fedre-max-iterations 2000 \
+  --fedre-synthetic-steps 5 \
+  --fedre-images-per-class 1 \
+  --fedre-image-lr 0.5 \
+  --fedre-label-lr 0.2 \
+  --fedre-teacher-lr 5.0 \
+  --fedre-teacher-lr-lr 5e-6 \
   --target-error 0.12 \
+  --no-early-stop \
+  --eval-interval 1 \
   --crypto-mode sm9 \
   --compute-backend auto \
-  --device auto
+  --device auto \
+  --jobs auto \
+  --sm9-workers auto
 ```
 
-真实 SM9 MNIST 主实验默认写入 `outputs/mnist/`；模拟模式默认写入 `outputs/mnist_simulated/`。
+上述命令与 `configs/experiment.json` 一致，真实 SM9 MNIST 主实验写入 `outputs/mnist_v3_auto_20260824/`。
 
 ## CIFAR-10 干净基线
 
@@ -494,22 +519,14 @@ python -m sm9rrsfl.experiments \
   --lr-decay 0.99 \
   --attack-start-round 12 \
   --K 10 \
-  --detector-subspace-dim 2 \
-  --detector-gap-threshold 0.1 \
-  --detector-adjacent-threshold 3.0 \
-  --detector-anchor-threshold 3.0 \
-  --detector-drift-memory 0.9 \
-  --detector-drift-allowance 1.0 \
-  --detector-drift-threshold 5.0 \
-  --detector-decision-rule any \
-  --C_tol 3 \
-  --C_max 3 \
+  --ours-parameter-mode auto \
   --target-error 0.12 \
+  --no-early-stop \
   --crypto-mode sm9 \
   --compute-backend auto \
   --device auto \
   --jobs auto \
-  --eval-interval 5 \
+  --eval-interval 1 \
   --checkpoint-interval 0 \
   --sm9-workers auto
 ```
@@ -546,7 +563,7 @@ NumPy 及 CPU Torch 后端优先使用多进程，使独立配置能够占用多
 
 启用 PyTorch 后端时，数据集、客户端索引、全局参数、客户端更新和聚合结果会持续驻留所选设备。FedAvg/加权 FedAvg、Krum 距离、投毒变换和 Ding13 SVD 特征均直接在设备端执行；真实 SM9 只为协议要求的更新 SM3 摘要回传一次 CPU 字节。Ours 只求前 `q+1` 个真实奇异值及前 `q` 维薄左子空间，CUDA 使用缩放后的列 Gram 小矩阵分解，MPS 不支持时显式回退 NumPy/CPU；可信历史以可移植的 float32 薄基保存在主存。`jobs=auto` 会按 `max(num_clients) × (K+1) × ceil(d/c) × q × 4 bytes` 估计检测器薄基状态并计入并发预算。任何包含 `NaN/Inf` 的客户端更新都会在摘要、检测和聚合前拒绝，避免污染全局模型，同时累计到输出中的 `nonfinite_updates`，不得把这类运行当作防御有效结果。上述优化不改变客户端划分、攻击启动轮次、聚合公式、检测阈值或撤销规则。
 
-运行默认启用断点续跑：第 1 轮前和每个有效检查点间隔结束后会原子写入 `输出目录/.checkpoints/`，每完成一个配置还会先更新事务式结果快照，再派生 CSV/JSON。训练、密码运算、检测、聚合、断电或手动终止发生在区间中间时，只恢复最近一次完整耐久化状态，不会恢复“完成一半”的聚合；自动间隔为 `N` 时最多重算 `N-1` 轮。同一 checkpoint schema、相同数据规模和参数下重启会继续并跳过已完成配置；第三版检测状态使用 schema 11，旧 schema 不会被加载，必须换新输出目录从第 0 轮重跑 Ours。以后再次执行同 schema 的旧命令时，程序可按指纹找回对应 `.stale/` 结果。确实需要从零重跑时加 `--no-resume`。
+运行默认启用断点续跑：第 1 轮前和每个有效检查点间隔结束后会原子写入 `输出目录/.checkpoints/`，每完成一个配置还会先更新事务式结果快照，再派生 CSV/JSON。训练、密码运算、检测、聚合、断电或手动终止发生在区间中间时，只恢复最近一次完整耐久化状态，不会恢复“完成一半”的聚合；自动间隔为 `N` 时最多重算 `N-1` 轮。同一 checkpoint schema、相同数据规模、冻结校准工件和参数下重启会继续并跳过已完成配置；带 clean-shadow 状态的检测实现使用 schema 12，旧 schema 不会被加载，必须换新输出目录从第 0 轮重跑 Ours。以后再次执行同 schema 的旧命令时，程序可按指纹找回对应 `.stale/` 结果。确实需要从零重跑时加 `--no-resume`。
 
 交互式终端发现“checkpoint schema、完整配置字段和运行指纹都相同”的断点时，会询问 `是否沿着断点运行（Y/N）`：输入 `Y` 从下一轮继续；输入 `N` 从第 0 轮开始，并将原断点备份到 `.checkpoints/discarded/`。CI、重定向输入等非交互式环境不会等待键盘输入，默认选择 `Y`。运行指纹是将数据集元信息和整组有效实验配置规范化为 JSON 后计算的 SHA-256 摘要，用来防止不同实验误用同一结果；它不包含代码版本，因此只有 schema 未变化的兼容修复才可能沿用同参数断点，检测状态结构变化必须提升 schema。
 
@@ -669,9 +686,10 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 - `--attack-distance-weight 1e-4`：隐蔽目标中距离约束的权重 $\rho$，默认 $10^{-4}$。项目先从当前全局模型独立执行一次正常本地训练得到 $w_{\mathrm{ben}}$，再优化
   $L_{\mathrm{stealth}}(w)=L(D_m;w)+\frac{\rho}{2}\lVert w-w_{\mathrm{ben}}\rVert_2^2$。
 - `--attack-source-label 5` / `--attack-target-label 7`：目标攻击的真实类别和错误目标类别，默认沿用 Bhagoji 实验的类别编号 $5\rightarrow7$。原论文使用 Fashion-MNIST；本项目运行 MNIST 时，这两个编号对应数字类别而非原论文中的鞋类类别。二者必须不同且处于数据集类别范围内。
-- `--attack-target-count 1`：目标辅助样本数 $r$，默认 `1`。程序用随机种子从测试集中真实标签为 `attack-source-label` 的样本中确定性选取，作为威胁模型中的同分布辅助集 $D_{\mathrm{aux}}$；若限定测试集后没有足够样本，程序会在训练前明确失败。
+- `--attack-target-count 1`：目标辅助样本数 $r$，默认 `1`。自动校准正式流程从训练集独立的攻击辅助子集中确定性选择真实标签为 `attack-source-label` 的样本；最终 ASR 则在官方测试集另行选择且不重叠。固定参数旧流程未提供 `x_attack` 时仍保留测试集回退，只用于历史结果复现。
 - `--attack-start-round 0`：设置所有方法共同使用的攻击起始轮。默认 `0` 是特殊值，表示从第 $K+2$ 轮开始，使前 $K$ 轮为无攻击观察期，并保留第 $K+1$ 轮作为首次正常评分；正整数表示绝对通信轮号。
 - `--K 3`：可信历史窗口容量和初始观察数 $K$，默认 `3` 且不得小于 `2`。每个任务标签的前 $K$ 次观测建立可信轨迹，第 $K+1$ 次观测首次评分；推荐配置使用 `K=10`，并将所有方法共同的绝对起攻轮固定为至少 `max(K候选)+2`。兼容参数名 `--k` 和 `--detector-window`。
+- `--ours-parameter-mode fixed|auto`：默认 `fixed` 用于兼容旧命令；正式论文主实验应显式使用 `auto`。自动模式只允许手动设置公共参数 `K`，其余 Ours 专属参数由一次离线校准生成并在整组主实验冻结；任何手填冲突都会在数据加载前失败。
 - `--detector-subspace-dim 2`：前导奇异子空间维数 $q$，默认采用第三版给出的 `2`。检测同时需要 $\lambda_{q+1}$ 计算相对谱间隙，因此十分类数据必须满足 `1 <= q <= 9`。
 - `--detector-gap-threshold 0.1`：方向可靠度中的谱间隙尺度 $g_0$；`0.1` 是工程起始值，不是论文给出的实验最优值。
 - `--detector-adjacent-threshold 3.0` / `--detector-anchor-threshold 3.0`：相邻复合分数 $S_{\mathrm{adj}}$ 与可信锚点复合分数 $S_{\mathrm{anc}}$ 的阈值 $\theta_{\mathrm{adj}}$、$\theta_{\mathrm{anc}}$。四类距离各自使用单侧中位数/MAD 标准化，而不是均值标准差的普通 $3\sigma$ 检验。
@@ -692,7 +710,7 @@ Krum 的邻居数为 $n-f-2$。若该值小于 $1$（例如 $10$ 个客户端、
 - `--fedre-threshold 0.6`：FedREDefense 的归一化更新重构误差阈值，默认采用官方实现的 `0.6`；超过阈值的客户端被过滤，并按官方 `clients_flags` 语义在后续轮次保持不可用。
 - `--fedre-initial-iterations 800` / `--fedre-max-iterations 2000`：每个客户端第一次和后续轮次优化持久合成数据的最大迭代次数，默认采用官方 Fashion-MNIST 配置。FedREDefense 本身计算开销很大，不应为了缩短论文主实验时间而无说明地降低该参数。
 - `--fedre-synthetic-steps 5` / `--fedre-images-per-class 1`：每次重构的可微合成 SGD 步数，以及每类持久合成图像数，默认采用官方配置。
-- `--fedre-image-lr 0.5`、`--fedre-label-lr 0.2`、`--fedre-teacher-lr 0.1`、`--fedre-teacher-lr-lr 5e-6`：合成图像、软标签、初始合成训练步长及该步长自身的优化学习率，默认采用官方 Fashion-MNIST 配置。
+- `--fedre-image-lr 0.5`、`--fedre-label-lr 0.2`、`--fedre-teacher-lr 0.1`、`--fedre-teacher-lr-lr 5e-6`：合成图像、软标签、初始合成训练步长及该步长自身的优化学习率；命令行默认值用于官方 Fashion-MNIST 兼容。当前 MNIST 统一协议必须显式使用已验证的 `--fedre-teacher-lr 5.0`（示例 JSON 已设置），否则 `0.1` 会重现首轮全拒绝直线；该值不能不经训练留出验证迁移到其他共享协议。
 
 #### 密码、计算后端与并发
 

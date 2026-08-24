@@ -68,6 +68,10 @@ class ExperimentConfig:
     detector_drift_allowance: float = 1.0
     detector_drift_threshold: float = 5.0
     detector_decision_rule: str = "any"
+    # Internal calibration switch.  It is never exposed as a paper-facing
+    # hyperparameter: formal main-run configs always enforce decisions, while
+    # clean shadow probes only observe and extend the trusted trajectory.
+    detector_enforce: bool = True
     crypto_mode: str = "sm9"
     dkg_threshold: int = 2
     dkg_nodes: int = 3
@@ -415,6 +419,8 @@ def run_experiment(
         raise ValueError(
             "detector_decision_rule must be 'any' (the v3 OR formula)"
         )
+    if not isinstance(config.detector_enforce, bool):
+        raise TypeError("detector_enforce must be boolean")
     if config.checkpoint_interval < 0:
         raise ValueError("checkpoint_interval must be non-negative")
     if not 0.0 < config.suspicion_penalty_factor < 1.0:
@@ -494,12 +500,17 @@ def run_experiment(
     attack_start = config.attack_start_round or (detector_window + 2)
 
     model_spec = model_spec_for_dataset(dataset)
-    attack_target_indices = (
+    attack_auxiliary_indices = (
         _select_attack_target_indices(
             dataset,
             config,
             required=bool(malicious_set),
         )
+        if is_alternating_minimization_attack(config.attack)
+        else np.empty(0, dtype=np.int64)
+    )
+    evaluation_target_indices = (
+        _select_evaluation_target_indices(dataset, config)
         if is_alternating_minimization_attack(config.attack)
         else np.empty(0, dtype=np.int64)
     )
@@ -529,7 +540,7 @@ def run_experiment(
         ) = _evaluate_attack_target_metrics(
             params,
             dataset,
-            attack_target_indices,
+            evaluation_target_indices,
             model_spec,
             config,
             torch_context,
@@ -635,6 +646,7 @@ def run_experiment(
             drift_allowance=config.detector_drift_allowance,
             drift_threshold=config.detector_drift_threshold,
             decision_rule=config.detector_decision_rule,
+            enforce=config.detector_enforce,
             num_classes=model_spec.num_classes,
             expected_update_size=model_spec.parameter_size,
             compute_backend=config.compute_backend,
@@ -819,7 +831,7 @@ def run_experiment(
                     params,
                     dataset,
                     indices,
-                    attack_target_indices=attack_target_indices,
+                    attack_target_indices=attack_auxiliary_indices,
                     client_idx=client_idx,
                     round_id=round_id,
                     model_spec=model_spec,
@@ -1321,7 +1333,7 @@ def run_experiment(
             ) = _evaluate_attack_target_metrics(
                 params,
                 dataset,
-                attack_target_indices,
+                evaluation_target_indices,
                 model_spec,
                 config,
                 torch_context,
@@ -1867,11 +1879,12 @@ def _alternating_minimization_client_delta(
         config.attack_target_label,
         dtype=np.int64,
     )
+    attack_features, _attack_labels = _attack_auxiliary_arrays(dataset)
     return alternating_minimization_delta(
         params,
         dataset.x_train[indices],
         dataset.y_train[indices],
-        dataset.x_test[attack_target_indices],
+        attack_features[attack_target_indices],
         target_labels,
         lr=lr,
         attack_epochs=config.attack_epochs,
@@ -1890,14 +1903,16 @@ def _select_attack_target_indices(
     *,
     required: bool = True,
 ) -> np.ndarray:
-    """Select deterministic held-out auxiliary samples for attack/evaluation.
+    """Select deterministic attack auxiliaries without consulting test data.
 
-    A no-malicious control run records the same targeted metrics whenever its
-    limited test split contains enough source-class samples.  An active attack
-    must have the requested auxiliary set and therefore fails explicitly.
+    Auto-calibrated formal runs attach a dedicated training-derived attack
+    split.  Older fixed-parameter callers without that split retain the legacy
+    test-set fallback for backwards-compatible reproduction, but the selected
+    calibration artifact records which source was used.
     """
 
-    labels = np.asarray(dataset.y_test, dtype=np.int64)
+    _features, labels_array = _attack_auxiliary_arrays(dataset)
+    labels = np.asarray(labels_array, dtype=np.int64)
     candidates = np.flatnonzero(labels == config.attack_source_label)
     if len(candidates) < config.attack_target_count:
         if not required:
@@ -1914,6 +1929,35 @@ def _select_attack_target_indices(
         replace=False,
     )
     return np.sort(np.asarray(chosen, dtype=np.int64))
+
+
+def _select_evaluation_target_indices(
+    dataset: ImageDataset,
+    config: ExperimentConfig,
+) -> np.ndarray:
+    """Select the disjoint official-test examples used only for ASR metrics."""
+
+    labels = np.asarray(dataset.y_test, dtype=np.int64)
+    candidates = np.flatnonzero(labels == config.attack_source_label)
+    if len(candidates) < config.attack_target_count:
+        return np.empty(0, dtype=np.int64)
+    rng = np.random.default_rng(config.seed + 314_159)
+    chosen = rng.choice(
+        candidates,
+        size=config.attack_target_count,
+        replace=False,
+    )
+    return np.sort(np.asarray(chosen, dtype=np.int64))
+
+
+def _attack_auxiliary_arrays(dataset: ImageDataset) -> tuple[np.ndarray, np.ndarray]:
+    """Return the training-derived attack split or the legacy test fallback."""
+
+    x_attack = getattr(dataset, "x_attack", None)
+    y_attack = getattr(dataset, "y_attack", None)
+    if x_attack is None or y_attack is None:
+        return dataset.x_test, dataset.y_test
+    return x_attack, y_attack
 
 
 def _fedavg(

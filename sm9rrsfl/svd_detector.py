@@ -23,6 +23,12 @@ _DISTANCE_KEYS = (
 class DetectionResult:
     accepted: bool
     reason: str
+    # ``would_flag`` records the detector decision before the optional
+    # calibration-only shadow override.  Production enforcement keeps
+    # ``would_flag == (not accepted)``; a clean shadow run can therefore
+    # observe extreme trajectories without poisoning the trusted baseline or
+    # touching the weight/revocation state.
+    would_flag: bool = False
     count_increment: bool = False
     # Compatibility summaries retained for older analysis code. In v3 these
     # are the largest spectral Z and reliability-weighted subspace Z across
@@ -102,6 +108,7 @@ class LongitudinalSVDDetector:
         drift_allowance: float = 1.0,
         drift_threshold: float = 5.0,
         decision_rule: str = "any",
+        enforce: bool = True,
         input_dim: int | None = None,
         num_classes: int = NUM_CLASSES,
         matrix_offset: int | None = None,
@@ -174,6 +181,7 @@ class LongitudinalSVDDetector:
         self.drift_allowance = float(drift_allowance)
         self.drift_threshold = float(drift_threshold)
         self.decision_rule = decision_rule
+        self.enforce = bool(enforce)
         if input_dim is not None:
             self.matrix_offset = 0
             self.matrix_shape = (input_dim, num_classes)
@@ -273,7 +281,7 @@ class LongitudinalSVDDetector:
         adjacent_exceeded = False
         anchor_exceeded = False
         drift_exceeded = False
-        anomalous = False
+        would_flag = False
         if should_score:
             z_scores = {
                 key: _robust_one_sided_z(
@@ -304,8 +312,14 @@ class LongitudinalSVDDetector:
             anchor_exceeded = anchor_score > self.anchor_threshold
             drift_exceeded = state.cumulative_drift > self.drift_threshold
             evidence = (adjacent_exceeded, anchor_exceeded, drift_exceeded)
-            anomalous = any(evidence)
+            would_flag = any(evidence)
 
+        anomalous = would_flag and self.enforce
+
+        # Shadow calibration deliberately trusts every finite observation so
+        # its reference trajectory describes the clean process rather than a
+        # detector-filtered subset.  Production mode retains the original
+        # trusted-anchor rule and never admits a flagged point.
         if not anomalous:
             for key in _DISTANCE_KEYS:
                 state.normal_distances[key].append(distances[key])
@@ -315,11 +329,12 @@ class LongitudinalSVDDetector:
         # reference; it never contaminates the trusted anchor or distance data.
         state.last_observed = timed
         state.observed_count += 1
-        reason = (
-            f"composite_threshold_{self.decision_rule}"
-            if anomalous
-            else ("accepted" if should_score else "baseline_warmup")
-        )
+        if would_flag and not self.enforce:
+            reason = "shadow_would_flag"
+        elif anomalous:
+            reason = f"composite_threshold_{self.decision_rule}"
+        else:
+            reason = "accepted" if should_score else "baseline_warmup"
         adjacent_subspace_similarity = max(
             0.0,
             1.0 - distances["subspace_adjacent"] ** 2,
@@ -327,6 +342,7 @@ class LongitudinalSVDDetector:
         return DetectionResult(
             accepted=not anomalous,
             reason=reason,
+            would_flag=would_flag,
             count_increment=anomalous,
             z_sigma=max(
                 z_scores["spectrum_adjacent"],

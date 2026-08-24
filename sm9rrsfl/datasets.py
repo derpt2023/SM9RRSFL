@@ -37,6 +37,11 @@ class ImageDataset:
     name: str = "image"
     input_shape: tuple[int, int, int] | None = None
     num_classes: int = 10
+    # Training-only auxiliary samples used by the targeted attacker.  Keeping
+    # them separate from ``x_test`` prevents the attack optimizer from seeing
+    # the official evaluation split.  Legacy callers may omit both fields.
+    x_attack: np.ndarray | None = None
+    y_attack: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.x_train.ndim != 4 or self.x_test.ndim != 4:
@@ -46,6 +51,134 @@ class ImageDataset:
             object.__setattr__(self, "input_shape", inferred)
         elif tuple(self.input_shape) != inferred:
             raise ValueError(f"input_shape {self.input_shape} does not match x_train shape {inferred}")
+        if (self.x_attack is None) != (self.y_attack is None):
+            raise ValueError("x_attack and y_attack must either both be set or both be omitted")
+        if self.x_attack is not None:
+            if self.x_attack.ndim != 4:
+                raise ValueError(
+                    "attack auxiliary images must have shape "
+                    "[samples, channels, height, width]"
+                )
+            if tuple(int(dim) for dim in self.x_attack.shape[1:]) != inferred:
+                raise ValueError("x_attack shape must match x_train shape")
+            if len(self.x_attack) != len(self.y_attack):
+                raise ValueError("x_attack and y_attack must have the same length")
+
+
+@dataclass(frozen=True)
+class TrainingThreeWaySplit:
+    """Deterministic training/calibration/attack split and its source indices."""
+
+    main_dataset: ImageDataset
+    calibration_dataset: ImageDataset
+    train_indices: np.ndarray
+    calibration_indices: np.ndarray
+    attack_indices: np.ndarray
+
+
+def stratified_training_three_way_split(
+    dataset: ImageDataset,
+    *,
+    seed: int,
+    train_fraction: float = 0.90,
+    calibration_fraction: float = 0.05,
+    attack_fraction: float = 0.05,
+) -> TrainingThreeWaySplit:
+    """Split only the original training set into disjoint stratified subsets.
+
+    The returned main run keeps the official test split for evaluation.  The
+    calibration run instead evaluates on its training-derived holdout.  Both
+    use the same disjoint, training-derived attack auxiliary subset.
+    """
+
+    fractions = (train_fraction, calibration_fraction, attack_fraction)
+    if any(not np.isfinite(value) or value <= 0.0 for value in fractions):
+        raise ValueError("three-way split fractions must be finite and positive")
+    if not np.isclose(sum(fractions), 1.0, rtol=0.0, atol=1e-12):
+        raise ValueError("three-way split fractions must sum to 1")
+
+    rng = np.random.default_rng(seed)
+    train_parts: list[np.ndarray] = []
+    calibration_parts: list[np.ndarray] = []
+    attack_parts: list[np.ndarray] = []
+    labels = np.asarray(dataset.y_train)
+    for label in np.unique(labels):
+        indices = np.flatnonzero(labels == label)
+        if len(indices) < 3:
+            raise ValueError(
+                f"class {int(label)} needs at least three training samples "
+                "for train/calibration/attack splitting"
+            )
+        shuffled = np.asarray(rng.permutation(indices), dtype=np.int64)
+        calibration_count = max(
+            1,
+            int(round(len(shuffled) * calibration_fraction)),
+        )
+        attack_count = max(1, int(round(len(shuffled) * attack_fraction)))
+        # Always retain at least one federated-training sample for the class.
+        while calibration_count + attack_count >= len(shuffled):
+            if calibration_count >= attack_count and calibration_count > 1:
+                calibration_count -= 1
+            elif attack_count > 1:
+                attack_count -= 1
+            else:
+                raise ValueError(
+                    f"class {int(label)} is too small for the requested split"
+                )
+        calibration_parts.append(shuffled[:calibration_count])
+        attack_parts.append(
+            shuffled[calibration_count : calibration_count + attack_count]
+        )
+        train_parts.append(shuffled[calibration_count + attack_count :])
+
+    train_indices = np.asarray(
+        rng.permutation(np.concatenate(train_parts)),
+        dtype=np.int64,
+    )
+    calibration_indices = np.asarray(
+        rng.permutation(np.concatenate(calibration_parts)),
+        dtype=np.int64,
+    )
+    attack_indices = np.asarray(
+        rng.permutation(np.concatenate(attack_parts)),
+        dtype=np.int64,
+    )
+    train_x = dataset.x_train[train_indices].copy()
+    train_y = dataset.y_train[train_indices].copy()
+    calibration_x = dataset.x_train[calibration_indices].copy()
+    calibration_y = dataset.y_train[calibration_indices].copy()
+    attack_x = dataset.x_train[attack_indices].copy()
+    attack_y = dataset.y_train[attack_indices].copy()
+
+    main_dataset = ImageDataset(
+        x_train=train_x,
+        y_train=train_y,
+        x_test=dataset.x_test,
+        y_test=dataset.y_test,
+        name=dataset.name,
+        input_shape=dataset.input_shape,
+        num_classes=dataset.num_classes,
+        x_attack=attack_x,
+        y_attack=attack_y,
+    )
+    calibration_dataset = ImageDataset(
+        x_train=train_x,
+        y_train=train_y,
+        x_test=calibration_x,
+        y_test=calibration_y,
+        name=dataset.name,
+        input_shape=dataset.input_shape,
+        num_classes=dataset.num_classes,
+        x_attack=attack_x,
+        y_attack=attack_y,
+    )
+    return TrainingThreeWaySplit(
+        main_dataset=main_dataset,
+        calibration_dataset=calibration_dataset,
+        train_indices=train_indices,
+        calibration_indices=calibration_indices,
+        attack_indices=attack_indices,
+    )
 
 
 def default_data_dir(dataset: str) -> Path:
