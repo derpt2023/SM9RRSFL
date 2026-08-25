@@ -22,6 +22,13 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
+from .calibration_policy import (
+    CalibrationHardConstraints,
+    DEFAULT_OBJECTIVE_WEIGHT_FLOOR,
+    DEFAULT_OBJECTIVE_WEIGHT_STEP,
+    objective_weight_grid,
+    weighted_score,
+)
 from .datasets import (
     ImageDataset,
     TrainingThreeWaySplit,
@@ -30,8 +37,8 @@ from .datasets import (
 from .fl import ExperimentConfig, ExperimentResult, malicious_client_count
 
 
-CALIBRATION_SCHEMA_VERSION = 1
-CALIBRATION_ALGORITHM_VERSION = "ours-offline-v2"
+CALIBRATION_SCHEMA_VERSION = 2
+CALIBRATION_ALGORITHM_VERSION = "ours-offline-v3"
 _HUGE_THRESHOLD = 1.0e300
 _SCORE_EPS = 1.0e-8
 _CLEAN_ALPHA = 0.01
@@ -49,7 +56,7 @@ _OBJECTIVE = {
     "clean_accuracy_weight": 0.25,
     "robust_accuracy_weight": 0.50,
     "attack_success_weight": 0.20,
-    "clean_false_positive_weight": 0.05,
+    "false_positive_weight": 0.05,
 }
 
 
@@ -89,6 +96,7 @@ class OursCalibrationArtifact:
     covered_scenarios: dict[str, Any]
     constraints: dict[str, Any]
     objective: dict[str, float]
+    objective_learning: dict[str, Any]
     selected_parameters: OursParameters
     selected_candidate: dict[str, Any]
     candidate_results: tuple[dict[str, Any], ...]
@@ -124,6 +132,7 @@ class OursCalibrationArtifact:
             covered_scenarios=dict(payload["covered_scenarios"]),
             constraints=dict(payload["constraints"]),
             objective={str(key): float(value) for key, value in payload["objective"].items()},
+            objective_learning=dict(payload["objective_learning"]),
             selected_parameters=OursParameters(**parameters),
             selected_candidate=dict(payload["selected_candidate"]),
             candidate_results=tuple(dict(item) for item in payload["candidate_results"]),
@@ -152,11 +161,17 @@ def resolve_or_run_ours_calibration(
         raise OursCalibrationError(
             "automatic calibration requires rounds > K so the detector has scored observations"
         )
-    requested_ratios = _ratios(args)
-    if not any(value > 0.0 for value in requested_ratios):
+    formal_ratios = _ratios(args)
+    calibration_ratios = _calibration_ratios(args)
+    if not any(value > 0.0 for value in calibration_ratios):
         raise OursCalibrationError(
             "automatic calibration requires at least one attacked malicious ratio"
         )
+    hard_constraints = _hard_constraints(args)
+    defer_to_unified_tuner = (
+        str(_arg(args, "ours_calibration_selection_mode", "standalone"))
+        == "defer_to_unified_tuner"
+    )
     if str(_arg(args, "attack", "none")) == "none":
         raise OursCalibrationError(
             "automatic calibration requires an enabled attack for closed-loop validation"
@@ -268,21 +283,29 @@ def resolve_or_run_ours_calibration(
 
     partitions = _partitions(args)
     client_counts = _client_counts(args)
-    ratios = requested_ratios
-    beta = float(math.exp(math.log(0.5) / detector_window))
-    penalty = float(min(0.1, 1.0 / max(client_counts)))
-    recovery = float(penalty ** -0.5)
-    q_values = range(1, min(3, int(dataset.num_classes) - 1) + 1)
+    ratios = calibration_ratios
+    candidate_budget = int(_arg(args, "calibration_candidate_budget", 12))
+    candidate_specs = _automatic_candidate_specs(
+        detector_window=detector_window,
+        num_classes=int(dataset.num_classes),
+        max_clients=max(client_counts),
+        budget=candidate_budget,
+    )
+    q_values = tuple(sorted({int(item["q"]) for item in candidate_specs}))
+    baseline_beta = float(math.exp(math.log(0.5) / detector_window))
+    baseline_penalty = float(min(0.1, 1.0 / max(client_counts)))
+    baseline_recovery = float(baseline_penalty ** -0.5)
     print(
         "ours_calibration_start="
         f"{calibration_fingerprint[:12]} train={len(split.train_indices)} "
         f"validation={len(split.calibration_indices)} "
         f"attack_aux={len(split.attack_indices)} "
         f"partitions={list(partitions)} clients={list(client_counts)} "
-        f"ratios={list(ratios)}",
+        f"formal_ratios={list(formal_ratios)} "
+        f"calibration_ratios={list(ratios)} candidates={len(candidate_specs)}",
         flush=True,
     )
-    derived_by_q: dict[int, dict[str, Any]] = {}
+    derived_by_q_beta: dict[tuple[int, float], dict[str, Any]] = {}
     for q in q_values:
         first_probe = _run_clean_shadow_probe(
             split.calibration_dataset,
@@ -293,10 +316,10 @@ def resolve_or_run_ours_calibration(
             seed=shadow_seed,
             q=q,
             g0=1.0,
-            beta=beta,
+            beta=baseline_beta,
             kappa=1.0,
-            penalty=penalty,
-            recovery=recovery,
+            penalty=baseline_penalty,
+            recovery=baseline_recovery,
         )
         gap_values = _diagnostic_values(
             first_probe,
@@ -317,10 +340,10 @@ def resolve_or_run_ours_calibration(
             seed=shadow_seed,
             q=q,
             g0=g0,
-            beta=beta,
+            beta=baseline_beta,
             kappa=1.0,
-            penalty=penalty,
-            recovery=recovery,
+            penalty=baseline_penalty,
+            recovery=baseline_recovery,
         )
         anchor_values = _diagnostic_values(
             second_probe,
@@ -342,153 +365,162 @@ def resolve_or_run_ours_calibration(
             "anchor_score",
             detector_window,
         )
-        drift_maxima = _replay_drift_maxima(
-            second_probe,
-            detector_window=detector_window,
-            beta=beta,
-            kappa=kappa,
-        )
         theta_adj, adjacent_rule = _upper_block_threshold(
             adjacent_maxima,
-            tail_probability=_CLEAN_ALPHA / 3.0,
+            tail_probability=_MAX_CLEAN_SUSPICIOUS / 3.0,
         )
         theta_anc, anchor_rule = _upper_block_threshold(
             anchor_maxima,
-            tail_probability=_CLEAN_ALPHA / 3.0,
+            tail_probability=_MAX_CLEAN_SUSPICIOUS / 3.0,
         )
-        h, drift_rule = _upper_block_threshold(
-            drift_maxima,
-            tail_probability=_CLEAN_ALPHA / 3.0,
+        q_betas = sorted(
+            {
+                float(item["beta"])
+                for item in candidate_specs
+                if int(item["q"]) == q
+            }
         )
-        derived_by_q[q] = {
-            "g0": g0,
-            "beta": beta,
-            "kappa": kappa,
-            "theta_adj": theta_adj,
-            "theta_anc": theta_anc,
-            "h": h,
-            "threshold_rules": {
-                "theta_adj": adjacent_rule,
-                "theta_anc": anchor_rule,
-                "h": drift_rule,
-            },
-            "shadow_blocks": len(adjacent_maxima),
-        }
+        for beta in q_betas:
+            drift_maxima = _replay_drift_maxima(
+                second_probe,
+                detector_window=detector_window,
+                beta=beta,
+                kappa=kappa,
+            )
+            h, drift_rule = _upper_block_threshold(
+                drift_maxima,
+                tail_probability=_MAX_CLEAN_SUSPICIOUS / 3.0,
+            )
+            derived_by_q_beta[(q, beta)] = {
+                "g0": g0,
+                "beta": beta,
+                "kappa": kappa,
+                "theta_adj": theta_adj,
+                "theta_anc": theta_anc,
+                "h": h,
+                "threshold_rules": {
+                    "theta_adj": adjacent_rule,
+                    "theta_anc": anchor_rule,
+                    "h": drift_rule,
+                },
+                "shadow_blocks": len(adjacent_maxima),
+            }
 
-    c_tol_values = sorted(
-        {
-            max(1, min(3, detector_window)),
-            max(1, min(5, detector_window)),
-        }
-    )
     candidate_results: list[dict[str, Any]] = []
     candidate_parameters: dict[str, OursParameters] = {}
     attacked_ratios = tuple(value for value in ratios if value > 0.0)
-    for q, derived in derived_by_q.items():
-        for c_tol in c_tol_values:
-            parameters = OursParameters(
-                q=q,
-                g0=float(derived["g0"]),
-                theta_adj=float(derived["theta_adj"]),
-                theta_anc=float(derived["theta_anc"]),
-                beta=float(derived["beta"]),
-                kappa=float(derived["kappa"]),
-                h=float(derived["h"]),
-                C_tol=int(c_tol),
-                C_max=int(c_tol),
-                penalty_factor=penalty,
-                recovery_factor=recovery,
+    for candidate_index, spec in enumerate(candidate_specs, start=1):
+        q = int(spec["q"])
+        beta = float(spec["beta"])
+        c_tol = int(spec["C_tol"])
+        derived = derived_by_q_beta[(q, beta)]
+        parameters = OursParameters(
+            q=q,
+            g0=float(derived["g0"]),
+            theta_adj=float(derived["theta_adj"]),
+            theta_anc=float(derived["theta_anc"]),
+            beta=beta,
+            kappa=float(derived["kappa"]),
+            h=float(derived["h"]),
+            C_tol=c_tol,
+            C_max=c_tol,
+            penalty_factor=float(spec["penalty_factor"]),
+            recovery_factor=float(spec["recovery_factor"]),
+        )
+        candidate_id = f"ours-{candidate_index:03d}"
+        clean_executions: list[ExperimentResult] = []
+        clean_summary: dict[str, Any] = {}
+        clean_safety_trace: list[dict[str, Any]] = []
+        for refinement in range(_MAX_CLEAN_ENVELOPE_REFINEMENTS + 1):
+            clean_executions = _run_closed_loop_candidate(
+                split.calibration_dataset,
+                args,
+                run_fn,
+                parameters=parameters,
+                partitions=partitions,
+                client_counts=client_counts,
+                ratios=(0.0,),
+                seed=validation_seed,
             )
-            candidate_id = f"q{q}-ctol{c_tol}"
-            clean_executions: list[ExperimentResult] = []
-            clean_summary: dict[str, Any] = {}
-            clean_safety_trace: list[dict[str, Any]] = []
-            for refinement in range(_MAX_CLEAN_ENVELOPE_REFINEMENTS + 1):
-                clean_executions = _run_closed_loop_candidate(
-                    split.calibration_dataset,
-                    args,
-                    run_fn,
-                    parameters=parameters,
-                    partitions=partitions,
-                    client_counts=client_counts,
-                    ratios=(0.0,),
-                    seed=validation_seed,
-                )
-                clean_summary = _score_closed_loop_candidate(
-                    candidate_id,
-                    clean_executions,
-                )
-                clean_safety_trace.append(
-                    _clean_safety_trace_entry(
-                        refinement,
-                        parameters,
-                        clean_summary,
-                    )
-                )
-                print(
-                    "ours_calibration_clean_gate="
-                    f"candidate={candidate_id} refinement={refinement} "
-                    f"valid={bool(clean_summary['valid'])} "
-                    "suspicious="
-                    f"{clean_summary['worst_clean_round_suspicious_rate']:.6f} "
-                    f"ess={clean_summary['worst_clean_round_ess_ratio']:.6f} "
-                    "reasons="
-                    f"{','.join(clean_summary['invalid_reasons']) or 'none'}",
-                    flush=True,
-                )
-                if clean_summary["valid"]:
-                    break
-                if not _clean_gate_can_be_refined(
-                    clean_summary,
-                    clean_executions,
-                ):
-                    break
-                expanded = _expand_clean_safety_envelope(
+            clean_summary = _score_closed_loop_candidate(
+                candidate_id,
+                clean_executions,
+                hard_constraints=hard_constraints,
+            )
+            clean_safety_trace.append(
+                _clean_safety_trace_entry(
+                    refinement,
                     parameters,
-                    clean_executions,
-                    detector_window=detector_window,
+                    clean_summary,
                 )
-                if expanded == parameters:
-                    break
-                parameters = expanded
+            )
+            print(
+                "ours_calibration_clean_gate="
+                f"candidate={candidate_id} refinement={refinement} "
+                f"valid={bool(clean_summary['valid'])} "
+                "suspicious="
+                f"{clean_summary['worst_clean_round_suspicious_rate']:.6f} "
+                f"ess={clean_summary['worst_clean_round_ess_ratio']:.6f} "
+                "reasons="
+                f"{','.join(clean_summary['invalid_reasons']) or 'none'}",
+                flush=True,
+            )
+            if clean_summary["valid"]:
+                break
+            if not _clean_gate_can_be_refined(
+                clean_summary,
+                clean_executions,
+            ):
+                break
+            expanded = _expand_clean_safety_envelope(
+                parameters,
+                clean_executions,
+                detector_window=detector_window,
+            )
+            if expanded == parameters:
+                break
+            parameters = expanded
 
-            if clean_summary.get("valid", False):
-                attacked_executions = _run_closed_loop_candidate(
-                    split.calibration_dataset,
-                    args,
-                    run_fn,
-                    parameters=parameters,
-                    partitions=partitions,
-                    client_counts=client_counts,
-                    ratios=attacked_ratios,
-                    seed=validation_seed,
-                )
-                summary = _score_closed_loop_candidate(
-                    candidate_id,
-                    [*clean_executions, *attacked_executions],
-                )
-            else:
-                # Preserve the final failed clean trial in the auditable
-                # artifact.  Attack scenarios are intentionally not run for a
-                # parameter set that cannot satisfy the clean safety gates.
-                summary = clean_summary
-            summary["parameters"] = asdict(parameters)
-            summary["threshold_rules"] = {
-                **dict(derived["threshold_rules"]),
-                "closed_loop_clean_envelope": {
-                    "rule": (
-                        "familywise max(current, 1.05 * maximum observed "
-                        "clean closed-loop score + 1e-8)"
-                    ),
-                    "max_refinements": _MAX_CLEAN_ENVELOPE_REFINEMENTS,
-                    "refinements_used": max(0, len(clean_safety_trace) - 1),
-                    "refinable_incomplete_rule": _REFINABLE_INCOMPLETE_RULE,
-                },
-            }
-            summary["shadow_blocks"] = int(derived["shadow_blocks"])
-            summary["clean_safety_trace"] = clean_safety_trace
-            candidate_results.append(summary)
-            candidate_parameters[candidate_id] = parameters
+        if clean_summary.get("valid", False) and not defer_to_unified_tuner:
+            attacked_executions = _run_closed_loop_candidate(
+                split.calibration_dataset,
+                args,
+                run_fn,
+                parameters=parameters,
+                partitions=partitions,
+                client_counts=client_counts,
+                ratios=attacked_ratios,
+                seed=validation_seed,
+            )
+            summary = _score_closed_loop_candidate(
+                candidate_id,
+                [*clean_executions, *attacked_executions],
+                hard_constraints=hard_constraints,
+            )
+        else:
+            # Preserve the final failed clean trial in the auditable artifact.
+            # In unified Scheme B, attacked validation is also intentionally
+            # deferred so Ours, VERT, and FedREDefense receive the same outer
+            # candidate/scenario/seed budget.
+            summary = clean_summary
+        summary["parameters"] = asdict(parameters)
+        summary["threshold_rules"] = {
+            **dict(derived["threshold_rules"]),
+            "closed_loop_clean_envelope": {
+                "rule": (
+                    "familywise max(current, 1.05 * maximum observed "
+                    "clean closed-loop score + 1e-8)"
+                ),
+                "max_refinements": _MAX_CLEAN_ENVELOPE_REFINEMENTS,
+                "refinements_used": max(0, len(clean_safety_trace) - 1),
+                "refinable_incomplete_rule": _REFINABLE_INCOMPLETE_RULE,
+            },
+        }
+        summary["shadow_blocks"] = int(derived["shadow_blocks"])
+        summary["clean_safety_trace"] = clean_safety_trace
+        summary["automatic_candidate_spec"] = dict(spec)
+        candidate_results.append(summary)
+        candidate_parameters[candidate_id] = parameters
 
     feasible = [item for item in candidate_results if item["valid"]]
     if not feasible:
@@ -498,7 +530,23 @@ def resolve_or_run_ours_calibration(
         )
         raise OursCalibrationError(
             "automatic Ours calibration failed closed: no candidate satisfied "
-            f"the clean/full-round hard constraints ({concise})"
+            f"the declared clean/attack hard constraints ({concise})"
+        )
+    if defer_to_unified_tuner:
+        learned_objective = dict(_OBJECTIVE)
+        objective_learning = {
+            "algorithm": "leave_one_attacked_ratio_out",
+            "status": "deferred_to_unified_fair_tuner",
+            "folds": [],
+        }
+    else:
+        learned_objective, objective_learning = _learn_objective_weights(
+            feasible,
+            attacked_ratios=attacked_ratios,
+        )
+    for item in candidate_results:
+        item["score"] = (
+            weighted_score(item, learned_objective) if item["valid"] else None
         )
     selected_summary = max(
         feasible,
@@ -510,20 +558,27 @@ def resolve_or_run_ours_calibration(
             int(item["parameters"]["C_tol"]),
         ),
     )
+    selected_summary["selection_scope"] = (
+        "provisional_clean_safe_base_for_unified_tuner"
+        if defer_to_unified_tuner
+        else "standalone_complete_calibration"
+    )
     selected = candidate_parameters[str(selected_summary["candidate_id"])]
     constraints = {
-        "require_full_rounds": True,
-        "require_finite_updates": True,
+        **hard_constraints.to_dict(),
         "max_clean_false_positive_rate": _CLEAN_ALPHA,
         "min_clean_round_acceptance_rate": _MIN_CLEAN_ACCEPTANCE,
         "max_clean_round_suspicious_rate": _MAX_CLEAN_SUSPICIOUS,
         "min_clean_round_ess_ratio": _MIN_CLEAN_ESS_RATIO,
         "aggregation": "worst partition/client-count/seed/round",
+        "attacked_constraints_evaluated": not defer_to_unified_tuner,
     }
     covered = {
         "partitions": list(partitions),
         "client_counts": list(client_counts),
-        "ratios": list(ratios),
+        "formal_ratios": list(formal_ratios),
+        "calibration_ratios": list(ratios),
+        "ratio_schedule": _arg(args, "ratio_schedule", None),
     }
     artifact_without_fingerprint = {
         "schema_version": CALIBRATION_SCHEMA_VERSION,
@@ -536,7 +591,8 @@ def resolve_or_run_ours_calibration(
         "calibration_seeds": [shadow_seed, validation_seed],
         "covered_scenarios": covered,
         "constraints": constraints,
-        "objective": dict(_OBJECTIVE),
+        "objective": dict(learned_objective),
+        "objective_learning": objective_learning,
         "selected_parameters": asdict(selected),
         "selected_candidate": dict(selected_summary),
         "candidate_results": candidate_results,
@@ -556,7 +612,8 @@ def resolve_or_run_ours_calibration(
         calibration_seeds=(shadow_seed, validation_seed),
         covered_scenarios=covered,
         constraints=constraints,
-        objective=dict(_OBJECTIVE),
+        objective=dict(learned_objective),
+        objective_learning=objective_learning,
         selected_parameters=selected,
         selected_candidate=dict(selected_summary),
         candidate_results=tuple(candidate_results),
@@ -619,7 +676,10 @@ def calibration_metadata(artifact: OursCalibrationArtifact) -> dict[str, Any]:
         "dataset_digest": artifact.dataset_digest,
         "calibration_seeds": list(artifact.calibration_seeds),
         "split": dict(artifact.split),
+        "covered_scenarios": dict(artifact.covered_scenarios),
         "constraints": dict(artifact.constraints),
+        "objective": dict(artifact.objective),
+        "objective_learning": dict(artifact.objective_learning),
         "selected_parameters": asdict(artifact.selected_parameters),
     }
 
@@ -933,15 +993,28 @@ def _experiment_config(
 def _score_closed_loop_candidate(
     candidate_id: str,
     results: list[ExperimentResult],
+    *,
+    hard_constraints: CalibrationHardConstraints,
 ) -> dict[str, Any]:
     clean = [item for item in results if abs(item.config.malicious_ratio) < 1e-12]
     attacked = [item for item in results if item.config.malicious_ratio > 0.0]
     invalid: list[str] = []
     if not clean:
         invalid.append("missing_clean_control")
-    if any(int(item.stopped_round) != int(item.config.rounds) for item in results):
+    completion_rates = [
+        int(item.stopped_round) / max(1, int(item.config.rounds))
+        for item in results
+    ]
+    minimum_completion = min(completion_rates, default=0.0)
+    if (
+        minimum_completion + 1.0e-12
+        < hard_constraints.min_round_completion_rate
+    ):
         invalid.append("incomplete_rounds")
-    if any(int(getattr(item, "nonfinite_updates", 0)) != 0 for item in results):
+    nonfinite_updates = sum(
+        int(getattr(item, "nonfinite_updates", 0)) for item in results
+    )
+    if nonfinite_updates > hard_constraints.max_nonfinite_updates:
         invalid.append("nonfinite_updates")
 
     clean_fp_rates: list[float] = []
@@ -1020,55 +1093,367 @@ def _score_closed_loop_candidate(
         and item.records[-1].attack_target_success_rate is not None
     ]
     attack_success = fmean(attack_rates) if attack_rates else 0.0
-    score = (
-        _OBJECTIVE["clean_accuracy_weight"] * clean_accuracy
-        + _OBJECTIVE["robust_accuracy_weight"] * robust_accuracy
-        - _OBJECTIVE["attack_success_weight"] * attack_success
-        - _OBJECTIVE["clean_false_positive_weight"] * worst_fp
-    )
     malicious_rates: list[float] = []
     detection_delays: list[float] = []
+    scenario_metrics: list[dict[str, Any]] = []
     for item in attacked:
         final_record = item.records[-1] if item.records else None
         malicious_count = malicious_client_count(
             item.config.num_clients,
             item.config.malicious_ratio,
         )
-        malicious_rates.append(
+        honest_count = max(1, item.config.num_clients - malicious_count)
+        malicious_revocation_rate = (
             int(getattr(final_record, "true_positive_revocations", 0))
             / max(1, malicious_count)
         )
+        malicious_rates.append(malicious_revocation_rate)
         attack_start = item.config.attack_start_round or item.config.detector_window + 2
-        flagged_rounds = [
-            int(getattr(diagnostic, "round", 0))
+        malicious_diagnostics = [
+            diagnostic
             for diagnostic in getattr(item, "diagnostics", ())
             if bool(getattr(diagnostic, "is_malicious", False))
-            and bool(getattr(diagnostic, "suspicious", False))
+        ]
+        flagged_rounds = [
+            int(getattr(diagnostic, "round", 0))
+            for diagnostic in malicious_diagnostics
+            if bool(getattr(diagnostic, "suspicious", False))
             and int(getattr(diagnostic, "round", 0)) >= attack_start
         ]
+        first_three_end = min(int(item.config.rounds), attack_start + 2)
+        first_three_detected = {
+            str(getattr(diagnostic, "client_id", ""))
+            for diagnostic in malicious_diagnostics
+            if bool(getattr(diagnostic, "suspicious", False))
+            and attack_start
+            <= int(getattr(diagnostic, "round", 0))
+            <= first_three_end
+        }
+        first_three_recall = len(first_three_detected) / max(1, malicious_count)
+        attack_false_positive_rate = (
+            int(getattr(final_record, "false_positive_revocations", 0))
+            / honest_count
+        )
+        malicious_mass_by_round: dict[int, float] = {}
+        unflagged_mass_by_round: dict[int, float] = {}
+        for diagnostic in malicious_diagnostics:
+            round_id = int(getattr(diagnostic, "round", 0))
+            if round_id < attack_start:
+                continue
+            weight = float(
+                getattr(diagnostic, "aggregation_weight", float("nan"))
+            )
+            if not math.isfinite(weight) or weight < 0.0:
+                continue
+            malicious_mass_by_round[round_id] = (
+                malicious_mass_by_round.get(round_id, 0.0) + weight
+            )
+            if not bool(getattr(diagnostic, "suspicious", False)):
+                unflagged_mass_by_round[round_id] = (
+                    unflagged_mass_by_round.get(round_id, 0.0) + weight
+                )
+        scenario_asr = (
+            float(getattr(final_record, "attack_target_success_rate", 0.0) or 0.0)
+            if final_record is not None
+            else 1.0
+        )
+        scenario_metrics.append(
+            {
+                "partition": str(item.config.partition),
+                "num_clients": int(item.config.num_clients),
+                "ratio": float(item.config.malicious_ratio),
+                "seed": int(item.config.seed),
+                "accuracy": float(item.final_accuracy),
+                "attack_success_rate": scenario_asr,
+                "malicious_revocation_rate": malicious_revocation_rate,
+                "first_three_round_recall": first_three_recall,
+                "attack_false_positive_rate": attack_false_positive_rate,
+                "max_malicious_aggregation_mass": max(
+                    malicious_mass_by_round.values(), default=0.0
+                ),
+                "max_unflagged_malicious_aggregation_mass": max(
+                    unflagged_mass_by_round.values(), default=0.0
+                ),
+                "round_completion_rate": (
+                    int(item.stopped_round) / max(1, int(item.config.rounds))
+                ),
+                "nonfinite_updates": int(
+                    getattr(item, "nonfinite_updates", 0)
+                ),
+            }
+        )
         detection_delays.append(
             float(min(flagged_rounds) - attack_start)
             if flagged_rounds
             else float(item.config.rounds + 1)
         )
+    worst_attack_success = max(
+        (float(item["attack_success_rate"]) for item in scenario_metrics),
+        default=0.0,
+    )
+    worst_three_round_recall = min(
+        (float(item["first_three_round_recall"]) for item in scenario_metrics),
+        default=1.0,
+    )
+    worst_attack_fp = max(
+        (float(item["attack_false_positive_rate"]) for item in scenario_metrics),
+        default=0.0,
+    )
+    if attacked:
+        if worst_attack_success > hard_constraints.max_asr + 1.0e-12:
+            invalid.append("worst_attack_success_rate")
+        if (
+            worst_three_round_recall + 1.0e-12
+            < hard_constraints.min_three_round_recall
+        ):
+            invalid.append("first_three_round_malicious_recall")
+        if (
+            worst_attack_fp
+            > hard_constraints.max_attack_false_positive_rate + 1.0e-12
+        ):
+            invalid.append("attack_false_positive_rate")
     return {
         "candidate_id": candidate_id,
         "valid": not invalid,
         "invalid_reasons": invalid,
-        # JSON deliberately rejects NaN/Infinity so an artifact can be hashed
-        # and audited identically across runtimes.  Invalid candidates carry a
-        # null score and are excluded before ranking.
-        "score": float(score) if not invalid else None,
+        "score": None,
         "clean_accuracy": float(clean_accuracy),
         "robust_accuracy": float(robust_accuracy),
         "attack_success_rate": float(attack_success),
+        "false_positive_rate": float(worst_fp),
+        "worst_attack_success_rate": float(worst_attack_success),
+        "worst_first_three_round_recall": float(worst_three_round_recall),
+        "worst_attack_false_positive_rate": float(worst_attack_fp),
+        "minimum_round_completion_rate": float(minimum_completion),
+        "nonfinite_updates": int(nonfinite_updates),
         "worst_clean_false_positive_rate": float(worst_fp),
         "worst_clean_round_acceptance_rate": float(worst_acceptance),
         "worst_clean_round_suspicious_rate": float(worst_suspicious),
         "worst_clean_round_ess_ratio": float(worst_ess_ratio),
         "malicious_revocation_rate": fmean(malicious_rates) if malicious_rates else 0.0,
         "first_detection_delay": fmean(detection_delays) if detection_delays else 0.0,
+        "scenario_metrics": scenario_metrics,
         "result_count": len(results),
+    }
+
+
+def _automatic_candidate_specs(
+    *,
+    detector_window: int,
+    num_classes: int,
+    max_clients: int,
+    budget: int,
+) -> tuple[dict[str, float | int], ...]:
+    """Return a bounded, deterministic sample of the expanded policy space.
+
+    The full Cartesian product is intentionally not executed.  It is recorded
+    conceptually, then sampled evenly after inserting the historical policy as
+    the first candidate.  This covers q, C_tol, beta half-life, and paired
+    penalty/recovery behavior without making formal calibration unbounded.
+    """
+
+    if budget < 1:
+        raise OursCalibrationError("calibration candidate budget must be positive")
+    q_values = tuple(range(1, min(3, num_classes - 1) + 1))
+    if not q_values:
+        raise OursCalibrationError("dataset must support at least q=1")
+    c_tol_values = tuple(
+        sorted(
+            {
+                max(1, min(value, detector_window))
+                for value in (1, 2, 3, 5)
+            }
+        )
+    )
+    half_lives = (
+        max(1.0, detector_window / 2.0),
+        float(detector_window),
+        float(detector_window * 2),
+    )
+    beta_values = tuple(
+        sorted({float(math.exp(math.log(0.5) / value)) for value in half_lives})
+    )
+    base_penalty = float(min(0.1, 1.0 / max_clients))
+    base_recovery = float(base_penalty ** -0.5)
+    policy_pairs = (
+        (
+            max(_SCORE_EPS, min(0.999999, 0.5 * base_penalty)),
+            max(1.000001, 0.75 * base_recovery),
+        ),
+        (base_penalty, base_recovery),
+        (
+            max(_SCORE_EPS, min(0.999999, 2.0 * base_penalty)),
+            max(1.000001, 1.5 * base_recovery),
+        ),
+    )
+    full = [
+        {
+            "q": q,
+            "beta": beta,
+            "C_tol": c_tol,
+            "penalty_factor": penalty,
+            "recovery_factor": recovery,
+        }
+        for q in q_values
+        for beta in beta_values
+        for c_tol in c_tol_values
+        for penalty, recovery in policy_pairs
+    ]
+    baseline = {
+        "q": max(q_values),
+        "beta": float(math.exp(math.log(0.5) / detector_window)),
+        "C_tol": max(1, min(3, detector_window)),
+        "penalty_factor": base_penalty,
+        "recovery_factor": base_recovery,
+    }
+    remaining = [item for item in full if item != baseline]
+    if budget >= len(full):
+        return tuple([baseline, *remaining])
+    if budget == 1:
+        return (baseline,)
+    # Even indexes make the bounded set cover the complete ordered space
+    # instead of taking only the first q/beta block.
+    positions = np.linspace(0, len(remaining) - 1, budget - 1)
+    chosen: list[dict[str, float | int]] = [baseline]
+    used: set[int] = set()
+    for raw_position in positions:
+        position = int(round(float(raw_position)))
+        if position in used:
+            position = next(
+                index for index in range(len(remaining)) if index not in used
+            )
+        used.add(position)
+        chosen.append(remaining[position])
+    return tuple(chosen)
+
+
+def _learn_objective_weights(
+    candidates: list[dict[str, Any]],
+    *,
+    attacked_ratios: tuple[float, ...],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Learn Score weights by leave-one-attacked-ratio-out transfer."""
+
+    ratios = tuple(sorted(set(float(value) for value in attacked_ratios)))
+    if len(candidates) == 1 or len(ratios) < 2:
+        return dict(_OBJECTIVE), {
+            "algorithm": "leave_one_attacked_ratio_out",
+            "status": "fallback_insufficient_candidates_or_ratios",
+            "weight_floor": DEFAULT_OBJECTIVE_WEIGHT_FLOOR,
+            "weight_step": DEFAULT_OBJECTIVE_WEIGHT_STEP,
+            "folds": [],
+        }
+    grid = objective_weight_grid(
+        floor=DEFAULT_OBJECTIVE_WEIGHT_FLOOR,
+        step=DEFAULT_OBJECTIVE_WEIGHT_STEP,
+    )
+    best_weights: dict[str, float] | None = None
+    best_key: tuple[Any, ...] | None = None
+    best_folds: list[dict[str, Any]] = []
+    for weights in grid:
+        folds: list[dict[str, Any]] = []
+        for held_out in ratios:
+            scored: list[tuple[float, dict[str, Any]]] = []
+            for candidate in candidates:
+                fit_rows = [
+                    row
+                    for row in candidate.get("scenario_metrics", ())
+                    if not math.isclose(
+                        float(row["ratio"]), held_out, abs_tol=1.0e-12
+                    )
+                ]
+                metrics = {
+                    "clean_accuracy": float(candidate["clean_accuracy"]),
+                    "robust_accuracy": fmean(
+                        float(row["accuracy"]) for row in fit_rows
+                    ),
+                    "attack_success_rate": fmean(
+                        float(row["attack_success_rate"]) for row in fit_rows
+                    ),
+                    "false_positive_rate": float(
+                        candidate["worst_clean_false_positive_rate"]
+                    ),
+                }
+                scored.append((weighted_score(metrics, weights), candidate))
+            _fit_score, selected = max(
+                scored,
+                key=lambda item: (
+                    item[0],
+                    float(item[1]["malicious_revocation_rate"]),
+                    -int(item[1]["parameters"]["q"]),
+                ),
+            )
+            held_rows = [
+                row
+                for row in selected.get("scenario_metrics", ())
+                if math.isclose(
+                    float(row["ratio"]), held_out, abs_tol=1.0e-12
+                )
+            ]
+            folds.append(
+                {
+                    "held_out_ratio": held_out,
+                    "selected_candidate": selected["candidate_id"],
+                    "worst_asr": max(
+                        float(row["attack_success_rate"])
+                        for row in held_rows
+                    ),
+                    "worst_accuracy": min(
+                        float(row["accuracy"]) for row in held_rows
+                    ),
+                    "worst_three_round_recall": min(
+                        float(row["first_three_round_recall"])
+                        for row in held_rows
+                    ),
+                    "worst_attack_fp": max(
+                        float(row["attack_false_positive_rate"])
+                        for row in held_rows
+                    ),
+                    "worst_unflagged_malicious_weight_mass": max(
+                        float(row["max_unflagged_malicious_aggregation_mass"])
+                        for row in held_rows
+                    ),
+                }
+            )
+        worst_asr = max(float(item["worst_asr"]) for item in folds)
+        worst_accuracy = min(float(item["worst_accuracy"]) for item in folds)
+        worst_recall = min(
+            float(item["worst_three_round_recall"]) for item in folds
+        )
+        worst_fp = max(float(item["worst_attack_fp"]) for item in folds)
+        worst_mass = max(
+            float(item["worst_unflagged_malicious_weight_mass"])
+            for item in folds
+        )
+        balance = -sum((float(value) - 0.25) ** 2 for value in weights.values())
+        key = (
+            -worst_asr,
+            worst_accuracy,
+            worst_recall,
+            -worst_fp,
+            -worst_mass,
+            balance,
+            tuple(float(weights[name]) for name in sorted(weights)),
+        )
+        if best_key is None or key > best_key:
+            best_key = key
+            best_weights = dict(weights)
+            best_folds = folds
+    assert best_weights is not None
+    return best_weights, {
+        "algorithm": "leave_one_attacked_ratio_out",
+        "status": "learned",
+        "weight_floor": DEFAULT_OBJECTIVE_WEIGHT_FLOOR,
+        "weight_step": DEFAULT_OBJECTIVE_WEIGHT_STEP,
+        "evaluated_weight_vectors": len(grid),
+        "outer_objective": [
+            "minimize_worst_asr",
+            "maximize_worst_accuracy",
+            "maximize_worst_first_three_round_recall",
+            "minimize_worst_attack_false_positive_rate",
+            "minimize_worst_unflagged_malicious_aggregation_mass",
+        ],
+        "folds": best_folds,
     }
 
 
@@ -1289,6 +1674,13 @@ def _protocol_payload(
         "attack_start_round",
         "detector_window",
         "seed",
+        "calibration_max_asr",
+        "calibration_min_three_round_recall",
+        "calibration_max_attack_false_positive_rate",
+        "calibration_min_round_completion_rate",
+        "calibration_max_nonfinite_updates",
+        "calibration_candidate_budget",
+        "ours_calibration_selection_mode",
     )
     shared = {name: _jsonable(_arg(args, name, None)) for name in names}
     from .model import describe_compute_backend
@@ -1312,25 +1704,39 @@ def _protocol_payload(
         "shared_parameters": shared,
         "partitions": list(_partitions(args)),
         "client_counts": list(_client_counts(args)),
-        "ratios": list(_ratios(args)),
+        "formal_ratios": list(_ratios(args)),
+        "calibration_ratios": list(_calibration_ratios(args)),
+        "ratio_schedule": _jsonable(_arg(args, "ratio_schedule", None)),
         "split": {
             "fractions": [0.90, 0.05, 0.05],
             "split_seed": int(split_seed),
         },
         "shadow_seed": int(shadow_seed),
         "validation_seed": int(validation_seed),
-        "q_candidates": f"1..min(3,{int(dataset.num_classes)}-1)",
-        "C_tol_candidates": "unique(min(3,K),min(5,K))",
+        "candidate_policy": {
+            "budget": int(_arg(args, "calibration_candidate_budget", 12)),
+            "q": f"1..min(3,{int(dataset.num_classes)}-1)",
+            "C_tol": "unique(min({1,2,3,5},K))",
+            "beta_half_lives": ["K/2", "K", "2K"],
+            "penalty_multipliers": [0.5, 1.0, 2.0],
+            "recovery_multipliers": [0.75, 1.0, 1.5],
+            "sampling": "historical baseline plus deterministic even coverage",
+            "selection_mode": str(
+                _arg(args, "ours_calibration_selection_mode", "standalone")
+            ),
+        },
         "clean_alpha": _CLEAN_ALPHA,
         "hard_constraints": {
             "max_clean_false_positive_rate": _CLEAN_ALPHA,
             "min_clean_round_acceptance_rate": _MIN_CLEAN_ACCEPTANCE,
             "max_clean_round_suspicious_rate": _MAX_CLEAN_SUSPICIOUS,
             "min_clean_round_ess_ratio": _MIN_CLEAN_ESS_RATIO,
-            "require_full_rounds": True,
-            "require_finite_updates": True,
+            **_hard_constraints(args).to_dict(),
         },
-        "or_risk_allocation": "alpha/3 per evidence family",
+        "or_risk_allocation": (
+            "max_clean_round_suspicious_rate/3 per evidence family; "
+            "closed-loop clean revocation FPR remains separately capped at alpha"
+        ),
         "safety_margin": _SAFETY_MARGIN,
         "closed_loop_clean_envelope": {
             "rule": (
@@ -1341,12 +1747,16 @@ def _protocol_payload(
             "attack_evaluation": "only after all clean hard constraints pass",
             "refinable_incomplete_rule": _REFINABLE_INCOMPLETE_RULE,
         },
-        "beta_rule": "exp(log(0.5)/K)",
+        "beta_rule": "half-life candidates K/2,K,2K",
         "g0_rule": "clean scored spectral-gap q0.25",
         "kappa_rule": "clean scored anchor-score q0.90",
-        "penalty_rule": "min(0.1,1/max(client_counts))",
-        "recovery_rule": "penalty**(-0.5)",
-        "objective": dict(_OBJECTIVE),
+        "penalty_rule": "base=min(0.1,1/max(client_counts)); candidates 0.5x,1x,2x",
+        "recovery_rule": "base=penalty**(-0.5); paired candidates 0.75x,1x,1.5x",
+        "objective": {
+            "mode": "learned_leave_one_attacked_ratio_out",
+            "weight_floor": DEFAULT_OBJECTIVE_WEIGHT_FLOOR,
+            "weight_step": DEFAULT_OBJECTIVE_WEIGHT_STEP,
+        },
     }
 
 
@@ -1375,6 +1785,41 @@ def _ratios(args) -> tuple[float, ...]:
     if not any(abs(value) < 1e-12 for value in result):
         result = (0.0, *result)
     return result
+
+
+def _calibration_ratios(args) -> tuple[float, ...]:
+    values = _arg(args, "calibration_ratios", None)
+    if values is None:
+        return _ratios(args)
+    result = tuple(dict.fromkeys(float(value) for value in values))
+    if not any(abs(value) < 1.0e-12 for value in result):
+        result = (0.0, *result)
+    return result
+
+
+def _hard_constraints(args) -> CalibrationHardConstraints:
+    try:
+        return CalibrationHardConstraints(
+            max_asr=float(_arg(args, "calibration_max_asr", 0.20)),
+            min_three_round_recall=float(
+                _arg(args, "calibration_min_three_round_recall", 0.80)
+            ),
+            max_attack_false_positive_rate=float(
+                _arg(
+                    args,
+                    "calibration_max_attack_false_positive_rate",
+                    0.05,
+                )
+            ),
+            min_round_completion_rate=float(
+                _arg(args, "calibration_min_round_completion_rate", 1.0)
+            ),
+            max_nonfinite_updates=int(
+                _arg(args, "calibration_max_nonfinite_updates", 0)
+            ),
+        ).validate()
+    except ValueError as exc:
+        raise OursCalibrationError(str(exc)) from exc
 
 
 def _arg(args, name: str, default: Any) -> Any:

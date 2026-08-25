@@ -14,7 +14,13 @@ from .experiments import parse_args
 
 
 CONFIG_SCHEMA_VERSION = 1
-LIST_PARAMETERS = {"methods", "ratios", "client_counts", "partitions"}
+LIST_PARAMETERS = {
+    "methods",
+    "ratios",
+    "ratio_range",
+    "client_counts",
+    "partitions",
+}
 ROOT_KEYS = {"schema_version", "name", "description", "parameters"}
 BOOLEAN_ALIASES = {
     "early_stop": ("no_early_stop", True),
@@ -40,6 +46,11 @@ PARAMETER_ALIASES = {
     "h": "detector_drift_threshold",
     "C_max": "suspicion_count_max",
     "c_max": "suspicion_count_max",
+    "ASR": "calibration_max_asr",
+    "asr": "calibration_max_asr",
+    "attack_recall": "calibration_min_three_round_recall",
+    "attack_FP": "calibration_max_attack_false_positive_rate",
+    "attack_fp": "calibration_max_attack_false_positive_rate",
 }
 
 

@@ -25,6 +25,15 @@ import traceback
 
 import numpy as np
 
+from .calibration_policy import (
+    CalibrationHardConstraints,
+    DEFAULT_MAX_ASR,
+    DEFAULT_MAX_ATTACK_FALSE_POSITIVE_RATE,
+    DEFAULT_MAX_NONFINITE_UPDATES,
+    DEFAULT_MIN_ROUND_COMPLETION_RATE,
+    DEFAULT_MIN_THREE_ROUND_RECALL,
+    build_ratio_schedule,
+)
 from .datasets import load_image_dataset
 from .crypto import rrs_backend_name, sm3_backend_name
 from .fl import (
@@ -456,6 +465,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ],
     )
     parser.add_argument("--ratios", nargs="+", type=float, default=list(DEFAULT_RATIOS))
+    parser.add_argument(
+        "--ratio-range",
+        nargs=3,
+        type=float,
+        metavar=("MIN", "MAX", "COUNT"),
+        help=(
+            "Generate formal ratios from [MIN, MAX, COUNT] and use attacked "
+            "midpoints for offline calibration. For example 0 0.8 5 gives "
+            "formal [0,.2,.4,.6,.8] and calibration [0,.1,.3,.5,.7]."
+        ),
+    )
     parser.add_argument("--num-clients", type=int, default=20)
     parser.add_argument("--client-counts", "--num-clients-list", nargs="+", type=int)
     parser.add_argument("--rounds", type=int, default=30)
@@ -600,6 +620,63 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "training-only global offline calibration, then freezes the selected "
             "parameters across every formal main-run scenario. 'fixed' preserves "
             "manual/default values for ablations and legacy reproduction."
+        ),
+    )
+    parser.add_argument(
+        "--ASR",
+        "--calibration-max-asr",
+        dest="calibration_max_asr",
+        type=float,
+        default=DEFAULT_MAX_ASR,
+        help="Maximum worst attacked-scenario ASR allowed by offline calibration.",
+    )
+    parser.add_argument(
+        "--min-attack-recall",
+        "--calibration-min-three-round-recall",
+        dest="calibration_min_three_round_recall",
+        type=float,
+        default=DEFAULT_MIN_THREE_ROUND_RECALL,
+        help=(
+            "Minimum cumulative malicious-client suspicious recall within the "
+            "first three attack rounds."
+        ),
+    )
+    parser.add_argument(
+        "--max-attack-FP",
+        "--calibration-max-attack-fp",
+        "--calibration-max-attack-false-positive-rate",
+        dest="calibration_max_attack_false_positive_rate",
+        type=float,
+        default=DEFAULT_MAX_ATTACK_FALSE_POSITIVE_RATE,
+        help="Maximum honest-client revocation rate in any attacked scenario.",
+    )
+    parser.add_argument(
+        "--min-round-completion",
+        "--calibration-min-round-completion",
+        "--calibration-min-round-completion-rate",
+        dest="calibration_min_round_completion_rate",
+        type=float,
+        default=DEFAULT_MIN_ROUND_COMPLETION_RATE,
+        help="Minimum stopped_round/rounds ratio for every calibration run.",
+    )
+    parser.add_argument(
+        "--max-nonfinite-updates",
+        "--calibration-max-nonfinite-updates",
+        dest="calibration_max_nonfinite_updates",
+        type=int,
+        default=DEFAULT_MAX_NONFINITE_UPDATES,
+        help=(
+            "Maximum total NaN/Inf client updates allowed per calibration "
+            "candidate; formal experiments should keep the default 0."
+        ),
+    )
+    parser.add_argument(
+        "--calibration-candidate-budget",
+        type=int,
+        default=12,
+        help=(
+            "Bounded candidate budget per tunable defense in the unified "
+            "offline calibration."
         ),
     )
     parser.add_argument(
@@ -772,6 +849,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     raw_args = sys.argv[1:] if argv is None else argv
     args = apply_presets(parser.parse_args(argv), raw_args)
+    if args.ratio_range is not None:
+        if _has_any_option(raw_args, "--ratios"):
+            parser.error("--ratio-range cannot be combined with --ratios")
+        try:
+            ratio_schedule = build_ratio_schedule(args.ratio_range)
+        except ValueError as exc:
+            parser.error(str(exc))
+        args.ratios = list(ratio_schedule.formal_ratios)
+        args.calibration_ratios = list(ratio_schedule.calibration_ratios)
+        args.ratio_schedule = ratio_schedule.to_dict()
+    else:
+        args.calibration_ratios = list(args.ratios)
+        args.ratio_schedule = None
     if args.attack == "alternating":
         args.attack = "alternating_minimization"
     if (
@@ -840,6 +930,18 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
     client_counts = args.client_counts or [args.num_clients]
     auto_ours = args.ours_parameter_mode == "auto" and "sm9rrs" in args.methods
     effective_attack_start = args.attack_start_round or args.detector_window + 2
+    try:
+        CalibrationHardConstraints(
+            max_asr=args.calibration_max_asr,
+            min_three_round_recall=args.calibration_min_three_round_recall,
+            max_attack_false_positive_rate=(
+                args.calibration_max_attack_false_positive_rate
+            ),
+            min_round_completion_rate=args.calibration_min_round_completion_rate,
+            max_nonfinite_updates=args.calibration_max_nonfinite_updates,
+        ).validate()
+    except ValueError as exc:
+        parser.error(str(exc))
     checks = (
         (all(0.0 <= ratio < 1.0 for ratio in args.ratios), "--ratios must be in [0, 1)"),
         (all(count >= 1 for count in client_counts), "client counts must be at least 1"),
@@ -890,6 +992,10 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
             "--attack-start-round must be non-negative",
         ),
         (args.detector_window >= 2, "--K must be at least 2"),
+        (
+            args.calibration_candidate_budget >= 1,
+            "--calibration-candidate-budget must be at least 1",
+        ),
         (
             not auto_ours or args.rounds > args.detector_window,
             "automatic Ours calibration requires --rounds > --K",

@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
+from .calibration_policy import objective_weight_grid, weighted_score
 from .config_runner import ConfigError, parameters_to_argv
 from .datasets import ImageDataset, load_image_dataset
 from .experiments import (
@@ -153,7 +154,18 @@ class FairTuningConfig:
     min_clean_round_acceptance_rate: float
     require_full_rounds: bool
     run_final_evaluation: bool
+    max_asr: float
+    min_three_round_recall: float
+    max_attack_false_positive_rate: float
+    min_round_completion_rate: float
+    max_nonfinite_updates: int
     objective: dict[str, float]
+    objective_mode: str
+    formal_ratios: tuple[float, ...]
+    calibration_ratios: tuple[float, ...]
+    ratio_schedule: dict[str, Any] | None
+    auto_ours: bool
+    preinvalid_candidates: tuple[str, ...]
     candidates: dict[str, tuple[dict[str, Any], ...]]
 
 
@@ -168,6 +180,10 @@ class TrialScore:
     robust_accuracy: float
     attack_success_rate: float
     false_positive_rate: float
+    worst_attack_success_rate: float
+    worst_first_three_round_recall: float
+    worst_attack_false_positive_rate: float
+    minimum_round_completion_rate: float
     clean_acceptance_rate: float
     worst_clean_false_positive_rate: float
     min_clean_round_acceptance_rate: float
@@ -191,6 +207,12 @@ class TrialScore:
             "robust_accuracy": self.robust_accuracy,
             "attack_success_rate": self.attack_success_rate,
             "false_positive_rate": self.false_positive_rate,
+            "worst_attack_success_rate": self.worst_attack_success_rate,
+            "worst_first_three_round_recall": self.worst_first_three_round_recall,
+            "worst_attack_false_positive_rate": (
+                self.worst_attack_false_positive_rate
+            ),
+            "minimum_round_completion_rate": self.minimum_round_completion_rate,
             "clean_acceptance_rate": self.clean_acceptance_rate,
             "worst_clean_false_positive_rate": self.worst_clean_false_positive_rate,
             "min_clean_round_acceptance_rate": self.min_clean_round_acceptance_rate,
@@ -323,25 +345,60 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
         raise FairTuningError("min_clean_round_acceptance_rate must be in [0, 1]")
 
     objective = dict(OBJECTIVE_DEFAULTS)
-    objective_payload = tuning.get("objective", {})
-    if not isinstance(objective_payload, dict):
-        raise FairTuningError("objective must be a JSON object")
-    unknown_objective = sorted(set(objective_payload) - set(OBJECTIVE_DEFAULTS))
-    if unknown_objective:
-        raise FairTuningError(f"unknown objective weight: {unknown_objective[0]}")
-    for key, value in objective_payload.items():
-        objective[key] = _finite_float(value, key)
-    if any(value < 0.0 for value in objective.values()):
-        raise FairTuningError("objective weights must be non-negative")
-    if sum(objective.values()) <= 0.0:
-        raise FairTuningError("at least one objective weight must be positive")
+    objective_payload = tuning.get("objective", "auto")
+    if objective_payload == "auto":
+        objective_mode = "learned_leave_one_attacked_ratio_out"
+    elif isinstance(objective_payload, dict):
+        objective_mode = "fixed_legacy"
+        unknown_objective = sorted(
+            set(objective_payload) - set(OBJECTIVE_DEFAULTS)
+        )
+        if unknown_objective:
+            raise FairTuningError(
+                f"unknown objective weight: {unknown_objective[0]}"
+            )
+        for key, value in objective_payload.items():
+            objective[key] = _finite_float(value, key)
+        if any(value < 0.0 for value in objective.values()):
+            raise FairTuningError("objective weights must be non-negative")
+        if sum(objective.values()) <= 0.0:
+            raise FairTuningError("at least one objective weight must be positive")
+    else:
+        raise FairTuningError("objective must be 'auto' or a JSON object")
 
     spaces = tuning.get("method_spaces")
     if not isinstance(spaces, dict) or set(spaces) != set(ALL_METHODS):
         raise FairTuningError("method_spaces must contain exactly the six methods")
+    auto_ours = spaces["sm9rrs"] == "auto"
+    if auto_ours:
+        if args.ours_parameter_mode != "auto":
+            raise FairTuningError(
+                "method_spaces.sm9rrs='auto' requires "
+                "shared_parameters.ours_parameter_mode='auto'"
+            )
+        if args.calibration_candidate_budget != budget:
+            raise FairTuningError(
+                "calibration_candidate_budget must equal "
+                "trials_per_tunable_method for unified fair tuning"
+            )
+        bounded_ours_pool_size = 27 * len(
+            {
+                max(1, min(value, int(args.detector_window)))
+                for value in (1, 2, 3, 5)
+            }
+        )
+        if budget > bounded_ours_pool_size:
+            raise FairTuningError(
+                "trials_per_tunable_method exceeds the bounded Ours pool "
+                f"of {bounded_ours_pool_size} candidates for K="
+                f"{args.detector_window}"
+            )
     candidates: dict[str, tuple[dict[str, Any], ...]] = {}
     for method in ALL_METHODS:
         space = spaces[method]
+        if method == "sm9rrs" and auto_ours:
+            candidates[method] = ()
+            continue
         if not isinstance(space, dict):
             raise FairTuningError(f"method_spaces.{method} must be a JSON object")
         unknown = sorted(set(space) - METHOD_TUNABLE_PARAMETERS[method])
@@ -407,7 +464,28 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
         min_clean_round_acceptance_rate=min_clean_round_acceptance_rate,
         require_full_rounds=require_full_rounds,
         run_final_evaluation=run_final,
+        max_asr=float(args.calibration_max_asr),
+        min_three_round_recall=float(
+            args.calibration_min_three_round_recall
+        ),
+        max_attack_false_positive_rate=float(
+            args.calibration_max_attack_false_positive_rate
+        ),
+        min_round_completion_rate=float(
+            args.calibration_min_round_completion_rate
+        ),
+        max_nonfinite_updates=int(args.calibration_max_nonfinite_updates),
         objective=objective,
+        objective_mode=objective_mode,
+        formal_ratios=tuple(float(value) for value in args.ratios),
+        calibration_ratios=tuple(
+            float(value) for value in args.calibration_ratios
+        ),
+        ratio_schedule=(
+            dict(args.ratio_schedule) if args.ratio_schedule is not None else None
+        ),
+        auto_ours=auto_ours,
+        preinvalid_candidates=(),
         candidates=candidates,
     )
 
@@ -465,6 +543,16 @@ def make_validation_dataset(
         y_train=dataset.y_train[train].copy(),
         x_test=dataset.x_train[validation].copy(),
         y_test=dataset.y_train[validation].copy(),
+        x_attack=(
+            dataset.x_attack.copy()
+            if getattr(dataset, "x_attack", None) is not None
+            else None
+        ),
+        y_attack=(
+            dataset.y_attack.copy()
+            if getattr(dataset, "y_attack", None) is not None
+            else None
+        ),
         # Preserve the exact name because it selects the CIFAR architecture and
         # also remains the task identifier in the SM9-RRS protocol.
         name=dataset.name,
@@ -485,6 +573,11 @@ def score_trial(
     max_clean_false_positive_rate: float = 0.01,
     min_clean_round_acceptance_rate: float = 0.95,
     require_full_rounds: bool = True,
+    max_asr: float | None = None,
+    min_three_round_recall: float | None = None,
+    max_attack_false_positive_rate: float | None = None,
+    min_round_completion_rate: float | None = None,
+    max_nonfinite_updates: int | None = None,
 ) -> TrialScore:
     clean = [result for result in results if abs(result.config.malicious_ratio) < 1e-12]
     attacked = [result for result in results if result.config.malicious_ratio > 0.0]
@@ -498,7 +591,12 @@ def score_trial(
         if result.records and result.records[-1].attack_target_success_rate is not None
     ]
     attack_success = fmean(float(value) for value in attack_rates) if attack_rates else 0.0
+    worst_attack_success_rate = max(
+        (float(value) for value in attack_rates),
+        default=0.0,
+    )
     false_positive_rates = []
+    attack_false_positive_rates = []
     for result in results:
         final_record = result.records[-1] if result.records else None
         honest = result.config.num_clients - malicious_client_count(
@@ -509,7 +607,34 @@ def score_trial(
             (final_record.false_positive_revocations if final_record is not None else 0)
             / max(1, honest)
         )
+        if result.config.malicious_ratio > 0.0:
+            attack_false_positive_rates.append(false_positive_rates[-1])
     false_positive_rate = fmean(false_positive_rates)
+    worst_attack_false_positive_rate = max(
+        attack_false_positive_rates,
+        default=0.0,
+    )
+    three_round_recalls: list[float] = []
+    for result in attacked:
+        malicious_count = malicious_client_count(
+            result.config.num_clients,
+            result.config.malicious_ratio,
+        )
+        attack_start = (
+            result.config.attack_start_round or result.config.detector_window + 2
+        )
+        first_three_end = min(result.config.rounds, attack_start + 2)
+        detected = {
+            str(getattr(diagnostic, "client_id", ""))
+            for diagnostic in getattr(result, "diagnostics", ())
+            if bool(getattr(diagnostic, "is_malicious", False))
+            and bool(getattr(diagnostic, "suspicious", False))
+            and attack_start
+            <= int(getattr(diagnostic, "round", 0))
+            <= first_three_end
+        }
+        three_round_recalls.append(len(detected) / max(1, malicious_count))
+    worst_first_three_round_recall = min(three_round_recalls, default=0.0)
     clean_false_positive_rates = []
     for result in clean:
         final_record = result.records[-1] if result.records else None
@@ -542,7 +667,17 @@ def score_trial(
         for result in results
     )
     nonfinite_updates = sum(result.nonfinite_updates for result in results)
-    finite_valid = not require_finite_updates or nonfinite_updates == 0
+    minimum_round_completion_rate = min(
+        (
+            result.stopped_round / max(1, result.config.rounds)
+            for result in results
+        ),
+        default=0.0,
+    )
+    if method == "sm9rrs" and max_nonfinite_updates is not None:
+        finite_valid = nonfinite_updates <= max_nonfinite_updates
+    else:
+        finite_valid = not require_finite_updates or nonfinite_updates == 0
     clean_acceptance_valid = not require_clean_acceptance or all(
         rate > 0.0 for rate in clean_acceptance_rates
     )
@@ -553,13 +688,39 @@ def score_trial(
         min_observed_clean_acceptance_rate
         >= min_clean_round_acceptance_rate - 1e-12
     )
-    full_rounds_valid = not require_full_rounds or all_runs_completed
+    if method == "sm9rrs" and min_round_completion_rate is not None:
+        full_rounds_valid = (
+            minimum_round_completion_rate
+            >= min_round_completion_rate - 1.0e-12
+        )
+    else:
+        full_rounds_valid = not require_full_rounds or all_runs_completed
+    attacked_hard_constraints_valid = True
+    if method == "sm9rrs":
+        if max_asr is not None:
+            attacked_hard_constraints_valid = (
+                attacked_hard_constraints_valid
+                and worst_attack_success_rate <= max_asr + 1.0e-12
+            )
+        if min_three_round_recall is not None:
+            attacked_hard_constraints_valid = (
+                attacked_hard_constraints_valid
+                and worst_first_three_round_recall
+                >= min_three_round_recall - 1.0e-12
+            )
+        if max_attack_false_positive_rate is not None:
+            attacked_hard_constraints_valid = (
+                attacked_hard_constraints_valid
+                and worst_attack_false_positive_rate
+                <= max_attack_false_positive_rate + 1.0e-12
+            )
     valid = (
         finite_valid
         and clean_acceptance_valid
         and clean_false_positive_valid
         and clean_round_acceptance_valid
         and full_rounds_valid
+        and attacked_hard_constraints_valid
     )
     score = (
         objective["clean_accuracy_weight"] * clean_accuracy
@@ -579,6 +740,10 @@ def score_trial(
         robust_accuracy=robust_accuracy,
         attack_success_rate=attack_success,
         false_positive_rate=false_positive_rate,
+        worst_attack_success_rate=worst_attack_success_rate,
+        worst_first_three_round_recall=worst_first_three_round_recall,
+        worst_attack_false_positive_rate=worst_attack_false_positive_rate,
+        minimum_round_completion_rate=minimum_round_completion_rate,
         clean_acceptance_rate=clean_acceptance_rate,
         worst_clean_false_positive_rate=worst_clean_false_positive_rate,
         min_clean_round_acceptance_rate=min_observed_clean_acceptance_rate,
@@ -586,6 +751,209 @@ def score_trial(
         nonfinite_updates=nonfinite_updates,
         result_count=len(results),
     )
+
+
+def _learn_unified_objective_weights(
+    spec: FairTuningConfig,
+    results_by_candidate: dict[str, list[ExperimentResult]],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Learn one method-neutral Score by leave-one-ratio-out transfer.
+
+    For every held-out attacked calibration ratio, each tunable method selects
+    its own candidate using the other attacked ratios.  The outer objective
+    then rewards weight vectors whose three selected defenses transfer with
+    low ASR, high robust accuracy, and low honest-client false positives.
+    """
+
+    attacked_ratios = tuple(
+        sorted({value for value in spec.calibration_ratios if value > 0.0})
+    )
+    if len(attacked_ratios) < 2:
+        return dict(OBJECTIVE_DEFAULTS), {
+            "algorithm": "leave_one_attacked_ratio_out",
+            "status": "fallback_insufficient_attacked_ratios",
+            "folds": [],
+        }
+    tunable_methods = ("sm9rrs", "vert", "fedredefense")
+    valid_candidate_ids: set[str] = set()
+    for method in tunable_methods:
+        for index, parameters in enumerate(spec.candidates[method], start=1):
+            candidate_id = f"{method}-{index:03d}"
+            if candidate_id in spec.preinvalid_candidates:
+                continue
+            trial = score_trial(
+                method,
+                candidate_id,
+                parameters,
+                results_by_candidate.get(candidate_id, []),
+                objective=OBJECTIVE_DEFAULTS,
+                require_finite_updates=spec.require_finite_updates,
+                require_clean_acceptance=spec.require_clean_acceptance,
+                max_clean_false_positive_rate=spec.max_clean_false_positive_rate,
+                min_clean_round_acceptance_rate=(
+                    spec.min_clean_round_acceptance_rate
+                ),
+                require_full_rounds=spec.require_full_rounds,
+                max_asr=spec.max_asr,
+                min_three_round_recall=spec.min_three_round_recall,
+                max_attack_false_positive_rate=(
+                    spec.max_attack_false_positive_rate
+                ),
+                min_round_completion_rate=spec.min_round_completion_rate,
+                max_nonfinite_updates=spec.max_nonfinite_updates,
+            )
+            if trial.valid:
+                valid_candidate_ids.add(candidate_id)
+    best_weights: dict[str, float] | None = None
+    best_key: tuple[Any, ...] | None = None
+    best_folds: list[dict[str, Any]] = []
+    weight_candidates = objective_weight_grid()
+    for weights in weight_candidates:
+        folds: list[dict[str, Any]] = []
+        admissible = True
+        for held_out in attacked_ratios:
+            selected_rows: list[dict[str, Any]] = []
+            for method in tunable_methods:
+                scored: list[TrialScore] = []
+                for index, parameters in enumerate(
+                    spec.candidates[method],
+                    start=1,
+                ):
+                    candidate_id = f"{method}-{index:03d}"
+                    if candidate_id not in valid_candidate_ids:
+                        continue
+                    fit_results = [
+                        result
+                        for result in results_by_candidate.get(candidate_id, ())
+                        if abs(result.config.malicious_ratio) < 1.0e-12
+                        or not np.isclose(
+                            result.config.malicious_ratio,
+                            held_out,
+                            atol=1.0e-12,
+                        )
+                    ]
+                    trial = score_trial(
+                        method,
+                        candidate_id,
+                        parameters,
+                        fit_results,
+                        objective=weights,
+                        require_finite_updates=spec.require_finite_updates,
+                        require_clean_acceptance=spec.require_clean_acceptance,
+                        max_clean_false_positive_rate=(
+                            spec.max_clean_false_positive_rate
+                        ),
+                        min_clean_round_acceptance_rate=(
+                            spec.min_clean_round_acceptance_rate
+                        ),
+                        require_full_rounds=spec.require_full_rounds,
+                        max_asr=spec.max_asr,
+                        min_three_round_recall=spec.min_three_round_recall,
+                        max_attack_false_positive_rate=(
+                            spec.max_attack_false_positive_rate
+                        ),
+                        min_round_completion_rate=(
+                            spec.min_round_completion_rate
+                        ),
+                        max_nonfinite_updates=spec.max_nonfinite_updates,
+                    )
+                    if trial.valid:
+                        scored.append(trial)
+                if not scored:
+                    admissible = False
+                    break
+                selected = max(
+                    scored,
+                    key=lambda trial: (
+                        trial.score,
+                        tuple(sorted(trial.parameters.items())),
+                    ),
+                )
+                held_results = [
+                    result
+                    for result in results_by_candidate[selected.candidate_id]
+                    if np.isclose(
+                        result.config.malicious_ratio,
+                        held_out,
+                        atol=1.0e-12,
+                    )
+                ]
+                attack_rates = [
+                    result.records[-1].attack_target_success_rate
+                    for result in held_results
+                    if result.records
+                    and result.records[-1].attack_target_success_rate is not None
+                ]
+                false_positive_rates = []
+                for result in held_results:
+                    final_record = result.records[-1] if result.records else None
+                    honest = result.config.num_clients - malicious_client_count(
+                        result.config.num_clients,
+                        result.config.malicious_ratio,
+                    )
+                    false_positive_rates.append(
+                        (
+                            final_record.false_positive_revocations
+                            if final_record is not None
+                            else 0
+                        )
+                        / max(1, honest)
+                    )
+                selected_rows.append(
+                    {
+                        "method": method,
+                        "candidate_id": selected.candidate_id,
+                        "robust_accuracy": fmean(
+                            result.final_accuracy for result in held_results
+                        ),
+                        "attack_success_rate": (
+                            fmean(float(value) for value in attack_rates)
+                            if attack_rates
+                            else 0.0
+                        ),
+                        "false_positive_rate": fmean(false_positive_rates),
+                    }
+                )
+            if not admissible:
+                break
+            folds.append(
+                {
+                    "held_out_ratio": held_out,
+                    "selected": selected_rows,
+                }
+            )
+        if not admissible:
+            continue
+        rows = [row for fold in folds for row in fold["selected"]]
+        worst_asr = max(float(row["attack_success_rate"]) for row in rows)
+        worst_accuracy = min(float(row["robust_accuracy"]) for row in rows)
+        worst_fp = max(float(row["false_positive_rate"]) for row in rows)
+        balance = -sum((float(value) - 0.25) ** 2 for value in weights.values())
+        key = (
+            -worst_asr,
+            worst_accuracy,
+            -worst_fp,
+            balance,
+            tuple(float(weights[name]) for name in sorted(weights)),
+        )
+        if best_key is None or key > best_key:
+            best_key = key
+            best_weights = dict(weights)
+            best_folds = folds
+    if best_weights is None:
+        raise FairTuningError(
+            "cannot learn Score weights because a tunable method has no valid "
+            "candidate in at least one leave-one-ratio-out fold"
+        )
+    return best_weights, {
+        "algorithm": "leave_one_attacked_ratio_out",
+        "status": "learned",
+        "scope": ["sm9rrs", "vert", "fedredefense"],
+        "weight_floor": 0.05,
+        "weight_step": 0.05,
+        "evaluated_weight_vectors": len(weight_candidates),
+        "folds": best_folds,
+    }
 
 
 def select_best_trials(trials: list[TrialScore]) -> dict[str, TrialScore]:
@@ -615,6 +983,19 @@ def build_validation_tasks(
     tasks: list[TuningExperimentTask] = []
     for method in ALL_METHODS:
         method_bases = [config for config in base_configs if config.method == method]
+        if spec.ratio_schedule is not None:
+            # Main-run bases contain the formal ratios.  Collapse the ratio
+            # dimension, then rebuild it from the disjoint calibration
+            # midpoints so validation never observes a formal attacked ratio.
+            unique_bases: dict[ExperimentConfig, ExperimentConfig] = {}
+            for base in method_bases:
+                key = replace(base, malicious_ratio=0.0)
+                unique_bases.setdefault(key, key)
+            method_bases = [
+                replace(base, malicious_ratio=ratio)
+                for base in unique_bases.values()
+                for ratio in spec.calibration_ratios
+            ]
         for index, parameters in enumerate(spec.candidates[method], start=1):
             candidate_id = f"{method}-{index:03d}"
             for seed in spec.validation_seeds:
@@ -656,6 +1037,51 @@ def build_final_tasks(
                     )
                 )
     return tasks
+
+
+def _ours_candidates_from_artifact(
+    artifact,
+    *,
+    expected_budget: int,
+) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
+    """Translate every bounded auto-calibration candidate to FL config fields."""
+
+    mapping = {
+        "q": "detector_subspace_dim",
+        "g0": "detector_gap_threshold",
+        "theta_adj": "detector_adjacent_threshold",
+        "theta_anc": "detector_anchor_threshold",
+        "beta": "detector_drift_memory",
+        "kappa": "detector_drift_allowance",
+        "h": "detector_drift_threshold",
+        "C_tol": "suspicion_remove_after",
+        "C_max": "suspicion_count_max",
+        "penalty_factor": "suspicion_penalty_factor",
+        "recovery_factor": "suspicion_recovery_factor",
+    }
+    candidates: list[dict[str, Any]] = []
+    invalid: list[str] = []
+    for index, row in enumerate(artifact.candidate_results, start=1):
+        parameters = row.get("parameters")
+        if not isinstance(parameters, dict):
+            raise FairTuningError(
+                "automatic Ours artifact contains a candidate without parameters"
+            )
+        candidates.append(
+            {
+                target: parameters[source]
+                for source, target in mapping.items()
+            }
+        )
+        if not bool(row.get("valid", False)):
+            invalid.append(f"sm9rrs-{index:03d}")
+    if len(candidates) != expected_budget:
+        raise FairTuningError(
+            "bounded Ours space produced "
+            f"{len(candidates)} candidates, but unified tuning requires "
+            f"{expected_budget}; reduce trials_per_tunable_method or K"
+        )
+    return tuple(candidates), tuple(invalid)
 
 
 def prepare_tuning_tasks(
@@ -1069,6 +1495,43 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         test_limit=args.test_samples,
         seed=args.seed,
     )
+    ours_calibration_metadata: dict[str, Any] | None = None
+    if spec.auto_ours:
+        from .ours_calibration import (
+            apply_ours_parameters,
+            calibration_metadata,
+            resolve_or_run_ours_calibration,
+        )
+
+        # Scheme B asks the Ours calibrator only to derive/refine its bounded
+        # candidate policies from clean data.  Attacked candidate selection is
+        # deferred to the same outer validation tasks used by VERT/FedREDefense.
+        args.ours_calibration_selection_mode = "defer_to_unified_tuner"
+        dataset, artifact = resolve_or_run_ours_calibration(
+            dataset,
+            args,
+            output_dir,
+        )
+        apply_ours_parameters(args, artifact)
+        candidates = dict(spec.candidates)
+        ours_candidates, preinvalid_candidates = _ours_candidates_from_artifact(
+            artifact,
+            expected_budget=spec.trials_per_tunable_method,
+        )
+        candidates["sm9rrs"] = ours_candidates
+        spec = replace(
+            spec,
+            candidates=candidates,
+            preinvalid_candidates=preinvalid_candidates,
+        )
+        ours_calibration_metadata = calibration_metadata(artifact)
+        print(
+            "unified_auto_ours="
+            f"candidates={len(candidates['sm9rrs'])} "
+            f"preinvalid={len(preinvalid_candidates)} "
+            "objective=pending_unified_validation_learning",
+            flush=True,
+        )
     validation_dataset = make_validation_dataset(
         dataset,
         fraction=spec.validation_fraction,
@@ -1133,6 +1596,24 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
     for task, result in validation_executions:
         results_by_candidate.setdefault(task.candidate_id, []).append(result)
 
+    if spec.objective_mode == "learned_leave_one_attacked_ratio_out":
+        learned_objective, objective_learning = _learn_unified_objective_weights(
+            spec,
+            results_by_candidate,
+        )
+        spec = replace(spec, objective=learned_objective)
+        print(
+            "learned_tuning_objective="
+            + json.dumps(learned_objective, sort_keys=True),
+            flush=True,
+        )
+    else:
+        objective_learning = {
+            "algorithm": "fixed",
+            "status": "legacy_explicit_weights",
+            "folds": [],
+        }
+
     trial_scores: list[TrialScore] = []
     for method in ALL_METHODS:
         for index, parameters in enumerate(spec.candidates[method], start=1):
@@ -1150,7 +1631,16 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
                     spec.min_clean_round_acceptance_rate
                 ),
                 require_full_rounds=spec.require_full_rounds,
+                max_asr=spec.max_asr,
+                min_three_round_recall=spec.min_three_round_recall,
+                max_attack_false_positive_rate=(
+                    spec.max_attack_false_positive_rate
+                ),
+                min_round_completion_rate=spec.min_round_completion_rate,
+                max_nonfinite_updates=spec.max_nonfinite_updates,
             )
+            if candidate_id in spec.preinvalid_candidates:
+                trial = replace(trial, valid=False, score=float("-inf"))
             trial_scores.append(trial)
             print(
                 f"tuning_candidate_complete={candidate_id} valid={trial.valid} "
@@ -1171,12 +1661,24 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         "validation_seeds": list(spec.validation_seeds),
         "final_seeds": list(spec.final_seeds),
         "objective": spec.objective,
+        "objective_mode": spec.objective_mode,
+        "objective_learning": objective_learning,
+        "formal_ratios": list(spec.formal_ratios),
+        "calibration_ratios": list(spec.calibration_ratios),
+        "ratio_schedule": spec.ratio_schedule,
         "trials_per_tunable_method": spec.trials_per_tunable_method,
         "require_finite_updates": spec.require_finite_updates,
         "require_clean_acceptance": spec.require_clean_acceptance,
         "max_clean_false_positive_rate": spec.max_clean_false_positive_rate,
         "min_clean_round_acceptance_rate": spec.min_clean_round_acceptance_rate,
         "require_full_rounds": spec.require_full_rounds,
+        "max_asr": spec.max_asr,
+        "min_three_round_recall": spec.min_three_round_recall,
+        "max_attack_false_positive_rate": (
+            spec.max_attack_false_positive_rate
+        ),
+        "min_round_completion_rate": spec.min_round_completion_rate,
+        "max_nonfinite_updates": spec.max_nonfinite_updates,
         "hard_constraints": {
             "require_finite_updates": spec.require_finite_updates,
             "require_clean_acceptance": spec.require_clean_acceptance,
@@ -1185,9 +1687,18 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
                 spec.min_clean_round_acceptance_rate
             ),
             "require_full_rounds": spec.require_full_rounds,
+            "max_asr": spec.max_asr,
+            "min_three_round_recall": spec.min_three_round_recall,
+            "max_attack_false_positive_rate": (
+                spec.max_attack_false_positive_rate
+            ),
+            "min_round_completion_rate": spec.min_round_completion_rate,
+            "max_nonfinite_updates": spec.max_nonfinite_updates,
         },
         "validation_fingerprint": validation_fingerprint,
         "shared_parameters": spec.shared_parameters,
+        "ours_calibration": ours_calibration_metadata,
+        "preinvalid_candidates": list(spec.preinvalid_candidates),
         "selected": {
             method: {
                 "candidate_id": trial.candidate_id,
@@ -1201,6 +1712,18 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
                         trial.min_clean_round_acceptance_rate
                     ),
                     "all_runs_completed": trial.all_runs_completed,
+                    "worst_attack_success_rate": (
+                        trial.worst_attack_success_rate
+                    ),
+                    "worst_first_three_round_recall": (
+                        trial.worst_first_three_round_recall
+                    ),
+                    "worst_attack_false_positive_rate": (
+                        trial.worst_attack_false_positive_rate
+                    ),
+                    "minimum_round_completion_rate": (
+                        trial.minimum_round_completion_rate
+                    ),
                 },
             }
             for method, trial in selected.items()
@@ -1406,10 +1929,18 @@ def main(argv: list[str] | None = None) -> None:
     except FairTuningError as exc:
         parser.error(str(exc))
     print(f"tuning_config={spec.source}", flush=True)
+    resolved_args = parse_args(parameters_to_argv(spec.shared_parameters))
     print(
         "candidate_counts="
         + json.dumps(
-            {method: len(candidates) for method, candidates in spec.candidates.items()},
+            {
+                method: (
+                    spec.trials_per_tunable_method
+                    if method == "sm9rrs" and spec.auto_ours
+                    else len(candidates)
+                )
+                for method, candidates in spec.candidates.items()
+            },
             sort_keys=True,
         ),
         flush=True,
@@ -1432,12 +1963,24 @@ def main(argv: list[str] | None = None) -> None:
                     spec.min_clean_round_acceptance_rate
                 ),
                 "require_full_rounds": spec.require_full_rounds,
+                "max_asr": resolved_args.calibration_max_asr,
+                "min_three_round_malicious_recall": (
+                    resolved_args.calibration_min_three_round_recall
+                ),
+                "max_attack_false_positive_rate": (
+                    resolved_args.calibration_max_attack_false_positive_rate
+                ),
+                "min_round_completion_rate": (
+                    resolved_args.calibration_min_round_completion_rate
+                ),
+                "max_nonfinite_updates": (
+                    resolved_args.calibration_max_nonfinite_updates
+                ),
             },
             sort_keys=True,
         ),
         flush=True,
     )
-    resolved_args = parse_args(parameters_to_argv(spec.shared_parameters))
     print(
         "tuning_execution_request="
         f"compute_backend={resolved_args.compute_backend} device={resolved_args.device} "

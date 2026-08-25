@@ -2,9 +2,12 @@ import json
 import io
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+from sm9rrsfl.config_runner import parameters_to_argv
 from sm9rrsfl.datasets import make_synthetic_mnist_like
 from sm9rrsfl.fair_tuning import (
     ALL_METHODS,
@@ -26,6 +29,18 @@ from sm9rrsfl.experiments import build_experiment_configs, parse_args
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _set_legacy_four_candidate_baselines(payload):
+    payload["tuning"]["trials_per_tunable_method"] = 4
+    payload["tuning"]["method_spaces"]["vert"] = {
+        "vert_history_window": [5, 10],
+        "vert_predict_epochs": [3, 5],
+    }
+    payload["tuning"]["method_spaces"]["fedredefense"] = {
+        "fedre_threshold": [0.6, 0.7],
+        "fedre_teacher_lr": [5.0, 6.0],
+    }
+
+
 class FairTuningTest(unittest.TestCase):
     def test_example_enforces_all_methods_and_equal_tunable_budget(self):
         spec = load_fair_tuning_config(
@@ -33,10 +48,15 @@ class FairTuningTest(unittest.TestCase):
         )
 
         self.assertEqual(set(spec.candidates), set(ALL_METHODS))
-        self.assertEqual(len(spec.candidates["sm9rrs"]), 4)
-        self.assertEqual(len(spec.candidates["vert"]), 4)
-        self.assertEqual(len(spec.candidates["fedredefense"]), 4)
+        self.assertTrue(spec.auto_ours)
+        self.assertEqual(len(spec.candidates["sm9rrs"]), 0)
+        self.assertEqual(len(spec.candidates["vert"]), 12)
+        self.assertEqual(len(spec.candidates["fedredefense"]), 12)
         self.assertEqual(len(spec.candidates["fedavg"]), 1)
+        self.assertEqual(spec.trials_per_tunable_method, 12)
+        self.assertEqual(spec.formal_ratios, (0.0, 0.2, 0.4, 0.6, 0.8))
+        self.assertEqual(spec.calibration_ratios, (0.0, 0.1, 0.3, 0.5, 0.7))
+        self.assertEqual(spec.objective_mode, "learned_leave_one_attacked_ratio_out")
         self.assertTrue(set(spec.validation_seeds).isdisjoint(spec.final_seeds))
         self.assertTrue(spec.require_clean_acceptance)
         self.assertAlmostEqual(spec.max_clean_false_positive_rate, 0.01)
@@ -47,7 +67,7 @@ class FairTuningTest(unittest.TestCase):
                 candidate["fedre_teacher_lr"]
                 for candidate in spec.candidates["fedredefense"]
             },
-            {5.0, 6.0},
+            {4.0, 5.0},
         )
 
     def test_v3_detector_hyperparameters_are_valid_ours_only_search_axes(self):
@@ -66,6 +86,14 @@ class FairTuningTest(unittest.TestCase):
             "detector_drift_threshold": [5.0],
             "suspicion_count_max": [3],
         }
+        payload["shared_parameters"]["ours_parameter_mode"] = "fixed"
+        _set_legacy_four_candidate_baselines(payload)
+        payload["tuning"]["objective"] = {
+            "clean_accuracy_weight": 0.25,
+            "robust_accuracy_weight": 0.5,
+            "attack_success_weight": 0.2,
+            "false_positive_weight": 0.05,
+        }
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "v3-grid.json"
             path.write_text(json.dumps(payload), encoding="utf-8")
@@ -79,7 +107,10 @@ class FairTuningTest(unittest.TestCase):
                 for candidate in spec.candidates["sm9rrs"]
             )
         )
-        self.assertEqual(spec.shared_parameters["detector_decision_rule"], "any")
+        self.assertEqual(
+            parse_args(parameters_to_argv(spec.shared_parameters)).detector_decision_rule,
+            "any",
+        )
 
     def test_hard_constraint_defaults_and_ranges_are_validated(self):
         template = json.loads(
@@ -129,6 +160,7 @@ class FairTuningTest(unittest.TestCase):
             "detector_decision_rule": ["any"],
             "detector_anchor_threshold": [2.5, 3.0],
         }
+        payload["shared_parameters"]["ours_parameter_mode"] = "fixed"
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "invalid-rule-grid.json"
             path.write_text(json.dumps(payload), encoding="utf-8")
@@ -142,6 +174,8 @@ class FairTuningTest(unittest.TestCase):
             )
         )
         base_payload["shared_parameters"].pop("K", None)
+        base_payload["shared_parameters"]["ours_parameter_mode"] = "fixed"
+        _set_legacy_four_candidate_baselines(base_payload)
         base_payload["tuning"]["method_spaces"]["sm9rrs"] = {
             "detector_window": [7, 10],
             "detector_anchor_threshold": [2.5, 3.0],
@@ -205,9 +239,15 @@ class FairTuningTest(unittest.TestCase):
         expected_candidates = sum(len(items) for items in spec.candidates.values())
         self.assertEqual(
             len(tasks),
-            expected_candidates * len(spec.validation_seeds) * 2,
+            expected_candidates
+            * len(spec.validation_seeds)
+            * len(spec.calibration_ratios),
         )
         self.assertEqual({task.phase for task in tasks}, {"validation"})
+        self.assertEqual(
+            {task.config.malicious_ratio for task in tasks},
+            set(spec.calibration_ratios),
+        )
 
     def test_task_preparation_reuses_accelerator_resource_planning(self):
         dataset = make_synthetic_mnist_like(train_samples=40, test_samples=10, seed=5)
@@ -585,7 +625,110 @@ class FairTuningTest(unittest.TestCase):
 
         self.assertFalse(trial.valid)
         self.assertAlmostEqual(trial.worst_clean_false_positive_rate, 0.1)
-        self.assertAlmostEqual(trial.row()["worst_clean_false_positive_rate"], 0.1)
+        self.assertAlmostEqual(
+            trial.row()["worst_clean_false_positive_rate"],
+            0.1,
+        )
+
+    def test_ours_attack_hard_constraints_use_asr_first_three_recall_and_fp(self):
+        clean_config = ExperimentConfig(
+            method="sm9rrs",
+            malicious_ratio=0.0,
+            num_clients=10,
+            rounds=3,
+            attack_start_round=1,
+        )
+        attack_config = replace(clean_config, malicious_ratio=0.4)
+        clean = _result(
+            0.0,
+            0.8,
+            0,
+            "sm9rrs",
+            accepted_updates=[10, 10, 10],
+            config=clean_config,
+        )
+        attacked = _result(
+            0.4,
+            0.7,
+            0,
+            "sm9rrs",
+            accepted_updates=[10, 10, 10],
+            config=attack_config,
+        )
+        attacked = replace(
+            attacked,
+            diagnostics=[
+                SimpleNamespace(
+                    round=1,
+                    client_id=f"client-{index}",
+                    is_malicious=True,
+                    suspicious=True,
+                )
+                for index in range(4)
+            ],
+        )
+        objective = {
+            "clean_accuracy_weight": 0.25,
+            "robust_accuracy_weight": 0.5,
+            "attack_success_weight": 0.2,
+            "false_positive_weight": 0.05,
+        }
+
+        valid = score_trial(
+            "sm9rrs",
+            "valid",
+            {},
+            [clean, attacked],
+            objective=objective,
+            require_finite_updates=True,
+            max_asr=0.2,
+            min_three_round_recall=0.8,
+            max_attack_false_positive_rate=0.05,
+            min_round_completion_rate=1.0,
+            max_nonfinite_updates=0,
+        )
+        self.assertTrue(valid.valid)
+        self.assertEqual(valid.worst_first_three_round_recall, 1.0)
+
+        asr_failure = score_trial(
+            "sm9rrs",
+            "asr-failure",
+            {},
+            [clean, attacked],
+            objective=objective,
+            require_finite_updates=True,
+            max_asr=0.05,
+            min_three_round_recall=0.8,
+            max_attack_false_positive_rate=0.05,
+            min_round_completion_rate=1.0,
+            max_nonfinite_updates=0,
+        )
+        self.assertFalse(asr_failure.valid)
+
+        relaxed_runtime = replace(
+            attacked,
+            stopped_round=2,
+            nonfinite_updates=1,
+        )
+        explicit_overrides = score_trial(
+            "sm9rrs",
+            "explicit-overrides",
+            {},
+            [clean, relaxed_runtime],
+            objective=objective,
+            require_finite_updates=True,
+            require_full_rounds=True,
+            max_asr=0.2,
+            min_three_round_recall=0.8,
+            max_attack_false_positive_rate=0.05,
+            min_round_completion_rate=0.6,
+            max_nonfinite_updates=1,
+        )
+        self.assertTrue(explicit_overrides.valid)
+        self.assertAlmostEqual(
+            explicit_overrides.minimum_round_completion_rate,
+            2 / 3,
+        )
 
     def test_any_incomplete_validation_run_is_invalid_when_required(self):
         incomplete_attack = _result(

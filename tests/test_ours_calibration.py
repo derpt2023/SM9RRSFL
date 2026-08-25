@@ -64,6 +64,7 @@ def _args(**overrides):
         "dkg_threshold": 2,
         "dkg_nodes": 3,
         "sm9_workers": 1,
+        "calibration_candidate_budget": 12,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -546,6 +547,35 @@ class OursCalibrationTest(unittest.TestCase):
                 )
             self.assertFalse((Path(tmp) / "ours_calibration.json").exists())
 
+    def test_scheme_b_defers_attacked_candidate_selection_to_unified_tuner(self):
+        runner = _FakeRunner()
+        args = _args(
+            ours_calibration_selection_mode="defer_to_unified_tuner",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _main, artifact = resolve_or_run_ours_calibration(
+                _dataset(),
+                args,
+                tmp,
+                run_fn=runner,
+            )
+
+        self.assertFalse(
+            any(
+                config.detector_enforce and config.malicious_ratio > 0.0
+                for _dataset_arg, config in runner.calls
+            )
+        )
+        self.assertEqual(
+            artifact.objective_learning["status"],
+            "deferred_to_unified_fair_tuner",
+        )
+        self.assertFalse(artifact.constraints["attacked_constraints_evaluated"])
+        self.assertEqual(
+            artifact.selected_candidate["selection_scope"],
+            "provisional_clean_safe_base_for_unified_tuner",
+        )
+
     def test_closed_loop_clean_envelope_repairs_small_client_discretization(self):
         runner = _CleanEnvelopeRunner()
         args = _args(
@@ -652,7 +682,7 @@ class OursCalibrationTest(unittest.TestCase):
             for _dataset_arg, config in runner.calls
             if config.detector_enforce and config.malicious_ratio == 0.0
         ]
-        self.assertEqual(len(clean_calls), 4)
+        self.assertEqual(len(clean_calls), args.calibration_candidate_budget)
         self.assertFalse(
             any(
                 config.detector_enforce and config.malicious_ratio > 0.0

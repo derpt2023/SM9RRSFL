@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "name": "mnist-v3-auto-calibrated",
-  "description": "MNIST six-method study using the 2026-08-23 shared hyperparameter schedule under the new leakage-free 90/5/5 training split. Ours is calibrated once and frozen within this seed-bound experiment; FedREDefense uses the previously omitted teacher learning rate.",
+  "description": "MNIST six-method study with disjoint calibration/main malicious ratios, bounded automatic Ours policy calibration, learned Score weights, and the previously omitted FedREDefense teacher learning rate.",
   "parameters": {
     "dataset": "mnist",
     "download": true,
     "data_dir": "data/mnist",
-    "output_dir": "outputs/mnist_v3_20260824",
+    "output_dir": "outputs/mnist_v3_20260825",
 
     "methods": [
       "sm9rrs",
@@ -17,13 +17,7 @@
       "fedavg"
     ],
 
-    "ratios": [
-      0.0,
-      0.2,
-      0.4,
-      0.6,
-      0.8
-    ],
+    "ratio_range": [0.0, 0.8, 5],
 
     "partitions": [
       "iid",
@@ -56,6 +50,12 @@
 
     "K": 7,
     "ours_parameter_mode": "auto",
+    "calibration_candidate_budget": 12,
+    "ASR": 0.2,
+    "calibration_min_three_round_recall": 0.8,
+    "calibration_max_attack_false_positive_rate": 0.05,
+    "calibration_min_round_completion_rate": 1.0,
+    "calibration_max_nonfinite_updates": 0,
 
     "vert_history_window": 7,
     "vert_projection_dim": 128,

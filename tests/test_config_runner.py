@@ -30,6 +30,43 @@ class ConfigRunnerTest(unittest.TestCase):
         self.assertTrue(args.partitions or [args.partition])
         self.assertEqual(args.ours_parameter_mode, "auto")
         self.assertEqual(args.fedre_teacher_lr, 5.0)
+        self.assertEqual(args.ratios, [0.0, 0.2, 0.4, 0.6, 0.8])
+        self.assertEqual(args.calibration_ratios, [0.0, 0.1, 0.3, 0.5, 0.7])
+        self.assertEqual(args.calibration_candidate_budget, 12)
+
+    def test_ratio_range_separates_calibration_and_formal_attacked_ratios(self):
+        args = parse_args(["--ratio-range", "0", "0.8", "5"])
+
+        self.assertEqual(args.ratios, [0.0, 0.2, 0.4, 0.6, 0.8])
+        self.assertEqual(args.calibration_ratios, [0.0, 0.1, 0.3, 0.5, 0.7])
+        self.assertFalse(
+            set(args.ratios[1:]) & set(args.calibration_ratios[1:])
+        )
+
+        for argv in (
+            ["--ratio-range", "0", "1", "5"],
+            ["--ratio-range", "0", "0.8", "5", "--ratios", "0", "0.4"],
+        ):
+            with self.subTest(argv=argv), mock.patch(
+                "sys.stderr", new=io.StringIO()
+            ), self.assertRaises(SystemExit):
+                parse_args(argv)
+
+    def test_only_supplied_calibration_hard_constraints_override_defaults(self):
+        args = parse_args(
+            parameters_to_argv(
+                {
+                    "ASR": 0.25,
+                    "attack_FP": 0.08,
+                }
+            )
+        )
+
+        self.assertEqual(args.calibration_max_asr, 0.25)
+        self.assertEqual(args.calibration_max_attack_false_positive_rate, 0.08)
+        self.assertEqual(args.calibration_min_three_round_recall, 0.80)
+        self.assertEqual(args.calibration_min_round_completion_rate, 1.0)
+        self.assertEqual(args.calibration_max_nonfinite_updates, 0)
 
     def test_boolean_aliases_and_store_false_option_are_supported(self):
         argv = parameters_to_argv(
