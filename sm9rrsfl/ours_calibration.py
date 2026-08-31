@@ -9,6 +9,7 @@ scenario.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timezone
 import hashlib
@@ -17,6 +18,8 @@ import math
 import os
 from pathlib import Path
 from statistics import fmean
+import sys
+from threading import Lock
 from time import perf_counter
 from typing import Any, Callable, Iterable
 
@@ -139,6 +142,68 @@ class OursCalibrationArtifact:
         )
 
 
+@dataclass(frozen=True)
+class _CalibrationParallelPlan:
+    jobs: int
+    backend_description: str
+    devices: tuple[str, ...]
+    sm9_workers: int
+    progress_enabled: bool
+    progress_mode: str
+    progress_reporter_class: Any
+
+
+def _execute_calibration_units(
+    units: list[tuple[str, Any]],
+    worker: Callable[[int, Any], Any],
+    *,
+    phase: str,
+    plan: _CalibrationParallelPlan | None,
+) -> list[Any]:
+    """Run dependency-independent calibration workflows in stable order."""
+
+    if plan is None:
+        return [worker(index, payload) for index, (_label, payload) in enumerate(units)]
+
+    jobs = min(max(1, int(plan.jobs)), max(1, len(units)))
+    progress = plan.progress_reporter_class(
+        total=len(units),
+        enabled=plan.progress_enabled,
+        stream=sys.stdout,
+        mode=plan.progress_mode,
+    )
+    print(
+        f"ours_calibration_phase={phase} workflows={len(units)} "
+        f"jobs={jobs} executor={'serial' if jobs == 1 else 'thread'}",
+        flush=True,
+    )
+    results: list[Any] = [None] * len(units)
+    try:
+        if jobs == 1:
+            for index, (label, payload) in enumerate(units):
+                progress.start_item(f"running {label}")
+                results[index] = worker(index, payload)
+                progress.finish_item(f"finished {label}")
+            return results
+
+        progress.start_parallel(jobs, len(units))
+        with ThreadPoolExecutor(
+            max_workers=jobs,
+            thread_name_prefix=f"ours-calibration-{phase}",
+        ) as executor:
+            futures = {
+                executor.submit(worker, index, payload): (index, label)
+                for index, (label, payload) in enumerate(units)
+            }
+            for future in as_completed(futures):
+                index, label = futures[future]
+                results[index] = future.result()
+                progress.finish_item(f"finished {label}")
+        return results
+    finally:
+        progress.close()
+
+
 def resolve_or_run_ours_calibration(
     dataset: ImageDataset,
     args,
@@ -243,16 +308,30 @@ def resolve_or_run_ours_calibration(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir: Path | None = None
     completed_calibration_configs: set[ExperimentConfig] = set()
+    completed_calibration_configs_lock = Lock()
     finalize_config_checkpoint = None
-    if run_fn is None:
+    managed_runner = run_fn is None
+    calibration_progress_enabled = not bool(_arg(args, "no_progress", False))
+    if managed_runner:
         # Reuse the main runner's durable per-round checkpoint format.  A
         # terminal calibration checkpoint is intentionally retained until the
         # immutable artifact exists, so an interrupted multi-hour calibration
         # can replay completed candidates instead of starting over.
         from .experiments import (
+            ProgressReporter,
+            _checkpoint_path,
+            _cuda_capacity_error,
+            _estimated_cuda_worker_memory_mb,
+            assign_auto_cuda_devices,
+            available_cuda_devices,
+            cuda_devices_with_capacity,
             finalize_config_checkpoint as finalize_checkpoint,
+            print_resource_plan,
+            resolve_parallel_jobs,
+            resolve_sm9_workers,
             run_measured_experiment,
         )
+        from .model import describe_compute_backend
 
         finalize_config_checkpoint = finalize_checkpoint
         checkpoint_dir = (
@@ -262,15 +341,38 @@ def resolve_or_run_ours_calibration(
         )
 
         def run_fn(calibration_dataset, config):
-            print(
-                "ours_calibration_run="
-                f"partition={config.partition} clients={config.num_clients} "
-                f"ratio={config.malicious_ratio:.2f} "
-                f"q={config.detector_subspace_dim} "
-                f"C_tol={config.suspicion_remove_after} "
-                f"shadow={not config.detector_enforce}",
-                flush=True,
-            )
+            if not calibration_progress_enabled:
+                print(
+                    "ours_calibration_run="
+                    f"partition={config.partition} clients={config.num_clients} "
+                    f"ratio={config.malicious_ratio:.2f} "
+                    f"q={config.detector_subspace_dim} "
+                    f"C_tol={config.suspicion_remove_after} "
+                    f"shadow={not config.detector_enforce}",
+                    flush=True,
+                )
+            if checkpoint_dir is not None:
+                # Before calibration had its own resource planner, checkpoints
+                # were written with device=auto and the unshared SM9 worker
+                # count.  Move that runtime-equivalent path to the new assigned
+                # device path so an in-progress AI Station run can resume after
+                # pulling this update instead of discarding completed rounds.
+                legacy_sm9_workers = _arg(args, "sm9_workers", 1)
+                if isinstance(legacy_sm9_workers, str):
+                    legacy_sm9_workers = 1
+                legacy_config = replace(
+                    config,
+                    device=str(_arg(args, "device", "auto")),
+                    sm9_workers=int(legacy_sm9_workers),
+                )
+                legacy_path = _checkpoint_path(checkpoint_dir, legacy_config)
+                assigned_path = _checkpoint_path(checkpoint_dir, config)
+                if (
+                    legacy_path != assigned_path
+                    and legacy_path.exists()
+                    and not assigned_path.exists()
+                ):
+                    legacy_path.replace(assigned_path)
             result = run_measured_experiment(
                 calibration_dataset,
                 config,
@@ -278,7 +380,8 @@ def resolve_or_run_ours_calibration(
                 run_fingerprint=calibration_fingerprint,
                 retain_success_checkpoint=checkpoint_dir is not None,
             )
-            completed_calibration_configs.add(config)
+            with completed_calibration_configs_lock:
+                completed_calibration_configs.add(config)
             return result
 
     partitions = _partitions(args)
@@ -295,6 +398,105 @@ def resolve_or_run_ours_calibration(
     baseline_beta = float(math.exp(math.log(0.5) / detector_window))
     baseline_penalty = float(min(0.1, 1.0 / max(client_counts)))
     baseline_recovery = float(baseline_penalty ** -0.5)
+    parallel_plan: _CalibrationParallelPlan | None = None
+    if managed_runner:
+        prototype_parameters = OursParameters(
+            q=max(q_values),
+            g0=1.0,
+            theta_adj=_HUGE_THRESHOLD,
+            theta_anc=_HUGE_THRESHOLD,
+            beta=baseline_beta,
+            kappa=1.0,
+            h=_HUGE_THRESHOLD,
+            C_tol=max(1, min(5, detector_window)),
+            C_max=max(1, min(5, detector_window)),
+            penalty_factor=baseline_penalty,
+            recovery_factor=baseline_recovery,
+        )
+        prototype = _experiment_config(
+            args,
+            partition=partitions[0],
+            num_clients=max(client_counts),
+            ratio=0.0,
+            seed=shadow_seed,
+            parameters=prototype_parameters,
+            enforce=False,
+            clean_probe=True,
+        )
+        planning_count = max(len(q_values), len(candidate_specs))
+        planning_configs = [prototype for _ in range(planning_count)]
+        requested_jobs = _arg(args, "jobs", 1)
+        backend_description = describe_compute_backend(
+            str(_arg(args, "compute_backend", "numpy")),
+            str(_arg(args, "device", "auto")),
+        )
+        jobs = resolve_parallel_jobs(
+            requested_jobs,
+            split.calibration_dataset,
+            planning_configs,
+            args,
+        )
+        requested_device = str(_arg(args, "device", "auto")).strip().lower()
+        if (
+            backend_description == "torch:cuda"
+            and requested_device.strip().lower() != "auto"
+            and str(requested_jobs).strip().lower() == "auto"
+        ):
+            jobs = 1
+        auto_sm9_workers = bool(_arg(args, "_sm9_workers_auto", False)) or (
+            isinstance(_arg(args, "sm9_workers", 1), str)
+            and str(_arg(args, "sm9_workers", 1)).strip().lower() == "auto"
+        )
+        sm9_workers = resolve_sm9_workers(
+            "auto" if auto_sm9_workers else _arg(args, "sm9_workers", 1),
+            max(client_counts),
+            parallel_jobs=jobs,
+        )
+        planning_configs = [
+            replace(config, sm9_workers=sm9_workers)
+            for config in planning_configs
+        ]
+        usable_cuda_devices: tuple[str, ...] = ()
+        if backend_description == "torch:cuda" and requested_device == "auto":
+            estimated_worker_mb = _estimated_cuda_worker_memory_mb(
+                split.calibration_dataset,
+                planning_configs,
+            )
+            usable_cuda_devices = cuda_devices_with_capacity(estimated_worker_mb)
+            if not usable_cuda_devices:
+                raise RuntimeError(_cuda_capacity_error(estimated_worker_mb))
+        planning_configs = assign_auto_cuda_devices(
+            planning_configs,
+            backend_description,
+            requested_device,
+            cuda_devices=usable_cuda_devices or None,
+        )
+        devices = tuple(
+            planning_configs[index].device
+            for index in range(max(1, jobs))
+        )
+        parallel_plan = _CalibrationParallelPlan(
+            jobs=jobs,
+            backend_description=backend_description,
+            devices=devices,
+            sm9_workers=sm9_workers,
+            progress_enabled=calibration_progress_enabled,
+            progress_mode=str(_arg(args, "progress_mode", "auto")),
+            progress_reporter_class=ProgressReporter,
+        )
+        print_resource_plan(
+            backend_description,
+            split.calibration_dataset,
+            planning_configs,
+            jobs=jobs,
+            sm9_workers=sm9_workers,
+            requested_jobs=requested_jobs,
+            cuda_devices=(
+                available_cuda_devices()
+                if backend_description == "torch:cuda"
+                else ()
+            ),
+        )
     print(
         "ours_calibration_start="
         f"{calibration_fingerprint[:12]} train={len(split.train_indices)} "
@@ -305,24 +507,69 @@ def resolve_or_run_ours_calibration(
         f"calibration_ratios={list(ratios)} candidates={len(candidate_specs)}",
         flush=True,
     )
-    derived_by_q_beta: dict[tuple[int, float], dict[str, Any]] = {}
-    for q in q_values:
-        first_probe = _run_clean_shadow_probe(
+    def runtime_assignment(unit_index: int) -> tuple[str | None, int | None]:
+        runtime_device = (
+            parallel_plan.devices[unit_index % len(parallel_plan.devices)]
+            if parallel_plan is not None
+            else None
+        )
+        runtime_sm9_workers = (
+            parallel_plan.sm9_workers if parallel_plan is not None else None
+        )
+        return runtime_device, runtime_sm9_workers
+
+    shadow_scenarios = tuple(
+        (partition, num_clients)
+        for partition in partitions
+        for num_clients in client_counts
+    )
+
+    def run_gap_probe(
+        unit_index: int,
+        payload: Any,
+    ) -> tuple[int, list[ExperimentResult]]:
+        q, partition, num_clients = payload
+        runtime_device, runtime_sm9_workers = runtime_assignment(unit_index)
+        results = _run_clean_shadow_probe(
             split.calibration_dataset,
             args,
             run_fn,
-            partitions=partitions,
-            client_counts=client_counts,
+            partitions=(str(partition),),
+            client_counts=(int(num_clients),),
             seed=shadow_seed,
-            q=q,
+            q=int(q),
             g0=1.0,
             beta=baseline_beta,
             kappa=1.0,
             penalty=baseline_penalty,
             recovery=baseline_recovery,
+            runtime_device=runtime_device,
+            runtime_sm9_workers=runtime_sm9_workers,
         )
+        return int(q), results
+
+    gap_units = [
+        (
+            f"shadow-gap q={q} partition={partition} clients={num_clients}",
+            (q, partition, num_clients),
+        )
+        for q in q_values
+        for partition, num_clients in shadow_scenarios
+    ]
+    gap_results = _execute_calibration_units(
+        gap_units,
+        run_gap_probe,
+        phase="shadow-gap",
+        plan=parallel_plan,
+    )
+    first_probe_by_q = {q: [] for q in q_values}
+    for q, results in gap_results:
+        first_probe_by_q[q].extend(results)
+
+    gap_threshold_by_q: dict[int, float] = {}
+    for q in q_values:
         gap_values = _diagnostic_values(
-            first_probe,
+            first_probe_by_q[q],
             "spectral_gap",
             detector_window,
         )
@@ -330,21 +577,54 @@ def resolve_or_run_ours_calibration(
             raise OursCalibrationError(
                 f"q={q} clean shadow probe produced no scored spectral gaps"
             )
-        g0 = _positive_quantile(gap_values, 0.25)
-        second_probe = _run_clean_shadow_probe(
+        gap_threshold_by_q[q] = _positive_quantile(gap_values, 0.25)
+
+    def run_anchor_probe(
+        unit_index: int,
+        payload: Any,
+    ) -> tuple[int, list[ExperimentResult]]:
+        q, partition, num_clients = payload
+        runtime_device, runtime_sm9_workers = runtime_assignment(unit_index)
+        results = _run_clean_shadow_probe(
             split.calibration_dataset,
             args,
             run_fn,
-            partitions=partitions,
-            client_counts=client_counts,
+            partitions=(str(partition),),
+            client_counts=(int(num_clients),),
             seed=shadow_seed,
-            q=q,
-            g0=g0,
+            q=int(q),
+            g0=gap_threshold_by_q[int(q)],
             beta=baseline_beta,
             kappa=1.0,
             penalty=baseline_penalty,
             recovery=baseline_recovery,
+            runtime_device=runtime_device,
+            runtime_sm9_workers=runtime_sm9_workers,
         )
+        return int(q), results
+
+    anchor_units = [
+        (
+            f"shadow-anchor q={q} partition={partition} clients={num_clients}",
+            (q, partition, num_clients),
+        )
+        for q in q_values
+        for partition, num_clients in shadow_scenarios
+    ]
+    anchor_results = _execute_calibration_units(
+        anchor_units,
+        run_anchor_probe,
+        phase="shadow-anchor",
+        plan=parallel_plan,
+    )
+    second_probe_by_q = {q: [] for q in q_values}
+    for q, results in anchor_results:
+        second_probe_by_q[q].extend(results)
+
+    derived_by_q_beta: dict[tuple[int, float], dict[str, Any]] = {}
+    for q in q_values:
+        second_probe = second_probe_by_q[q]
+        g0 = gap_threshold_by_q[q]
         anchor_values = _diagnostic_values(
             second_probe,
             "anchor_score",
@@ -406,10 +686,21 @@ def resolve_or_run_ours_calibration(
                 "shadow_blocks": len(adjacent_maxima),
             }
 
-    candidate_results: list[dict[str, Any]] = []
-    candidate_parameters: dict[str, OursParameters] = {}
     attacked_ratios = tuple(value for value in ratios if value > 0.0)
-    for candidate_index, spec in enumerate(candidate_specs, start=1):
+
+    def calibrate_candidate(
+        unit_index: int,
+        payload: Any,
+    ) -> tuple[str, OursParameters, dict[str, Any]]:
+        candidate_index, spec = payload
+        runtime_device = (
+            parallel_plan.devices[unit_index % len(parallel_plan.devices)]
+            if parallel_plan is not None
+            else None
+        )
+        runtime_sm9_workers = (
+            parallel_plan.sm9_workers if parallel_plan is not None else None
+        )
         q = int(spec["q"])
         beta = float(spec["beta"])
         c_tol = int(spec["C_tol"])
@@ -441,6 +732,8 @@ def resolve_or_run_ours_calibration(
                 client_counts=client_counts,
                 ratios=(0.0,),
                 seed=validation_seed,
+                runtime_device=runtime_device,
+                runtime_sm9_workers=runtime_sm9_workers,
             )
             clean_summary = _score_closed_loop_candidate(
                 candidate_id,
@@ -453,17 +746,6 @@ def resolve_or_run_ours_calibration(
                     parameters,
                     clean_summary,
                 )
-            )
-            print(
-                "ours_calibration_clean_gate="
-                f"candidate={candidate_id} refinement={refinement} "
-                f"valid={bool(clean_summary['valid'])} "
-                "suspicious="
-                f"{clean_summary['worst_clean_round_suspicious_rate']:.6f} "
-                f"ess={clean_summary['worst_clean_round_ess_ratio']:.6f} "
-                "reasons="
-                f"{','.join(clean_summary['invalid_reasons']) or 'none'}",
-                flush=True,
             )
             if clean_summary["valid"]:
                 break
@@ -491,6 +773,8 @@ def resolve_or_run_ours_calibration(
                 client_counts=client_counts,
                 ratios=attacked_ratios,
                 seed=validation_seed,
+                runtime_device=runtime_device,
+                runtime_sm9_workers=runtime_sm9_workers,
             )
             summary = _score_closed_loop_candidate(
                 candidate_id,
@@ -520,8 +804,35 @@ def resolve_or_run_ours_calibration(
         summary["shadow_blocks"] = int(derived["shadow_blocks"])
         summary["clean_safety_trace"] = clean_safety_trace
         summary["automatic_candidate_spec"] = dict(spec)
+        return candidate_id, parameters, summary
+
+    candidate_units = [
+        (f"candidate=ours-{index:03d}", (index, spec))
+        for index, spec in enumerate(candidate_specs, start=1)
+    ]
+    calibrated_candidates = _execute_calibration_units(
+        candidate_units,
+        calibrate_candidate,
+        phase="candidates",
+        plan=parallel_plan,
+    )
+    candidate_results: list[dict[str, Any]] = []
+    candidate_parameters: dict[str, OursParameters] = {}
+    for candidate_id, parameters, summary in calibrated_candidates:
         candidate_results.append(summary)
         candidate_parameters[candidate_id] = parameters
+        for trace in summary["clean_safety_trace"]:
+            print(
+                "ours_calibration_clean_gate="
+                f"candidate={candidate_id} refinement={trace['refinement']} "
+                f"valid={bool(trace['valid'])} "
+                "suspicious="
+                f"{trace['worst_clean_round_suspicious_rate']:.6f} "
+                f"ess={trace['worst_clean_round_ess_ratio']:.6f} "
+                "reasons="
+                f"{','.join(trace['invalid_reasons']) or 'none'}",
+                flush=True,
+            )
 
     clean_safe = [item for item in candidate_results if item["clean_gate_valid"]]
     if not clean_safe:
@@ -709,6 +1020,8 @@ def _run_clean_shadow_probe(
     kappa: float,
     penalty: float,
     recovery: float,
+    runtime_device: str | None = None,
+    runtime_sm9_workers: int | None = None,
 ) -> list[ExperimentResult]:
     results = []
     for partition in partitions:
@@ -735,6 +1048,10 @@ def _run_clean_shadow_probe(
                 enforce=False,
                 clean_probe=True,
             )
+            if runtime_device is not None:
+                config = replace(config, device=runtime_device)
+            if runtime_sm9_workers is not None:
+                config = replace(config, sm9_workers=runtime_sm9_workers)
             results.append(run_fn(dataset, config))
     return results
 
@@ -749,6 +1066,8 @@ def _run_closed_loop_candidate(
     client_counts: tuple[int, ...],
     ratios: tuple[float, ...],
     seed: int,
+    runtime_device: str | None = None,
+    runtime_sm9_workers: int | None = None,
 ) -> list[ExperimentResult]:
     results = []
     for partition in partitions:
@@ -764,6 +1083,10 @@ def _run_closed_loop_candidate(
                     enforce=True,
                     clean_probe=False,
                 )
+                if runtime_device is not None:
+                    config = replace(config, device=runtime_device)
+                if runtime_sm9_workers is not None:
+                    config = replace(config, sm9_workers=runtime_sm9_workers)
                 results.append(run_fn(dataset, config))
     return results
 

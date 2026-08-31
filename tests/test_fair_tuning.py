@@ -68,6 +68,7 @@ class FairTuningTest(unittest.TestCase):
         self.assertEqual(spec.objective_mode, "learned_leave_one_attacked_ratio_out")
         self.assertTrue(set(spec.validation_seeds).isdisjoint(spec.final_seeds))
         self.assertAlmostEqual(spec.max_clean_accuracy_drop, 0.05)
+        self.assertEqual(spec.final_jobs, "auto")
         self.assertEqual(
             {
                 candidate["alignins_sparsity"]
@@ -179,6 +180,7 @@ class FairTuningTest(unittest.TestCase):
         invalid_cases = (
             ("max_clean_accuracy_drop", -0.01, "must be in \\[0, 1\\]"),
             ("max_clean_accuracy_drop", 1.01, "must be in \\[0, 1\\]"),
+            ("final_jobs", 0, "must be 'auto' or a positive integer"),
         )
         for key, value, error in invalid_cases:
             payload = json.loads(json.dumps(template))
@@ -802,6 +804,7 @@ def _minimal_spec(candidates):
             len(candidates[method]) for method in ("sm9rrs", "vert", "alignins")
         ),
         run_final_evaluation=False,
+        final_jobs="auto",
         max_clean_accuracy_drop=0.05,
         min_round_completion_rate=1.0,
         max_nonfinite_updates=0,

@@ -116,6 +116,7 @@ TUNING_KEYS = {
     "final_seeds",
     "trials_per_tunable_method",
     "run_final_evaluation",
+    "final_jobs",
     "max_clean_accuracy_drop",
     "objective",
     "method_spaces",
@@ -140,6 +141,7 @@ class FairTuningConfig:
     final_seeds: tuple[int, ...]
     trials_per_tunable_method: int
     run_final_evaluation: bool
+    final_jobs: str | int
     max_clean_accuracy_drop: float
     min_round_completion_rate: float
     max_nonfinite_updates: int
@@ -298,6 +300,7 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
     run_final = tuning.get("run_final_evaluation", True)
     if not isinstance(run_final, bool):
         raise FairTuningError("run_final_evaluation must be boolean")
+    final_jobs = _job_request(tuning.get("final_jobs", "auto"), "final_jobs")
     max_clean_accuracy_drop = _finite_float(
         tuning.get("max_clean_accuracy_drop", 0.05),
         "max_clean_accuracy_drop",
@@ -430,6 +433,7 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
         final_seeds=final_seeds,
         trials_per_tunable_method=budget,
         run_final_evaluation=run_final,
+        final_jobs=final_jobs,
         max_clean_accuracy_drop=max_clean_accuracy_drop,
         min_round_completion_rate=float(
             args.calibration_min_round_completion_rate
@@ -1700,6 +1704,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         "calibration_ratios": list(spec.calibration_ratios),
         "ratio_schedule": spec.ratio_schedule,
         "trials_per_tunable_method": spec.trials_per_tunable_method,
+        "final_jobs": spec.final_jobs,
         "max_clean_accuracy_drop": spec.max_clean_accuracy_drop,
         "min_round_completion_rate": spec.min_round_completion_rate,
         "max_nonfinite_updates": spec.max_nonfinite_updates,
@@ -1738,10 +1743,9 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
     _write_json(output_dir / "best_parameters.json", best_payload)
 
     if spec.run_final_evaluation:
-        # Candidate search is safe to parallelize because timing is not part of
-        # the selection objective.  The final paper-facing timing run remains
-        # serial and pinned to the default accelerator to avoid resource
-        # contention or cross-GPU differences biasing method comparisons.
+        # Every final configuration is independent.  Auto mode assigns at most
+        # one job to each usable GPU; set final_jobs=1 when a paper needs strict
+        # single-job wall-clock timing rather than throughput-oriented results.
         final_tasks = build_final_tasks(spec, base_configs, selected)
         (
             final_tasks,
@@ -1752,17 +1756,23 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
             dataset,
             final_tasks,
             args,
-            requested_jobs=1,
-            spread_cuda_devices=False,
+            requested_jobs=spec.final_jobs,
+            spread_cuda_devices=True,
         )
-        print("tuning_final_timing_policy=serial", flush=True)
+        print(
+            "tuning_final_execution_policy="
+            f"requested_jobs={spec.final_jobs} resolved_jobs={final_jobs} "
+            "paper_timing_valid="
+            f"{'true' if final_jobs == 1 else 'false'}",
+            flush=True,
+        )
         print_resource_plan(
             final_backend_description,
             dataset,
             [task.config for task in final_tasks],
             jobs=final_jobs,
             sm9_workers=final_sm9_workers,
-            requested_jobs=1,
+            requested_jobs=spec.final_jobs,
             cuda_devices=(
                 available_cuda_devices()
                 if final_backend_description == "torch:cuda"
@@ -1912,6 +1922,14 @@ def _integer(value: Any, name: str) -> int:
     return value
 
 
+def _job_request(value: Any, name: str) -> str | int:
+    if value == "auto":
+        return "auto"
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise FairTuningError(f"{name} must be 'auto' or a positive integer")
+    return value
+
+
 def _finite_float(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise FairTuningError(f"{name} must be numeric")
@@ -1977,7 +1995,7 @@ def main(argv: list[str] | None = None) -> None:
         f"compute_backend={resolved_args.compute_backend} device={resolved_args.device} "
         f"jobs={resolved_args.jobs} "
         f"progress={'disabled' if resolved_args.no_progress else resolved_args.progress_mode} "
-        "final_timing_jobs=1",
+        f"final_jobs={spec.final_jobs}",
         flush=True,
     )
     if args.dry_run:

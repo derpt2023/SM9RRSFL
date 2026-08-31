@@ -205,6 +205,8 @@ python -m sm9rrsfl.config_runner \
 7. 选中的唯一参数集写入 `输出目录/.ours_calibration/<协议指纹>/ours_parameters.json`，同时把当前完整快照写入 `输出目录/ours_calibration.json`。长校准过程复用主运行的轮级检查点；只有两个工件均原子落盘后才清理已提交终态检查点。参数值和工件指纹一并进入主 `run_manifest.json`，因此同一指纹可安全复用；数据、主 `seed`、`K`、学习率、比例协议、客户端数量、轮数、硬约束或攻击参数变化会产生新指纹并重新校准。
 8. 校准结束后从头启动正式主实验；同一次主 `seed` 执行中的 Ours 在所有正式比例、IID/Non-IID 和全部客户端数量下使用完全相同的冻结参数。更换最终 `seed` 会生成并审计新的校准工件。校准耗时不混入主实验在线运行时间。
 
+Ours 离线校准也复用公共资源参数。`jobs=auto, device=auto` 时，clean shadow 被拆为有依赖的 `shadow-gap` 与 `shadow-anchor` 两个波次；每个波次中的 `q × partition × client_count` 配置并行，不同候选的闭环安全校准也会并行；单个候选内部的“检查失败、扩大安全包络、重新运行”保持严格顺序。CUDA 环境至多为每张有足够空闲显存的卡分配一个工作流，并按外层并发数自动降低每个实验的 `sm9_workers`，避免 CPU 过度订阅。三个校准阶段分别显示进度条、已用时间和 ETA。旧串行校准留下的轮级检查点可在重新分配 GPU/SM9 worker 后继续读取。
+
 仍可覆盖的公共硬约束接口如下；不填写时使用默认值：
 
 - CLI：`--min-round-completion`、`--max-nonfinite-updates`。
@@ -224,7 +226,7 @@ python -m sm9rrsfl.config_runner \
 5. 所有方法统一执行 `calibration_min_round_completion_rate` 和 `calibration_max_nonfinite_updates`。缺失最终 ASR、提前终止或产生 NaN/Inf 的攻击运行不能被解释为“攻击失败”，而会使候选/留出折无效。
 6. 干净稳定性按相同数据划分、seed 和场景匹配 FedAvg；默认 `max_clean_accuracy_drop=0.05`，即候选最终干净准确率最多比对应 FedAvg 低 5 个百分点。`H_loss` 仍进入连续 Score，而不是另设一个会天然排斥 Krum 或裁剪方法的任意接纳率门槛。Ours 的永久误撤销属于不可逆机制，因此在其内部 clean shadow/闭环中继续执行更严格安全检查。
 7. `objective="auto"` 时，Score 权重通过无泄漏的留一攻击校准比例交叉验证统一学习；每项权重至少 0.05。三种可调防御共用同一组学习结果，不能为某一方法单独改权重。最终论文表格使用独立 `final_seeds` 的均值/标准差，不从正式比例或官方测试集反向选择候选。
-8. 参数选择阶段把“候选 × 验证种子 × 场景”展开为独立配置，复用主实验的资源规划：CUDA/MPS 使用线程队列和设备端 Torch 训练，多个 CUDA 设备自动轮转；NumPy/Torch CPU 使用多进程。进度条按实际配置数显示完成比例、已用时间和 ETA。最终论文计时阶段固定 `jobs=1` 且不跨 GPU 轮转，避免并发竞争或不同 GPU 性能污染时间公平性；单个配置仍可使用 CUDA/MPS 加速。
+8. 参数选择阶段把“候选 × 验证种子 × 场景”展开为独立配置，复用主实验的资源规划：CUDA/MPS 使用线程队列和设备端 Torch 训练，多个 CUDA 设备自动轮转；NumPy/Torch CPU 使用多进程。进度条按实际配置数显示完成比例、已用时间和 ETA。最终阶段由 `tuning.final_jobs` 独立控制：示例为 `"auto"`，适合在多张同型号 GPU 上快速生成准确率/ASR 结果；若论文要报告严格单任务墙钟时间，应改为 `1`，避免并发资源和设备差异污染计时。
 
 示例配置为 `configs/fair_tuning.example.json`。先做只校验不训练的检查：
 
@@ -245,7 +247,7 @@ python run_fair_tuning_from_config.py \
 
 公平调参启动器与普通启动器使用相同的跨平台虚拟环境检查：从 macOS 同步到 AI Station 时若项目 `.venv` 不可执行，会回退到当前 Linux Python，而不会尝试执行错误平台的解释器。示例同时包含 `data_dir` 和 `download=true`，所以全新环境只要依赖和网络可用，即可在没有数据缓存、没有 `.tuning_state`、没有 `ours_calibration.json`、也没有上次 1170 配置结果时从头生成候选、验证、学习 Score 并进入最终评估。已有状态只用于等价指纹的断点加速，不是算法正确运行的前提。
 
-默认预算仍为 `(12+12+12+1+1+1) × 3 validation seeds × 2 partitions × 5 calibration ratios = 1170` 个验证配置；AlignIns 替换昂贵重构方法显著降低单配置服务端开销，但不会暗中减少候选数或场景数。若要缩小 smoke test，应复制一份配置并显式减少 seed、轮数或场景，不能把该结果当作正式方案 B。
+默认预算仍为 `(12+12+12+1+1+1) × 3 validation seeds × 2 partitions × 5 calibration ratios = 1170` 个验证配置；选参后还有 `6 methods × 3 final seeds × 2 partitions × 5 formal ratios = 180` 个正式配置。AlignIns 替换昂贵重构方法显著降低单配置服务端开销，但不会暗中减少候选数或场景数。若要缩小 smoke test，应复制一份配置并显式减少 seed、轮数或场景，不能把该结果当作正式方案 B。
 
 也可直接使用模块入口：
 
@@ -268,12 +270,13 @@ python -m sm9rrsfl.fair_tuning \
 ```
 
 - `compute_backend=auto, device=auto`：优先使用 CUDA，其次使用 Apple MPS，否则回落到 NumPy；也可显式指定 `compute_backend=torch, device=cuda|mps`。
-- `jobs=auto`：根据 CPU 配额、主存、CUDA 空闲显存、数据集和更新规模决定验证配置并发数；CUDA 自动模式至多为每张可用物理卡安排一个配置，单块 Apple MPS 自动固定为一个配置，避免多个完整实验争用统一内存。可填写正整数显式覆盖并发数，但论文计时建议保持自动值。
-- `progress=true`：启用两段进度条，先显示验证搜索，选参完成后显示独立最终评估。外层进度单位是“完成一个完整实验配置”，不是通信轮；例如 `0/50` 会持续到首个 50 轮配置全部结束，并不表示内部训练停在第 0 轮。`progress_mode=live` 适合 PyCharm/IDE 控制台，`auto` 只在 TTY 原地刷新，`log` 输出离散状态行。
+- `jobs=auto`：根据 CPU 配额、主存、CUDA 空闲显存、数据集和更新规模决定 Ours 校准与 1170 个验证配置的并发数；CUDA 自动模式至多为每张可用物理卡安排一个配置，单块 Apple MPS 自动固定为一个配置，避免多个完整实验争用统一内存。可填写正整数显式覆盖并发数。
+- `tuning.final_jobs=auto|正整数`：单独控制入选参数冻结后的正式配置并发数。当前示例在 8 核 CPU 和 8 张空闲 4090 上会尝试并发 8 个配置，并轮转分配到 `cuda:0..7`；设为 `1` 可获得适合论文报告的严格串行墙钟时间。
+- `progress=true`：依次显示 Ours `shadow-gap`、Ours `shadow-anchor`、Ours `candidates`、1170 配置验证搜索和最终评估进度；每条均实时显示完成比例、已用时间和 ETA。外层进度单位是“完成一个完整工作流/实验配置”，不是通信轮；第一个单元完成前显示 `eta=estimating`。`progress_mode=live` 适合 PyCharm/AI Station 控制台，`auto` 只在 TTY 原地刷新，`log` 输出离散状态行。
 - `resume=true`：默认启用调参专用断点恢复。轮次状态按 `checkpoint_interval` 原子保存，每完成一个配置就先更新阶段快照，再更新公开 CSV，最后删除该配置的终态检查点。重启完全相同的调参配置时，会跳过已经提交的候选场景，并从未完成配置最近一次耐久化轮继续；自动间隔大于 1 时，末尾尚未落盘的少量轮次会重算。
 - Ours 的 `sm9_workers=auto` 会按外层并发数重新分配 CPU 槽，避免网格并发与签名/验签线程相互过度订阅。
 
-搜索阶段的并发墙钟时间不进入选参目标，也不应作为论文方法耗时；论文时间统一来自串行的 `final_evaluation/`。
+搜索阶段的并发墙钟时间不进入选参目标，也不应作为论文方法耗时。`final_jobs="auto"` 生成的 `final_evaluation/` 可用于准确率、ASR 和检测指标；其中单配置计时是在并发资源条件下测得，不应冒充严格串行耗时。若论文比较方法墙钟时间，应把 `final_jobs` 设为 `1` 后单独运行或续跑对应正式阶段。
 
 `tuning.objective` 推荐保持为 `"auto"`。如需做消融实验而手工固定 Score 权重，JSON 对象必须一次写全 `clean_accuracy_weight`、`robust_accuracy_weight`、`attack_success_weight`、`honest_weight_loss_weight` 四项；各项须为非负有限数且总和严格为 1。程序不会再用默认值静默补齐缺项，也不会接受未经归一化的权重。
 
@@ -295,6 +298,7 @@ python -m sm9rrsfl.fair_tuning \
   "attack_start_round": 12,
   "tuning": {
     "trials_per_tunable_method": 12,
+    "final_jobs": "auto",
     "objective": "auto",
     "method_spaces": {
       "sm9rrs": "auto",

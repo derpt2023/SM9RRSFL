@@ -1734,11 +1734,16 @@ class ProgressReporter:
                 self._refresh_thread.start()
 
     def start_config(self, config: ExperimentConfig) -> None:
+        self.start_item(f"running {_format_config_key(config)}")
+
+    def start_item(self, label: str) -> None:
+        """Show one named unit without coupling progress to experiment configs."""
+
         if not self.enabled:
-            print(_format_running_config(config))
+            print(str(label))
             return
         with self._lock:
-            self.current = f"running {_format_config_key(config)}"
+            self.current = str(label)
             self._write(self._progress_message())
 
     def start_parallel(self, workers: int, pending: int) -> None:
@@ -1752,9 +1757,14 @@ class ProgressReporter:
             self._write(self._progress_message())
 
     def finish_config(self, config: ExperimentConfig) -> None:
+        self.finish_item(f"finished {_format_config_key(config)}")
+
+    def finish_item(self, label: str) -> None:
+        """Complete one named unit and refresh elapsed time and ETA."""
+
         if not self.enabled:
             self.completed += 1
-            print(f"finished {_format_config_key(config)}")
+            print(str(label))
             return
         with self._lock:
             self.completed += 1
@@ -1764,7 +1774,7 @@ class ProgressReporter:
             elapsed = max(0.0, now - self.started)
             seconds_per_config = elapsed / self.completed_this_session
             self.eta_deadline = now + seconds_per_config * remaining
-            self.current = f"finished {_format_config_key(config)}"
+            self.current = str(label)
             self._write(self._progress_message(now=now))
 
     def close(self) -> None:
@@ -2109,6 +2119,17 @@ def _checkpoint_path(checkpoint_dir: Path, config: ExperimentConfig) -> Path:
     return checkpoint_dir / f"{key}.pickle"
 
 
+def _checkpoint_semantic_config(
+    value: ExperimentConfig | dict[str, object],
+) -> dict[str, object]:
+    """Drop execution-only fields that do not change round state semantics."""
+
+    payload = asdict(value) if isinstance(value, ExperimentConfig) else dict(value)
+    payload.pop("device", None)
+    payload.pop("sm9_workers", None)
+    return payload
+
+
 def _load_round_checkpoint(
     path: Path,
     config: ExperimentConfig,
@@ -2133,7 +2154,9 @@ def _load_round_checkpoint(
         not isinstance(payload, dict)
         or payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION
         or payload.get("run_fingerprint") != run_fingerprint
-        or payload.get("config") != asdict(config)
+        or not isinstance(payload.get("config"), dict)
+        or _checkpoint_semantic_config(payload["config"])
+        != _checkpoint_semantic_config(config)
         or not isinstance(payload.get("state"), dict)
     ):
         return None, 0.0, 0.0

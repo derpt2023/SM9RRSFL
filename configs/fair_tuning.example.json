@@ -63,6 +63,7 @@
     "trials_per_tunable_method": 12,
     "max_clean_accuracy_drop": 0.05,
     "run_final_evaluation": true,
+    "final_jobs": "auto",
     "objective": "auto",
     "method_spaces": {
       "sm9rrs": "auto",

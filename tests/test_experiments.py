@@ -807,6 +807,33 @@ class ExperimentOutputDirTest(unittest.TestCase):
     def test_checkpoint_schema_is_v13_for_weight_metric_state(self):
         self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 13)
 
+    def test_checkpoint_resume_allows_runtime_only_device_and_worker_changes(self):
+        original = ExperimentConfig(
+            method="sm9rrs",
+            device="auto",
+            sm9_workers=8,
+        )
+        reassigned = replace(original, device="cuda:3", sm9_workers=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint_path = Path(tmp) / "runtime-equivalent.pickle"
+            _write_round_checkpoint(
+                checkpoint_path,
+                original,
+                "same-protocol",
+                {"completed_round": 2},
+                runtime_seconds=3.0,
+                peak_memory_mb=4.0,
+            )
+            state, runtime, peak = _load_round_checkpoint(
+                checkpoint_path,
+                reassigned,
+                "same-protocol",
+            )
+
+        self.assertEqual(state["completed_round"], 2)
+        self.assertEqual(runtime, 3.0)
+        self.assertEqual(peak, 4.0)
+
     def test_v12_binary_checkpoints_are_not_loaded_as_weight_metric_state(self):
         config = ExperimentConfig(method="fedavg")
         with tempfile.TemporaryDirectory() as tmp:
@@ -1433,6 +1460,18 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertIn("1/2", output)
         self.assertIn("eta=", output)
         self.assertIn("complete", output)
+
+    def test_progress_reporter_supports_named_non_config_units(self):
+        stream = io.StringIO()
+        progress = ProgressReporter(total=2, stream=stream)
+        progress.start_item("running ours candidate 1")
+        progress.finish_item("finished ours candidate 1")
+        progress.close()
+
+        output = stream.getvalue()
+        self.assertIn("ours candidate 1", output)
+        self.assertIn("1/2", output)
+        self.assertIn("eta=", output)
 
     def test_non_tty_progress_does_not_emit_periodic_log_lines(self):
         progress = ProgressReporter(total=2, stream=io.StringIO())
