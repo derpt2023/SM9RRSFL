@@ -29,7 +29,11 @@ class ConfigRunnerTest(unittest.TestCase):
         self.assertTrue(args.client_counts or [args.num_clients])
         self.assertTrue(args.partitions or [args.partition])
         self.assertEqual(args.ours_parameter_mode, "auto")
-        self.assertEqual(args.fedre_teacher_lr, 5.0)
+        self.assertIn("alignins", args.methods)
+        self.assertNotIn("fedredefense", args.methods)
+        self.assertAlmostEqual(args.alignins_sparsity, 0.3)
+        self.assertAlmostEqual(args.alignins_tda_radius, 1.0)
+        self.assertAlmostEqual(args.alignins_mpsa_radius, 1.0)
         self.assertEqual(args.ratios, [0.0, 0.2, 0.4, 0.6, 0.8])
         self.assertEqual(args.calibration_ratios, [0.0, 0.1, 0.3, 0.5, 0.7])
         self.assertEqual(args.calibration_candidate_budget, 12)
@@ -52,19 +56,24 @@ class ConfigRunnerTest(unittest.TestCase):
             ), self.assertRaises(SystemExit):
                 parse_args(argv)
 
-    def test_only_supplied_calibration_hard_constraints_override_defaults(self):
-        args = parse_args(
-            parameters_to_argv(
-                {
-                    "ASR": 0.25,
-                    "attack_FP": 0.08,
-                }
-            )
-        )
+    def test_removed_attack_hard_constraint_interfaces_are_rejected(self):
+        for name in (
+            "ASR",
+            "attack_FP",
+            "attack_recall",
+            "calibration_max_asr",
+            "calibration_max_attack_false_positive_rate",
+            "calibration_min_three_round_recall",
+            "fedre_threshold",
+            "fedre_teacher_lr",
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ConfigError,
+                "unknown experiment parameter",
+            ):
+                parameters_to_argv({name: 0.5})
 
-        self.assertEqual(args.calibration_max_asr, 0.25)
-        self.assertEqual(args.calibration_max_attack_false_positive_rate, 0.08)
-        self.assertEqual(args.calibration_min_three_round_recall, 0.80)
+        args = parse_args([])
         self.assertEqual(args.calibration_min_round_completion_rate, 1.0)
         self.assertEqual(args.calibration_max_nonfinite_updates, 0)
 
@@ -148,17 +157,17 @@ class ConfigRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             wrong_schema = Path(tmp) / "wrong-schema.json"
             wrong_schema.write_text(
-                json.dumps({"schema_version": 2, "parameters": {}}),
+                json.dumps({"schema_version": 1, "parameters": {}}),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ConfigError, "schema_version must be 1"):
+            with self.assertRaisesRegex(ConfigError, "schema_version must be 2"):
                 load_experiment_config(wrong_schema)
 
             unknown_root = Path(tmp) / "unknown-root.json"
             unknown_root.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "parameters": {},
                         "unexpected": True,
                     }

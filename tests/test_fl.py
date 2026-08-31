@@ -163,6 +163,34 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertEqual(result.records[-1].round, 3)
         self.assertTrue(np.isfinite(result.final_accuracy))
 
+    def test_alignins_torch_backend_runs_on_cpu_when_no_accelerator_is_requested(self):
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("PyTorch is not installed")
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=212)
+        result = run_experiment(
+            dataset,
+            ExperimentConfig(
+                method="alignins",
+                malicious_ratio=0.0,
+                num_clients=2,
+                rounds=1,
+                local_epochs=1,
+                batch_size=8,
+                compute_backend="torch",
+                device="cpu",
+                alignins_tda_radius=10.0,
+                alignins_mpsa_radius=10.0,
+                early_stop=False,
+                seed=212,
+            ),
+        )
+
+        self.assertEqual(result.records[-1].round, 1)
+        self.assertEqual(result.records[-1].accepted_updates, 2)
+        self.assertTrue(np.isfinite(result.final_accuracy))
+
     def test_invalid_krum_config_fails_before_training(self):
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=14)
         config = ExperimentConfig(
@@ -620,9 +648,9 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertEqual(result.records[3].rejected_updates, 3)
         self.assertEqual(result.blacklisted_clients, tuple())
 
-    def test_fedredefense_runs_reconstruction_and_keeps_state_checkpointable(self):
+    def test_alignins_numpy_path_is_stateless_and_checkpointable(self):
         dataset = make_synthetic_mnist_like(
-            train_samples=20,
+            train_samples=40,
             test_samples=10,
             seed=125,
         )
@@ -630,18 +658,16 @@ class FederatedLoopTest(unittest.TestCase):
         result = run_experiment(
             dataset,
             ExperimentConfig(
-                method="fedredefense",
+                method="alignins",
                 malicious_ratio=0.0,
                 num_clients=2,
-                rounds=1,
+                rounds=2,
                 local_epochs=1,
                 batch_size=8,
                 attack="none",
                 compute_backend="numpy",
-                fedre_threshold=100.0,
-                fedre_initial_iterations=1,
-                fedre_max_iterations=1,
-                fedre_synthetic_steps=1,
+                alignins_tda_radius=10.0,
+                alignins_mpsa_radius=10.0,
                 early_stop=False,
                 seed=125,
             ),
@@ -650,7 +676,105 @@ class FederatedLoopTest(unittest.TestCase):
 
         self.assertEqual(result.records[-1].accepted_updates, 2)
         self.assertEqual(result.records[-1].rejected_updates, 0)
-        self.assertIsNotNone(checkpoints[-1]["fedre_defense"])
+        self.assertNotIn("alignins_defense", checkpoints[-1])
+        self.assertTrue(
+            all(
+                np.isfinite(record.honest_weight_loss)
+                and np.isfinite(record.malicious_weight_mass)
+                for record in result.records
+            )
+        )
+
+    def test_alignins_checkpoint_resume_matches_uninterrupted_run(self):
+        dataset = make_synthetic_mnist_like(
+            train_samples=40,
+            test_samples=10,
+            seed=127,
+        )
+        config = ExperimentConfig(
+            method="alignins",
+            malicious_ratio=0.5,
+            num_clients=2,
+            rounds=3,
+            local_epochs=1,
+            batch_size=8,
+            attack="sign_flip",
+            attack_start_round=1,
+            compute_backend="numpy",
+            alignins_tda_radius=10.0,
+            alignins_mpsa_radius=10.0,
+            early_stop=False,
+            seed=127,
+        )
+        uninterrupted = run_experiment(dataset, config)
+        saved = {}
+
+        class SimulatedInterruption(Exception):
+            pass
+
+        def stop_after_first_round(state):
+            if state["completed_round"] == 1:
+                saved["state"] = state
+                raise SimulatedInterruption
+
+        with self.assertRaises(SimulatedInterruption):
+            run_experiment(
+                dataset,
+                config,
+                checkpoint_callback=stop_after_first_round,
+            )
+        self.assertNotIn("alignins_defense", saved["state"])
+        resumed = run_experiment(dataset, config, resume_state=saved["state"])
+
+        self.assertEqual(resumed.records, uninterrupted.records)
+        self.assertEqual(resumed.blacklisted_clients, tuple())
+        self.assertEqual(resumed.malicious_clients, uninterrupted.malicious_clients)
+
+    def test_weight_diagnostics_use_fedavg_sample_count_baseline(self):
+        from sm9rrsfl import fl as fl_module
+
+        honest_loss, malicious_mass = fl_module._aggregation_weight_diagnostics(
+            {"honest-small": 10, "honest-large": 30, "malicious": 60},
+            {"malicious"},
+            {"honest-small": 0.05, "honest-large": 0.25, "malicious": 0.10},
+        )
+        self.assertAlmostEqual(honest_loss, 0.25)
+        self.assertAlmostEqual(malicious_mass, 0.10)
+
+        clean_loss, clean_malicious_mass = (
+            fl_module._aggregation_weight_diagnostics(
+                {"small": 10, "large": 30, "largest": 60},
+                set(),
+                {"small": 0.10, "large": 0.30, "largest": 0.60},
+            )
+        )
+        self.assertAlmostEqual(clean_loss, 0.0)
+        self.assertAlmostEqual(clean_malicious_mass, 0.0)
+
+    def test_fedavg_records_zero_honest_loss_and_actual_malicious_mass(self):
+        dataset = make_synthetic_mnist_like(
+            train_samples=20,
+            test_samples=10,
+            seed=128,
+        )
+        result = run_experiment(
+            dataset,
+            ExperimentConfig(
+                method="fedavg",
+                malicious_ratio=0.5,
+                num_clients=2,
+                rounds=1,
+                local_epochs=1,
+                batch_size=8,
+                attack="none",
+                compute_backend="numpy",
+                early_stop=False,
+                seed=128,
+            ),
+        )
+
+        self.assertAlmostEqual(result.records[-1].honest_weight_loss, 0.0)
+        self.assertAlmostEqual(result.records[-1].malicious_weight_mass, 0.5)
 
 
 if __name__ == "__main__":

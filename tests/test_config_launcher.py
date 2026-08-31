@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 import run_experiments_from_config as launcher
+import run_fair_tuning_from_config as fair_launcher
 
 
 class ConfigLauncherTest(unittest.TestCase):
@@ -61,6 +62,38 @@ class ConfigLauncherTest(unittest.TestCase):
                     launcher._try_project_virtualenv(root)
 
         self.assertEqual(raised.exception.errno, errno.EIO)
+
+    def test_fair_tuning_launcher_reexecutes_itself(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate(root)
+            with mock.patch.object(launcher.os, "execv") as execv:
+                reexecuted = fair_launcher._try_project_virtualenv(root)
+
+        self.assertTrue(reexecuted)
+        execv.assert_called_once_with(
+            str(candidate),
+            [
+                str(candidate),
+                str(Path(fair_launcher.__file__).resolve()),
+                *sys.argv[1:],
+            ],
+        )
+
+    def test_fair_tuning_launcher_ignores_cross_platform_virtualenv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = self._candidate(root)
+            error = OSError(errno.ENOEXEC, "Exec format error", str(candidate))
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(launcher.os, "execv", side_effect=error),
+                mock.patch.object(sys, "stderr", stderr),
+            ):
+                reexecuted = fair_launcher._try_project_virtualenv(root)
+
+        self.assertFalse(reexecuted)
+        self.assertIn("ignoring unusable project virtualenv Python", stderr.getvalue())
 
 
 if __name__ == "__main__":

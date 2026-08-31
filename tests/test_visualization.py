@@ -12,7 +12,7 @@ class VisualizationTest(unittest.TestCase):
         results = [
             _fake_result("sm9rrs", 0.0, 1.2, 3.4),
             _fake_result("vert", 0.0, 1.1, 3.0),
-            _fake_result("fedredefense", 0.0, 2.0, 4.0),
+            _fake_result("alignins", 0.0, 2.0, 4.0),
             _fake_result("krum", 0.0, 0.8, 2.1),
             _fake_result("ding13", 0.1, 0.6, 1.9),
         ]
@@ -28,7 +28,7 @@ class VisualizationTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn(">Ours<", comparison)
             self.assertIn(">VERT<", comparison)
-            self.assertIn(">FedREDefense<", comparison)
+            self.assertIn(">AlignIns<", comparison)
             self.assertIn("(a) 恶意节点比例 0%", comparison)
             self.assertIn("(b) 恶意节点比例 10%", comparison)
             self.assertIn('data-series="accuracy"', comparison)

@@ -570,7 +570,7 @@ class OursCalibrationTest(unittest.TestCase):
             artifact.objective_learning["status"],
             "deferred_to_unified_fair_tuner",
         )
-        self.assertFalse(artifact.constraints["attacked_constraints_evaluated"])
+        self.assertFalse(artifact.constraints["attacked_metrics_evaluated"])
         self.assertEqual(
             artifact.selected_candidate["selection_scope"],
             "provisional_clean_safe_base_for_unified_tuner",

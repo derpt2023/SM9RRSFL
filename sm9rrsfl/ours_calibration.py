@@ -37,8 +37,8 @@ from .datasets import (
 from .fl import ExperimentConfig, ExperimentResult, malicious_client_count
 
 
-CALIBRATION_SCHEMA_VERSION = 2
-CALIBRATION_ALGORITHM_VERSION = "ours-offline-v3"
+CALIBRATION_SCHEMA_VERSION = 3
+CALIBRATION_ALGORITHM_VERSION = "ours-offline-v4"
 _HUGE_THRESHOLD = 1.0e300
 _SCORE_EPS = 1.0e-8
 _CLEAN_ALPHA = 0.01
@@ -56,7 +56,7 @@ _OBJECTIVE = {
     "clean_accuracy_weight": 0.25,
     "robust_accuracy_weight": 0.50,
     "attack_success_weight": 0.20,
-    "false_positive_weight": 0.05,
+    "honest_weight_loss_weight": 0.05,
 }
 
 
@@ -500,9 +500,10 @@ def resolve_or_run_ours_calibration(
         else:
             # Preserve the final failed clean trial in the auditable artifact.
             # In unified Scheme B, attacked validation is also intentionally
-            # deferred so Ours, VERT, and FedREDefense receive the same outer
+            # deferred so Ours, VERT, and AlignIns receive the same outer
             # candidate/scenario/seed budget.
             summary = clean_summary
+        summary["clean_gate_valid"] = bool(clean_summary.get("valid", False))
         summary["parameters"] = asdict(parameters)
         summary["threshold_rules"] = {
             **dict(derived["threshold_rules"]),
@@ -522,15 +523,15 @@ def resolve_or_run_ours_calibration(
         candidate_results.append(summary)
         candidate_parameters[candidate_id] = parameters
 
-    feasible = [item for item in candidate_results if item["valid"]]
-    if not feasible:
+    clean_safe = [item for item in candidate_results if item["clean_gate_valid"]]
+    if not clean_safe:
         concise = "; ".join(
             f"{item['candidate_id']}={','.join(item['invalid_reasons'])}"
             for item in candidate_results
         )
         raise OursCalibrationError(
             "automatic Ours calibration failed closed: no candidate satisfied "
-            f"the declared clean/attack hard constraints ({concise})"
+            f"the declared clean safety constraints ({concise})"
         )
     if defer_to_unified_tuner:
         learned_objective = dict(_OBJECTIVE)
@@ -541,19 +542,29 @@ def resolve_or_run_ours_calibration(
         }
     else:
         learned_objective, objective_learning = _learn_objective_weights(
-            feasible,
+            clean_safe,
             attacked_ratios=attacked_ratios,
+            min_round_completion_rate=hard_constraints.min_round_completion_rate,
+            max_nonfinite_updates=hard_constraints.max_nonfinite_updates,
         )
     for item in candidate_results:
         item["score"] = (
             weighted_score(item, learned_objective) if item["valid"] else None
         )
+    feasible = [item for item in candidate_results if item["valid"]]
+    if not feasible:
+        concise = "; ".join(
+            f"{item['candidate_id']}={','.join(item['invalid_reasons'])}"
+            for item in candidate_results
+        )
+        raise OursCalibrationError(
+            "automatic Ours calibration failed closed: no clean-safe candidate "
+            f"produced complete finite attack metrics ({concise})"
+        )
     selected_summary = max(
         feasible,
         key=lambda item: (
             float(item["score"]),
-            float(item["malicious_revocation_rate"]),
-            -float(item["first_detection_delay"]),
             -int(item["parameters"]["q"]),
             int(item["parameters"]["C_tol"]),
         ),
@@ -571,7 +582,7 @@ def resolve_or_run_ours_calibration(
         "max_clean_round_suspicious_rate": _MAX_CLEAN_SUSPICIOUS,
         "min_clean_round_ess_ratio": _MIN_CLEAN_ESS_RATIO,
         "aggregation": "worst partition/client-count/seed/round",
-        "attacked_constraints_evaluated": not defer_to_unified_tuner,
+        "attacked_metrics_evaluated": not defer_to_unified_tuner,
     }
     covered = {
         "partitions": list(partitions),
@@ -1080,19 +1091,92 @@ def _score_closed_loop_candidate(
     if worst_ess_ratio + 1e-12 < _MIN_CLEAN_ESS_RATIO:
         invalid.append("clean_ess_ratio")
 
-    clean_accuracy = fmean(float(item.final_accuracy) for item in clean) if clean else 0.0
+    clean_accuracy_values = [float(item.final_accuracy) for item in clean]
+    robust_accuracy_values = [float(item.final_accuracy) for item in attacked]
+    if any(
+        not math.isfinite(value) or not 0.0 <= value <= 1.0
+        for value in (*clean_accuracy_values, *robust_accuracy_values)
+    ):
+        invalid.append("invalid_accuracy")
+    clean_accuracy = (
+        fmean(clean_accuracy_values)
+        if clean_accuracy_values
+        and all(math.isfinite(value) for value in clean_accuracy_values)
+        else 0.0
+    )
     robust_accuracy = (
-        fmean(float(item.final_accuracy) for item in attacked)
-        if attacked
+        fmean(robust_accuracy_values)
+        if robust_accuracy_values
+        and all(math.isfinite(value) for value in robust_accuracy_values)
         else clean_accuracy
     )
-    attack_rates = [
-        float(item.records[-1].attack_target_success_rate)
-        for item in attacked
-        if item.records
-        and item.records[-1].attack_target_success_rate is not None
-    ]
-    attack_success = fmean(attack_rates) if attack_rates else 0.0
+    attack_rates: list[float] = []
+    for item in attacked:
+        final_record = item.records[-1] if item.records else None
+        value = (
+            getattr(final_record, "attack_target_success_rate", None)
+            if final_record is not None
+            else None
+        )
+        if (
+            value is None
+            or not math.isfinite(float(value))
+            or not 0.0 <= float(value) <= 1.0
+        ):
+            if "missing_attack_success_rate" not in invalid:
+                invalid.append("missing_attack_success_rate")
+            continue
+        attack_rates.append(float(value))
+    attack_success = (
+        0.0
+        if not attacked
+        else (
+            fmean(attack_rates)
+            if len(attack_rates) == len(attacked)
+            else 1.0
+        )
+    )
+    clean_losses: list[float] = []
+    attacked_losses: list[float] = []
+    for item in results:
+        attack_start = (
+            int(item.config.attack_start_round)
+            or int(item.config.detector_window) + 2
+        )
+        records = [
+            record
+            for record in item.records
+            if int(record.round) > 0
+            and (
+                item.config.malicious_ratio <= 0.0
+                or int(record.round) >= attack_start
+            )
+        ]
+        raw_losses = [getattr(record, "honest_weight_loss", None) for record in records]
+        if (
+            not records
+            or any(value is None for value in raw_losses)
+            or any(
+                not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+                for value in raw_losses
+                if value is not None
+            )
+        ):
+            if "missing_honest_weight_loss" not in invalid:
+                invalid.append("missing_honest_weight_loss")
+            continue
+        scenario_loss = fmean(float(value) for value in raw_losses)
+        if item.config.malicious_ratio <= 0.0:
+            clean_losses.append(scenario_loss)
+        else:
+            attacked_losses.append(scenario_loss)
+    all_scenario_losses = [*clean_losses, *attacked_losses]
+    honest_weight_loss = (
+        fmean(all_scenario_losses)
+        if len(all_scenario_losses) == len(clean) + len(attacked)
+        else 1.0
+    )
     malicious_rates: list[float] = []
     detection_delays: list[float] = []
     scenario_metrics: list[dict[str, Any]] = []
@@ -1120,16 +1204,6 @@ def _score_closed_loop_candidate(
             if bool(getattr(diagnostic, "suspicious", False))
             and int(getattr(diagnostic, "round", 0)) >= attack_start
         ]
-        first_three_end = min(int(item.config.rounds), attack_start + 2)
-        first_three_detected = {
-            str(getattr(diagnostic, "client_id", ""))
-            for diagnostic in malicious_diagnostics
-            if bool(getattr(diagnostic, "suspicious", False))
-            and attack_start
-            <= int(getattr(diagnostic, "round", 0))
-            <= first_three_end
-        }
-        first_three_recall = len(first_three_detected) / max(1, malicious_count)
         attack_false_positive_rate = (
             int(getattr(final_record, "false_positive_revocations", 0))
             / honest_count
@@ -1152,10 +1226,67 @@ def _score_closed_loop_candidate(
                 unflagged_mass_by_round[round_id] = (
                     unflagged_mass_by_round.get(round_id, 0.0) + weight
                 )
-        scenario_asr = (
-            float(getattr(final_record, "attack_target_success_rate", 0.0) or 0.0)
+        scenario_asr_raw = (
+            getattr(final_record, "attack_target_success_rate", None)
             if final_record is not None
+            else None
+        )
+        scenario_asr_valid = (
+            scenario_asr_raw is not None
+            and math.isfinite(float(scenario_asr_raw))
+            and 0.0 <= float(scenario_asr_raw) <= 1.0
+        )
+        scenario_asr = float(scenario_asr_raw) if scenario_asr_valid else 1.0
+        attack_records = [
+            record
+            for record in item.records
+            if int(record.round) >= attack_start
+        ]
+        loss_values = [
+            getattr(record, "honest_weight_loss", None)
+            for record in attack_records
+        ]
+        loss_valid = bool(attack_records) and all(
+            value is not None
+            and math.isfinite(float(value))
+            and 0.0 <= float(value) <= 1.0
+            for value in loss_values
+        )
+        scenario_honest_loss = (
+            fmean(float(value) for value in loss_values)
+            if loss_valid
             else 1.0
+        )
+        mass_values = [
+            float(getattr(record, "malicious_weight_mass", 0.0))
+            for record in attack_records
+            if math.isfinite(
+                float(getattr(record, "malicious_weight_mass", float("nan")))
+            )
+        ]
+        early_mass_values = [
+            float(getattr(record, "malicious_weight_mass", 0.0))
+            for record in attack_records[:3]
+            if math.isfinite(
+                float(getattr(record, "malicious_weight_mass", float("nan")))
+            )
+        ]
+        early_mass_valid = bool(attack_records[:3]) and (
+            len(early_mass_values) == len(attack_records[:3])
+        )
+        scenario_completion = (
+            int(item.stopped_round) / max(1, int(item.config.rounds))
+        )
+        scenario_nonfinite = int(getattr(item, "nonfinite_updates", 0))
+        scenario_valid = (
+            scenario_asr_valid
+            and loss_valid
+            and early_mass_valid
+            and bool(item.records)
+            and int(item.records[-1].round) == int(item.stopped_round)
+            and scenario_completion + 1.0e-12
+            >= hard_constraints.min_round_completion_rate
+            and scenario_nonfinite <= hard_constraints.max_nonfinite_updates
         )
         scenario_metrics.append(
             {
@@ -1165,21 +1296,19 @@ def _score_closed_loop_candidate(
                 "seed": int(item.config.seed),
                 "accuracy": float(item.final_accuracy),
                 "attack_success_rate": scenario_asr,
+                "honest_weight_loss": scenario_honest_loss,
                 "malicious_revocation_rate": malicious_revocation_rate,
-                "first_three_round_recall": first_three_recall,
                 "attack_false_positive_rate": attack_false_positive_rate,
-                "max_malicious_aggregation_mass": max(
-                    malicious_mass_by_round.values(), default=0.0
+                "max_malicious_aggregation_mass": max(mass_values, default=0.0),
+                "early_malicious_weight_mass": (
+                    fmean(early_mass_values) if early_mass_valid else float("inf")
                 ),
                 "max_unflagged_malicious_aggregation_mass": max(
                     unflagged_mass_by_round.values(), default=0.0
                 ),
-                "round_completion_rate": (
-                    int(item.stopped_round) / max(1, int(item.config.rounds))
-                ),
-                "nonfinite_updates": int(
-                    getattr(item, "nonfinite_updates", 0)
-                ),
+                "round_completion_rate": scenario_completion,
+                "nonfinite_updates": scenario_nonfinite,
+                "valid": scenario_valid,
             }
         )
         detection_delays.append(
@@ -1189,29 +1318,12 @@ def _score_closed_loop_candidate(
         )
     worst_attack_success = max(
         (float(item["attack_success_rate"]) for item in scenario_metrics),
-        default=0.0,
-    )
-    worst_three_round_recall = min(
-        (float(item["first_three_round_recall"]) for item in scenario_metrics),
-        default=1.0,
+        default=1.0 if attacked else 0.0,
     )
     worst_attack_fp = max(
         (float(item["attack_false_positive_rate"]) for item in scenario_metrics),
         default=0.0,
     )
-    if attacked:
-        if worst_attack_success > hard_constraints.max_asr + 1.0e-12:
-            invalid.append("worst_attack_success_rate")
-        if (
-            worst_three_round_recall + 1.0e-12
-            < hard_constraints.min_three_round_recall
-        ):
-            invalid.append("first_three_round_malicious_recall")
-        if (
-            worst_attack_fp
-            > hard_constraints.max_attack_false_positive_rate + 1.0e-12
-        ):
-            invalid.append("attack_false_positive_rate")
     return {
         "candidate_id": candidate_id,
         "valid": not invalid,
@@ -1220,9 +1332,11 @@ def _score_closed_loop_candidate(
         "clean_accuracy": float(clean_accuracy),
         "robust_accuracy": float(robust_accuracy),
         "attack_success_rate": float(attack_success),
-        "false_positive_rate": float(worst_fp),
+        "honest_weight_loss": float(honest_weight_loss),
+        "clean_honest_weight_loss": (
+            fmean(clean_losses) if len(clean_losses) == len(clean) else 1.0
+        ),
         "worst_attack_success_rate": float(worst_attack_success),
-        "worst_first_three_round_recall": float(worst_three_round_recall),
         "worst_attack_false_positive_rate": float(worst_attack_fp),
         "minimum_round_completion_rate": float(minimum_completion),
         "nonfinite_updates": int(nonfinite_updates),
@@ -1331,6 +1445,8 @@ def _learn_objective_weights(
     candidates: list[dict[str, Any]],
     *,
     attacked_ratios: tuple[float, ...],
+    min_round_completion_rate: float,
+    max_nonfinite_updates: int,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     """Learn Score weights by leave-one-attacked-ratio-out transfer."""
 
@@ -1352,6 +1468,7 @@ def _learn_objective_weights(
     best_folds: list[dict[str, Any]] = []
     for weights in grid:
         folds: list[dict[str, Any]] = []
+        admissible = True
         for held_out in ratios:
             scored: list[tuple[float, dict[str, Any]]] = []
             for candidate in candidates:
@@ -1362,6 +1479,14 @@ def _learn_objective_weights(
                         float(row["ratio"]), held_out, abs_tol=1.0e-12
                     )
                 ]
+                if not fit_rows or any(
+                    not bool(row.get("valid", False))
+                    or float(row.get("round_completion_rate", 0.0)) + 1.0e-12
+                    < min_round_completion_rate
+                    or int(row.get("nonfinite_updates", 0)) > max_nonfinite_updates
+                    for row in fit_rows
+                ):
+                    continue
                 metrics = {
                     "clean_accuracy": float(candidate["clean_accuracy"]),
                     "robust_accuracy": fmean(
@@ -1370,17 +1495,23 @@ def _learn_objective_weights(
                     "attack_success_rate": fmean(
                         float(row["attack_success_rate"]) for row in fit_rows
                     ),
-                    "false_positive_rate": float(
-                        candidate["worst_clean_false_positive_rate"]
+                    "honest_weight_loss": fmean(
+                        [
+                            float(candidate["clean_honest_weight_loss"]),
+                            *(float(row["honest_weight_loss"]) for row in fit_rows),
+                        ]
                     ),
                 }
                 scored.append((weighted_score(metrics, weights), candidate))
+            if not scored:
+                admissible = False
+                break
             _fit_score, selected = max(
                 scored,
                 key=lambda item: (
                     item[0],
-                    float(item[1]["malicious_revocation_rate"]),
                     -int(item[1]["parameters"]["q"]),
+                    int(item[1]["parameters"]["C_tol"]),
                 ),
             )
             held_rows = [
@@ -1390,48 +1521,54 @@ def _learn_objective_weights(
                     float(row["ratio"]), held_out, abs_tol=1.0e-12
                 )
             ]
+            held_valid = bool(held_rows) and all(
+                bool(row.get("valid", False)) for row in held_rows
+            )
+            if not held_valid:
+                admissible = False
+                break
             folds.append(
                 {
                     "held_out_ratio": held_out,
                     "selected_candidate": selected["candidate_id"],
+                    "held_out_valid": True,
                     "worst_asr": max(
-                        float(row["attack_success_rate"])
-                        for row in held_rows
+                        float(row["attack_success_rate"]) for row in held_rows
                     ),
                     "worst_accuracy": min(
                         float(row["accuracy"]) for row in held_rows
                     ),
-                    "worst_three_round_recall": min(
-                        float(row["first_three_round_recall"])
-                        for row in held_rows
+                    "worst_honest_weight_loss": fmean(
+                        [
+                            float(selected["clean_honest_weight_loss"]),
+                            *(
+                                float(row["honest_weight_loss"])
+                                for row in held_rows
+                            ),
+                        ]
                     ),
-                    "worst_attack_fp": max(
-                        float(row["attack_false_positive_rate"])
-                        for row in held_rows
-                    ),
-                    "worst_unflagged_malicious_weight_mass": max(
-                        float(row["max_unflagged_malicious_aggregation_mass"])
+                    "worst_early_malicious_weight_mass": max(
+                        float(row["early_malicious_weight_mass"])
                         for row in held_rows
                     ),
                 }
             )
+        if not admissible:
+            continue
         worst_asr = max(float(item["worst_asr"]) for item in folds)
         worst_accuracy = min(float(item["worst_accuracy"]) for item in folds)
-        worst_recall = min(
-            float(item["worst_three_round_recall"]) for item in folds
+        worst_honest_loss = max(
+            float(item["worst_honest_weight_loss"]) for item in folds
         )
-        worst_fp = max(float(item["worst_attack_fp"]) for item in folds)
-        worst_mass = max(
-            float(item["worst_unflagged_malicious_weight_mass"])
-            for item in folds
+        worst_early_mass = max(
+            float(item["worst_early_malicious_weight_mass"]) for item in folds
         )
         balance = -sum((float(value) - 0.25) ** 2 for value in weights.values())
         key = (
             -worst_asr,
             worst_accuracy,
-            worst_recall,
-            -worst_fp,
-            -worst_mass,
+            -worst_honest_loss,
+            -worst_early_mass,
             balance,
             tuple(float(weights[name]) for name in sorted(weights)),
         )
@@ -1439,7 +1576,11 @@ def _learn_objective_weights(
             best_key = key
             best_weights = dict(weights)
             best_folds = folds
-    assert best_weights is not None
+    if best_weights is None:
+        raise OursCalibrationError(
+            "cannot learn Score weights because no candidate is valid in at "
+            "least one leave-one-attacked-ratio-out fit fold"
+        )
     return best_weights, {
         "algorithm": "leave_one_attacked_ratio_out",
         "status": "learned",
@@ -1448,10 +1589,9 @@ def _learn_objective_weights(
         "evaluated_weight_vectors": len(grid),
         "outer_objective": [
             "minimize_worst_asr",
-            "maximize_worst_accuracy",
-            "maximize_worst_first_three_round_recall",
-            "minimize_worst_attack_false_positive_rate",
-            "minimize_worst_unflagged_malicious_aggregation_mass",
+            "maximize_worst_robust_accuracy",
+            "minimize_worst_honest_weight_loss",
+            "minimize_worst_early_malicious_weight_mass_tiebreak",
         ],
         "folds": best_folds,
     }
@@ -1674,9 +1814,6 @@ def _protocol_payload(
         "attack_start_round",
         "detector_window",
         "seed",
-        "calibration_max_asr",
-        "calibration_min_three_round_recall",
-        "calibration_max_attack_false_positive_rate",
         "calibration_min_round_completion_rate",
         "calibration_max_nonfinite_updates",
         "calibration_candidate_budget",
@@ -1800,17 +1937,6 @@ def _calibration_ratios(args) -> tuple[float, ...]:
 def _hard_constraints(args) -> CalibrationHardConstraints:
     try:
         return CalibrationHardConstraints(
-            max_asr=float(_arg(args, "calibration_max_asr", 0.20)),
-            min_three_round_recall=float(
-                _arg(args, "calibration_min_three_round_recall", 0.80)
-            ),
-            max_attack_false_positive_rate=float(
-                _arg(
-                    args,
-                    "calibration_max_attack_false_positive_rate",
-                    0.05,
-                )
-            ),
             min_round_completion_rate=float(
                 _arg(args, "calibration_min_round_completion_rate", 1.0)
             ),

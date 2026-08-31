@@ -1,17 +1,17 @@
 {
-  "schema_version": 1,
-  "name": "mnist-v3-auto-calibrated",
-  "description": "MNIST six-method study with disjoint calibration/main malicious ratios, bounded automatic Ours policy calibration, learned Score weights, and the previously omitted FedREDefense teacher learning rate.",
+  "schema_version": 2,
+  "name": "mnist-v4-alignins-auto-calibrated",
+  "description": "MNIST six-method study with AlignIns, disjoint calibration/main malicious ratios, and bounded automatic Ours policy calibration.",
   "parameters": {
     "dataset": "mnist",
     "download": true,
     "data_dir": "data/mnist",
-    "output_dir": "outputs/mnist_v3_20260825",
+    "output_dir": "outputs/mnist_v4_alignins_20260830",
 
     "methods": [
       "sm9rrs",
       "vert",
-      "fedredefense",
+      "alignins",
       "krum",
       "ding13",
       "fedavg"
@@ -51,9 +51,6 @@
     "K": 7,
     "ours_parameter_mode": "auto",
     "calibration_candidate_budget": 12,
-    "ASR": 0.2,
-    "calibration_min_three_round_recall": 0.8,
-    "calibration_max_attack_false_positive_rate": 0.05,
     "calibration_min_round_completion_rate": 1.0,
     "calibration_max_nonfinite_updates": 0,
 
@@ -64,15 +61,9 @@
     "vert_top_k": 0,
     "vert_use_ratio_prior": false,
 
-    "fedre_threshold": 0.6,
-    "fedre_initial_iterations": 800,
-    "fedre_max_iterations": 2000,
-    "fedre_synthetic_steps": 5,
-    "fedre_images_per_class": 1,
-    "fedre_image_lr": 0.5,
-    "fedre_label_lr": 0.2,
-    "fedre_teacher_lr": 5.0,
-    "fedre_teacher_lr_lr": 0.000005,
+    "alignins_sparsity": 0.3,
+    "alignins_tda_radius": 1.0,
+    "alignins_mpsa_radius": 1.0,
 
     "crypto_mode": "sm9",
     "dkg_threshold": 2,

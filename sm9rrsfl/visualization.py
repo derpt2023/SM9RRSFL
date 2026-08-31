@@ -13,7 +13,7 @@ from .fl import ExperimentResult
 METHOD_LABELS = {
     "sm9rrs": "Ours",
     "vert": "VERT",
-    "fedredefense": "FedREDefense",
+    "alignins": "AlignIns",
     "krum": "Krum",
     "ding13": "TAD",
     "fedavg": "FedAvg",
@@ -22,7 +22,7 @@ METHOD_LABELS = {
 METHOD_COLORS = {
     "sm9rrs": "#8DBAD9",
     "vert": "#E99092",
-    "fedredefense": "#8ADDE4",
+    "alignins": "#8ADDE4",
     "krum": "#DCDD8F",
     "ding13": "#FEBD85",
     "fedavg": "#C4A9A2",
@@ -33,12 +33,12 @@ THEME_TICK = "#64748B"
 THEME_GRID = "#D1D5DB"
 THEME_GRID_LIGHT = "#E5E7EB"
 
-METHOD_ORDER = ["sm9rrs", "vert", "fedredefense", "ding13", "krum", "fedavg"]
+METHOD_ORDER = ["sm9rrs", "vert", "alignins", "ding13", "krum", "fedavg"]
 
 LINE_STYLES = {
     "Ours": "",
     "VERT": "7 3",
-    "FedREDefense": "2 3",
+    "AlignIns": "2 3",
     "Krum": "8 4",
     "TAD": "3 4",
     "FedAvg": "10 3 3 3",
@@ -773,7 +773,7 @@ def _marker(label: str, x: float, y: float, color: str, *, filled: bool) -> str:
             f'<polygon points="{points}" fill="{fill}" stroke="{color}" '
             'stroke-width="1.4"/>'
         )
-    if label == "FedREDefense":
+    if label == "AlignIns":
         return (
             f'<path d="M {x - 4:.1f} {y:.1f} H {x + 4:.1f} '
             f'M {x:.1f} {y - 4:.1f} V {y + 4:.1f}" '

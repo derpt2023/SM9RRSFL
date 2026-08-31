@@ -1,14 +1,16 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "MNIST unified fair grid search",
-  "description": "Scheme B: derive a bounded Ours space without hand-set detector parameters, evaluate Ours/VERT/FedREDefense with the same 12-candidate budget on disjoint calibration ratios, learn the Score weights, then freeze every selected method for formal ratios and independent final seeds.",
+  "description": "Scheme B: derive a bounded Ours space without hand-set detector parameters, evaluate Ours/VERT/AlignIns with the same 12-candidate budget on disjoint calibration ratios, learn the Score weights, then freeze every selected method for formal ratios and independent final seeds.",
   "shared_parameters": {
     "dataset": "mnist",
-    "output_dir": "outputs/mnist_v3_or_fair_tuning",
+    "data_dir": "data/mnist",
+    "download": true,
+    "output_dir": "outputs/mnist_v4_alignins_fair_tuning",
     "methods": [
       "sm9rrs",
       "vert",
-      "fedredefense",
+      "alignins",
       "krum",
       "ding13",
       "fedavg"
@@ -40,9 +42,6 @@
     "K": 7,
     "ours_parameter_mode": "auto",
     "calibration_candidate_budget": 12,
-    "ASR": 0.2,
-    "calibration_min_three_round_recall": 0.8,
-    "calibration_max_attack_false_positive_rate": 0.05,
     "calibration_min_round_completion_rate": 1.0,
     "calibration_max_nonfinite_updates": 0,
     "crypto_mode": "sm9",
@@ -62,11 +61,7 @@
     "validation_seeds": [41, 42, 43],
     "final_seeds": [141, 142, 143],
     "trials_per_tunable_method": 12,
-    "require_finite_updates": true,
-    "require_clean_acceptance": true,
-    "max_clean_false_positive_rate": 0.01,
-    "min_clean_round_acceptance_rate": 0.95,
-    "require_full_rounds": true,
+    "max_clean_accuracy_drop": 0.05,
     "run_final_evaluation": true,
     "objective": "auto",
     "method_spaces": {
@@ -76,10 +71,10 @@
         "vert_predict_epochs": [3, 5],
         "vert_predict_lr": [0.0005, 0.001]
       },
-      "fedredefense": {
-        "fedre_threshold": [0.6, 0.65, 0.7],
-        "fedre_teacher_lr": [4.0, 5.0],
-        "fedre_teacher_lr_lr": [0.0000025, 0.000005]
+      "alignins": {
+        "alignins_sparsity": [0.1, 0.3, 0.5],
+        "alignins_tda_radius": [0.5, 1.0],
+        "alignins_mpsa_radius": [0.5, 1.0]
       },
       "krum": {},
       "ding13": {},

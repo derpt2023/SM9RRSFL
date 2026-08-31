@@ -14,9 +14,6 @@ import math
 from typing import Iterable, Mapping, Sequence
 
 
-DEFAULT_MAX_ASR = 0.20
-DEFAULT_MIN_THREE_ROUND_RECALL = 0.80
-DEFAULT_MAX_ATTACK_FALSE_POSITIVE_RATE = 0.05
 DEFAULT_MIN_ROUND_COMPLETION_RATE = 1.0
 DEFAULT_MAX_NONFINITE_UPDATES = 0
 DEFAULT_OBJECTIVE_WEIGHT_FLOOR = 0.05
@@ -26,7 +23,7 @@ OBJECTIVE_WEIGHT_NAMES = (
     "clean_accuracy_weight",
     "robust_accuracy_weight",
     "attack_success_weight",
-    "false_positive_weight",
+    "honest_weight_loss_weight",
 )
 
 
@@ -47,28 +44,19 @@ class RatioSchedule:
 
 @dataclass(frozen=True)
 class CalibrationHardConstraints:
-    """Method-neutral safety envelope for validation candidates."""
+    """Method-neutral execution-integrity envelope for calibration runs."""
 
-    max_asr: float = DEFAULT_MAX_ASR
-    min_three_round_recall: float = DEFAULT_MIN_THREE_ROUND_RECALL
-    max_attack_false_positive_rate: float = (
-        DEFAULT_MAX_ATTACK_FALSE_POSITIVE_RATE
-    )
     min_round_completion_rate: float = DEFAULT_MIN_ROUND_COMPLETION_RATE
     max_nonfinite_updates: int = DEFAULT_MAX_NONFINITE_UPDATES
 
     def validate(self) -> "CalibrationHardConstraints":
-        for name, value in (
-            ("max_asr", self.max_asr),
-            ("min_three_round_recall", self.min_three_round_recall),
-            (
-                "max_attack_false_positive_rate",
-                self.max_attack_false_positive_rate,
-            ),
-            ("min_round_completion_rate", self.min_round_completion_rate),
+        if (
+            not math.isfinite(self.min_round_completion_rate)
+            or not 0.0 <= self.min_round_completion_rate <= 1.0
         ):
-            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
-                raise ValueError(f"{name} must be finite and in [0, 1]")
+            raise ValueError(
+                "min_round_completion_rate must be finite and in [0, 1]"
+            )
         if (
             isinstance(self.max_nonfinite_updates, bool)
             or not isinstance(self.max_nonfinite_updates, int)
@@ -166,17 +154,17 @@ def weighted_score(
     metrics: Mapping[str, float],
     weights: Mapping[str, float],
 ) -> float:
-    """Apply the four-metric score with positive accuracy and negative risks."""
+    """Apply the four normalized benefit terms used by offline calibration."""
 
     return (
         float(weights["clean_accuracy_weight"])
         * float(metrics["clean_accuracy"])
         + float(weights["robust_accuracy_weight"])
         * float(metrics["robust_accuracy"])
-        - float(weights["attack_success_weight"])
-        * float(metrics["attack_success_rate"])
-        - float(weights["false_positive_weight"])
-        * float(metrics["false_positive_rate"])
+        + float(weights["attack_success_weight"])
+        * (1.0 - float(metrics["attack_success_rate"]))
+        + float(weights["honest_weight_loss_weight"])
+        * (1.0 - float(metrics["honest_weight_loss"]))
     )
 
 
@@ -191,11 +179,8 @@ def _stable_ratio(value: float) -> float:
 
 __all__ = [
     "CalibrationHardConstraints",
-    "DEFAULT_MAX_ASR",
-    "DEFAULT_MAX_ATTACK_FALSE_POSITIVE_RATE",
     "DEFAULT_MAX_NONFINITE_UPDATES",
     "DEFAULT_MIN_ROUND_COMPLETION_RATE",
-    "DEFAULT_MIN_THREE_ROUND_RECALL",
     "DEFAULT_OBJECTIVE_WEIGHT_FLOOR",
     "DEFAULT_OBJECTIVE_WEIGHT_STEP",
     "OBJECTIVE_WEIGHT_NAMES",

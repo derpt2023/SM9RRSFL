@@ -12,7 +12,9 @@ from sm9rrsfl.datasets import make_synthetic_mnist_like
 from sm9rrsfl.fair_tuning import (
     ALL_METHODS,
     FairTuningError,
+    FairTuningConfig,
     TuningExperimentTask,
+    _learn_unified_objective_weights,
     build_validation_tasks,
     execute_resumable_tuning_phase,
     execute_tuning_tasks,
@@ -27,17 +29,24 @@ from sm9rrsfl.experiments import build_experiment_configs, parse_args
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+OBJECTIVE = {
+    "clean_accuracy_weight": 0.25,
+    "robust_accuracy_weight": 0.50,
+    "attack_success_weight": 0.20,
+    "honest_weight_loss_weight": 0.05,
+}
 
 
-def _set_legacy_four_candidate_baselines(payload):
+def _set_four_candidate_tunable_spaces(payload):
     payload["tuning"]["trials_per_tunable_method"] = 4
     payload["tuning"]["method_spaces"]["vert"] = {
         "vert_history_window": [5, 10],
         "vert_predict_epochs": [3, 5],
     }
-    payload["tuning"]["method_spaces"]["fedredefense"] = {
-        "fedre_threshold": [0.6, 0.7],
-        "fedre_teacher_lr": [5.0, 6.0],
+    payload["tuning"]["method_spaces"]["alignins"] = {
+        "alignins_sparsity": [0.3],
+        "alignins_tda_radius": [0.5, 1.0],
+        "alignins_mpsa_radius": [0.5, 1.0],
     }
 
 
@@ -51,23 +60,20 @@ class FairTuningTest(unittest.TestCase):
         self.assertTrue(spec.auto_ours)
         self.assertEqual(len(spec.candidates["sm9rrs"]), 0)
         self.assertEqual(len(spec.candidates["vert"]), 12)
-        self.assertEqual(len(spec.candidates["fedredefense"]), 12)
+        self.assertEqual(len(spec.candidates["alignins"]), 12)
         self.assertEqual(len(spec.candidates["fedavg"]), 1)
         self.assertEqual(spec.trials_per_tunable_method, 12)
         self.assertEqual(spec.formal_ratios, (0.0, 0.2, 0.4, 0.6, 0.8))
         self.assertEqual(spec.calibration_ratios, (0.0, 0.1, 0.3, 0.5, 0.7))
         self.assertEqual(spec.objective_mode, "learned_leave_one_attacked_ratio_out")
         self.assertTrue(set(spec.validation_seeds).isdisjoint(spec.final_seeds))
-        self.assertTrue(spec.require_clean_acceptance)
-        self.assertAlmostEqual(spec.max_clean_false_positive_rate, 0.01)
-        self.assertAlmostEqual(spec.min_clean_round_acceptance_rate, 0.95)
-        self.assertTrue(spec.require_full_rounds)
+        self.assertAlmostEqual(spec.max_clean_accuracy_drop, 0.05)
         self.assertEqual(
             {
-                candidate["fedre_teacher_lr"]
-                for candidate in spec.candidates["fedredefense"]
+                candidate["alignins_sparsity"]
+                for candidate in spec.candidates["alignins"]
             },
-            {4.0, 5.0},
+            {0.1, 0.3, 0.5},
         )
 
     def test_v3_detector_hyperparameters_are_valid_ours_only_search_axes(self):
@@ -87,12 +93,12 @@ class FairTuningTest(unittest.TestCase):
             "suspicion_count_max": [3],
         }
         payload["shared_parameters"]["ours_parameter_mode"] = "fixed"
-        _set_legacy_four_candidate_baselines(payload)
+        _set_four_candidate_tunable_spaces(payload)
         payload["tuning"]["objective"] = {
             "clean_accuracy_weight": 0.25,
             "robust_accuracy_weight": 0.5,
             "attack_success_weight": 0.2,
-            "false_positive_weight": 0.05,
+            "honest_weight_loss_weight": 0.05,
         }
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "v3-grid.json"
@@ -112,33 +118,67 @@ class FairTuningTest(unittest.TestCase):
             "any",
         )
 
+    def test_fixed_objective_requires_complete_normalized_weights(self):
+        template = json.loads(
+            (PROJECT_ROOT / "configs" / "fair_tuning.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        valid = json.loads(json.dumps(template))
+        valid["tuning"]["objective"] = dict(OBJECTIVE)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "valid-fixed-objective.json"
+            path.write_text(json.dumps(valid), encoding="utf-8")
+            spec = load_fair_tuning_config(path)
+        self.assertEqual(spec.objective_mode, "fixed")
+        self.assertEqual(spec.objective, OBJECTIVE)
+
+        invalid_cases = (
+            (
+                {
+                    "clean_accuracy_weight": 0.25,
+                    "robust_accuracy_weight": 0.50,
+                    "attack_success_weight": 0.20,
+                },
+                "must contain all four weights",
+            ),
+            (
+                {
+                    "clean_accuracy_weight": 0.25,
+                    "robust_accuracy_weight": 0.75,
+                    "attack_success_weight": 0.20,
+                    "honest_weight_loss_weight": 0.05,
+                },
+                "must sum to 1",
+            ),
+        )
+        for objective, error in invalid_cases:
+            payload = json.loads(json.dumps(template))
+            payload["tuning"]["objective"] = objective
+            with self.subTest(objective=objective):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "invalid-fixed-objective.json"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(FairTuningError, error):
+                        load_fair_tuning_config(path)
+
     def test_hard_constraint_defaults_and_ranges_are_validated(self):
         template = json.loads(
             (PROJECT_ROOT / "configs" / "fair_tuning.example.json").read_text(
                 encoding="utf-8"
             )
         )
-        for key in (
-            "max_clean_false_positive_rate",
-            "min_clean_round_acceptance_rate",
-            "require_full_rounds",
-        ):
-            template["tuning"].pop(key, None)
+        template["tuning"].pop("max_clean_accuracy_drop", None)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "defaults.json"
             path.write_text(json.dumps(template), encoding="utf-8")
             spec = load_fair_tuning_config(path)
 
-        self.assertAlmostEqual(spec.max_clean_false_positive_rate, 0.01)
-        self.assertAlmostEqual(spec.min_clean_round_acceptance_rate, 0.95)
-        self.assertTrue(spec.require_full_rounds)
+        self.assertAlmostEqual(spec.max_clean_accuracy_drop, 0.05)
 
         invalid_cases = (
-            ("max_clean_false_positive_rate", -0.01, "must be in \\[0, 1\\]"),
-            ("max_clean_false_positive_rate", 1.01, "must be in \\[0, 1\\]"),
-            ("min_clean_round_acceptance_rate", -0.01, "must be in \\[0, 1\\]"),
-            ("min_clean_round_acceptance_rate", 1.01, "must be in \\[0, 1\\]"),
-            ("require_full_rounds", 1, "must be boolean"),
+            ("max_clean_accuracy_drop", -0.01, "must be in \\[0, 1\\]"),
+            ("max_clean_accuracy_drop", 1.01, "must be in \\[0, 1\\]"),
         )
         for key, value, error in invalid_cases:
             payload = json.loads(json.dumps(template))
@@ -149,6 +189,14 @@ class FairTuningTest(unittest.TestCase):
                     path.write_text(json.dumps(payload), encoding="utf-8")
                     with self.assertRaisesRegex(FairTuningError, error):
                         load_fair_tuning_config(path)
+
+        legacy = json.loads(json.dumps(template))
+        legacy["tuning"]["max_clean_false_positive_rate"] = 0.01
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy-hard-constraint.json"
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            with self.assertRaisesRegex(FairTuningError, "unknown tuning key"):
+                load_fair_tuning_config(path)
 
     def test_detector_decision_rule_is_fixed_shared_algorithm_semantics(self):
         payload = json.loads(
@@ -175,7 +223,7 @@ class FairTuningTest(unittest.TestCase):
         )
         base_payload["shared_parameters"].pop("K", None)
         base_payload["shared_parameters"]["ours_parameter_mode"] = "fixed"
-        _set_legacy_four_candidate_baselines(base_payload)
+        _set_four_candidate_tunable_spaces(base_payload)
         base_payload["tuning"]["method_spaces"]["sm9rrs"] = {
             "detector_window": [7, 10],
             "detector_anchor_threshold": [2.5, 3.0],
@@ -485,26 +533,14 @@ class FairTuningTest(unittest.TestCase):
             "bad",
             {},
             [_result(0.0, 0.99, 1), _result(0.4, 0.99, 1)],
-            objective={
-                "clean_accuracy_weight": 0.25,
-                "robust_accuracy_weight": 0.5,
-                "attack_success_weight": 0.2,
-                "false_positive_weight": 0.05,
-            },
-            require_finite_updates=True,
+            objective=OBJECTIVE,
         )
         good = score_trial(
             "fedavg",
             "good",
             {},
             [_result(0.0, 0.7, 0), _result(0.4, 0.6, 0)],
-            objective={
-                "clean_accuracy_weight": 0.25,
-                "robust_accuracy_weight": 0.5,
-                "attack_success_weight": 0.2,
-                "false_positive_weight": 0.05,
-            },
-            require_finite_updates=True,
+            objective=OBJECTIVE,
         )
         trials = []
         for method in ALL_METHODS:
@@ -517,13 +553,7 @@ class FairTuningTest(unittest.TestCase):
                         f"{method}-only",
                         {},
                         [_result(0.0, 0.7, 0, method), _result(0.4, 0.6, 0, method)],
-                        objective={
-                            "clean_accuracy_weight": 0.25,
-                            "robust_accuracy_weight": 0.5,
-                            "attack_success_weight": 0.2,
-                            "false_positive_weight": 0.05,
-                        },
-                        require_finite_updates=True,
+                        objective=OBJECTIVE,
                     )
                 )
 
@@ -532,205 +562,147 @@ class FairTuningTest(unittest.TestCase):
         self.assertFalse(bad.valid)
         self.assertEqual(selected["fedavg"].candidate_id, "good")
 
-    def test_candidate_rejecting_every_clean_client_is_invalid(self):
+    def test_honest_weight_loss_replaces_permanent_false_positive_score(self):
         trial = score_trial(
-            "fedredefense",
-            "collapsed",
-            {"fedre_teacher_lr": 0.1},
+            "alignins",
+            "weighted-harm",
+            {},
             [
-                _result(0.0, 0.1, 0, "fedredefense", accepted_updates=0),
-                _result(0.4, 0.1, 0, "fedredefense", accepted_updates=0),
+                _result(0.0, 0.8, 0, "alignins", honest_weight_loss=0.2),
+                _result(0.4, 0.7, 0, "alignins", honest_weight_loss=0.4),
             ],
-            objective={
-                "clean_accuracy_weight": 0.25,
-                "robust_accuracy_weight": 0.5,
-                "attack_success_weight": 0.2,
-                "false_positive_weight": 0.05,
+            objective=OBJECTIVE,
+        )
+
+        self.assertTrue(trial.valid)
+        self.assertAlmostEqual(trial.honest_weight_loss, 0.3)
+        self.assertIn("honest_weight_loss", trial.row())
+        self.assertNotIn("false_positive_rate", trial.row())
+
+    def test_matched_fedavg_clean_accuracy_drop_is_a_gate(self):
+        clean = _result(0.0, 0.70, 0, "sm9rrs")
+        attacked = _result(0.4, 0.65, 0, "sm9rrs")
+        trial = score_trial(
+            "sm9rrs",
+            "clean-drop",
+            {},
+            [clean, attacked],
+            objective=OBJECTIVE,
+            clean_accuracy_reference={
+                (
+                    clean.config.partition,
+                    clean.config.dirichlet_alpha,
+                    clean.config.num_clients,
+                    clean.config.seed,
+                ): 0.80
             },
-            require_finite_updates=True,
-            require_clean_acceptance=True,
+            max_clean_accuracy_drop=0.05,
         )
 
         self.assertFalse(trial.valid)
-        self.assertEqual(trial.clean_acceptance_rate, 0.0)
+        self.assertAlmostEqual(trial.worst_clean_accuracy_drop, 0.10)
 
-    def test_clean_acceptance_gate_uses_the_worst_formal_round(self):
-        trial = score_trial(
-            "sm9rrs",
-            "late-collapse",
-            {},
-            [
-                _result(0.0, 0.8, 0, "sm9rrs", accepted_updates=[10, 9]),
-                _result(0.4, 0.7, 0, "sm9rrs", accepted_updates=[10, 10]),
-            ],
-            objective={
-                "clean_accuracy_weight": 0.25,
-                "robust_accuracy_weight": 0.5,
-                "attack_success_weight": 0.2,
-                "false_positive_weight": 0.05,
-            },
-            require_finite_updates=True,
-            require_clean_acceptance=True,
-            min_clean_round_acceptance_rate=0.95,
-        )
-
-        self.assertFalse(trial.valid)
-        self.assertAlmostEqual(trial.clean_acceptance_rate, 0.9)
-        self.assertAlmostEqual(trial.min_clean_round_acceptance_rate, 0.9)
-
-        relaxed = score_trial(
-            "sm9rrs",
-            "late-collapse-relaxed",
-            {},
-            [
-                _result(0.0, 0.8, 0, "sm9rrs", accepted_updates=[10, 9]),
-                _result(0.4, 0.7, 0, "sm9rrs", accepted_updates=[10, 10]),
-            ],
-            objective={
-                "clean_accuracy_weight": 0.25,
-                "robust_accuracy_weight": 0.5,
-                "attack_success_weight": 0.2,
-                "false_positive_weight": 0.05,
-            },
-            require_finite_updates=True,
-            require_clean_acceptance=True,
-            min_clean_round_acceptance_rate=0.9,
-        )
-        self.assertTrue(relaxed.valid)
-
-    def test_worst_clean_false_positive_rate_is_a_hard_constraint(self):
-        trial = score_trial(
-            "sm9rrs",
-            "clean-false-positive",
-            {},
-            [
-                _result(
-                    0.0,
-                    0.8,
-                    0,
-                    "sm9rrs",
-                    false_positive_revocations=1,
-                ),
-                _result(0.4, 0.7, 0, "sm9rrs"),
-            ],
-            objective={
-                "clean_accuracy_weight": 0.25,
-                "robust_accuracy_weight": 0.5,
-                "attack_success_weight": 0.2,
-                "false_positive_weight": 0.05,
-            },
-            require_finite_updates=True,
-            max_clean_false_positive_rate=0.01,
-        )
-
-        self.assertFalse(trial.valid)
-        self.assertAlmostEqual(trial.worst_clean_false_positive_rate, 0.1)
-        self.assertAlmostEqual(
-            trial.row()["worst_clean_false_positive_rate"],
-            0.1,
-        )
-
-    def test_ours_attack_hard_constraints_use_asr_first_three_recall_and_fp(self):
-        clean_config = ExperimentConfig(
-            method="sm9rrs",
-            malicious_ratio=0.0,
-            num_clients=10,
-            rounds=3,
-            attack_start_round=1,
-        )
-        attack_config = replace(clean_config, malicious_ratio=0.4)
+    def test_clean_accuracy_gate_distinguishes_dirichlet_alphas(self):
         clean = _result(
             0.0,
-            0.8,
+            0.70,
             0,
             "sm9rrs",
-            accepted_updates=[10, 10, 10],
-            config=clean_config,
+            config=ExperimentConfig(
+                method="sm9rrs",
+                malicious_ratio=0.0,
+                partition="dirichlet",
+                dirichlet_alpha=0.3,
+                num_clients=10,
+                seed=7,
+            ),
         )
         attacked = _result(
             0.4,
-            0.7,
+            0.65,
             0,
             "sm9rrs",
-            accepted_updates=[10, 10, 10],
-            config=attack_config,
+            config=replace(clean.config, malicious_ratio=0.4),
         )
-        attacked = replace(
-            attacked,
-            diagnostics=[
-                SimpleNamespace(
-                    round=1,
-                    client_id=f"client-{index}",
-                    is_malicious=True,
-                    suspicious=True,
-                )
-                for index in range(4)
+        trial = score_trial(
+            "sm9rrs",
+            "alpha-specific-clean-control",
+            {},
+            [clean, attacked],
+            objective=OBJECTIVE,
+            clean_accuracy_reference={
+                ("dirichlet", 0.5, 10, 7): 0.70,
+            },
+        )
+
+        self.assertFalse(trial.valid)
+        self.assertAlmostEqual(trial.worst_clean_accuracy_drop, 1.0)
+
+    def test_high_asr_is_scored_instead_of_being_a_hard_constraint(self):
+        trial = score_trial(
+            "sm9rrs",
+            "high-asr",
+            {},
+            [
+                _result(0.0, 0.8, 0, "sm9rrs"),
+                _result(0.4, 0.7, 0, "sm9rrs", attack_success=0.95),
             ],
+            objective=OBJECTIVE,
         )
-        objective = {
-            "clean_accuracy_weight": 0.25,
-            "robust_accuracy_weight": 0.5,
-            "attack_success_weight": 0.2,
-            "false_positive_weight": 0.05,
-        }
 
-        valid = score_trial(
+        self.assertTrue(trial.valid)
+        self.assertAlmostEqual(trial.attack_success_rate, 0.95)
+
+    def test_missing_attack_success_is_not_silently_treated_as_zero(self):
+        missing = score_trial(
             "sm9rrs",
-            "valid",
+            "missing-asr",
             {},
-            [clean, attacked],
-            objective=objective,
-            require_finite_updates=True,
-            max_asr=0.2,
-            min_three_round_recall=0.8,
-            max_attack_false_positive_rate=0.05,
-            min_round_completion_rate=1.0,
-            max_nonfinite_updates=0,
+            [
+                _result(0.0, 0.8, 0, "sm9rrs"),
+                _result(0.4, 0.7, 0, "sm9rrs", attack_success=None),
+            ],
+            objective=OBJECTIVE,
         )
-        self.assertTrue(valid.valid)
-        self.assertEqual(valid.worst_first_three_round_recall, 1.0)
 
-        asr_failure = score_trial(
+        self.assertFalse(missing.valid)
+        self.assertEqual(missing.attack_success_rate, 1.0)
+
+    def test_nonfinite_accuracy_or_attack_metric_invalidates_trial(self):
+        bad_accuracy = replace(
+            _result(0.0, 0.8, 0, "sm9rrs"),
+            final_accuracy=float("nan"),
+        )
+        invalid_accuracy = score_trial(
             "sm9rrs",
-            "asr-failure",
+            "nan-accuracy",
             {},
-            [clean, attacked],
-            objective=objective,
-            require_finite_updates=True,
-            max_asr=0.05,
-            min_three_round_recall=0.8,
-            max_attack_false_positive_rate=0.05,
-            min_round_completion_rate=1.0,
-            max_nonfinite_updates=0,
+            [bad_accuracy, _result(0.4, 0.7, 0, "sm9rrs")],
+            objective=OBJECTIVE,
         )
-        self.assertFalse(asr_failure.valid)
-
-        relaxed_runtime = replace(
-            attacked,
-            stopped_round=2,
-            nonfinite_updates=1,
-        )
-        explicit_overrides = score_trial(
+        invalid_asr = score_trial(
             "sm9rrs",
-            "explicit-overrides",
+            "nan-asr",
             {},
-            [clean, relaxed_runtime],
-            objective=objective,
-            require_finite_updates=True,
-            require_full_rounds=True,
-            max_asr=0.2,
-            min_three_round_recall=0.8,
-            max_attack_false_positive_rate=0.05,
-            min_round_completion_rate=0.6,
-            max_nonfinite_updates=1,
-        )
-        self.assertTrue(explicit_overrides.valid)
-        self.assertAlmostEqual(
-            explicit_overrides.minimum_round_completion_rate,
-            2 / 3,
+            [
+                _result(0.0, 0.8, 0, "sm9rrs"),
+                _result(
+                    0.4,
+                    0.7,
+                    0,
+                    "sm9rrs",
+                    attack_success=float("nan"),
+                ),
+            ],
+            objective=OBJECTIVE,
         )
 
-    def test_any_incomplete_validation_run_is_invalid_when_required(self):
+        self.assertFalse(invalid_accuracy.valid)
+        self.assertEqual(invalid_accuracy.score, float("-inf"))
+        self.assertFalse(invalid_asr.valid)
+        self.assertEqual(invalid_asr.attack_success_rate, 1.0)
+
+    def test_completion_and_nonfinite_thresholds_are_method_neutral(self):
         incomplete_attack = _result(
             0.4,
             0.7,
@@ -741,6 +713,7 @@ class FairTuningTest(unittest.TestCase):
                 malicious_ratio=0.4,
                 num_clients=10,
                 rounds=2,
+                attack_start_round=1,
             ),
             stopped_round=1,
         )
@@ -749,14 +722,7 @@ class FairTuningTest(unittest.TestCase):
             "incomplete",
             {},
             [_result(0.0, 0.8, 0, "sm9rrs"), incomplete_attack],
-            objective={
-                "clean_accuracy_weight": 0.25,
-                "robust_accuracy_weight": 0.5,
-                "attack_success_weight": 0.2,
-                "false_positive_weight": 0.05,
-            },
-            require_finite_updates=True,
-            require_full_rounds=True,
+            objective=OBJECTIVE,
         )
 
         self.assertFalse(trial.valid)
@@ -768,16 +734,86 @@ class FairTuningTest(unittest.TestCase):
             "incomplete-relaxed",
             {},
             [_result(0.0, 0.8, 0, "sm9rrs"), incomplete_attack],
-            objective={
-                "clean_accuracy_weight": 0.25,
-                "robust_accuracy_weight": 0.5,
-                "attack_success_weight": 0.2,
-                "false_positive_weight": 0.05,
-            },
-            require_finite_updates=True,
-            require_full_rounds=False,
+            objective=OBJECTIVE,
+            min_round_completion_rate=0.5,
         )
         self.assertTrue(relaxed.valid)
+
+    def test_leave_one_ratio_out_does_not_prefilter_with_held_out_metrics(self):
+        candidates = {
+            "sm9rrs": ({"detector_subspace_dim": 1}, {"detector_subspace_dim": 2}),
+            "vert": ({"vert_history_window": 5},),
+            "alignins": ({"alignins_sparsity": 0.3},),
+            "krum": ({},),
+            "ding13": ({},),
+            "fedavg": ({},),
+        }
+        spec = _minimal_spec(candidates)
+        results = {
+            "fedavg-001": [
+                _result(0.0, 0.80, 0, "fedavg"),
+                _result(0.1, 0.70, 0, "fedavg"),
+                _result(0.3, 0.70, 0, "fedavg"),
+            ],
+            "sm9rrs-001": [
+                _result(0.0, 0.80, 0, "sm9rrs"),
+                _result(0.1, 0.10, 0, "sm9rrs", attack_success=1.0),
+                _result(0.3, 0.95, 0, "sm9rrs", attack_success=0.0),
+            ],
+            "sm9rrs-002": [
+                _result(0.0, 0.79, 0, "sm9rrs"),
+                _result(0.1, 0.70, 0, "sm9rrs", attack_success=0.2),
+                _result(0.3, 0.70, 0, "sm9rrs", attack_success=0.2),
+            ],
+        }
+        for method in ("vert", "alignins"):
+            results[f"{method}-001"] = [
+                _result(0.0, 0.79, 0, method),
+                _result(0.1, 0.70, 0, method),
+                _result(0.3, 0.70, 0, method),
+            ]
+
+        with mock.patch(
+            "sm9rrsfl.fair_tuning.objective_weight_grid",
+            return_value=(OBJECTIVE,),
+        ):
+            _weights, learning = _learn_unified_objective_weights(spec, results)
+
+        fold = next(
+            item for item in learning["folds"] if item["held_out_ratio"] == 0.1
+        )
+        ours = next(item for item in fold["selected"] if item["method"] == "sm9rrs")
+        self.assertEqual(ours["candidate_id"], "sm9rrs-001")
+        self.assertTrue(ours["held_out_valid"])
+        self.assertEqual(ours["attack_success_rate"], 1.0)
+
+
+def _minimal_spec(candidates):
+    return FairTuningConfig(
+        source=Path("test-fair-tuning.json"),
+        name="test",
+        description="",
+        shared_parameters={},
+        validation_fraction=0.1,
+        split_seed=1,
+        validation_seeds=(1,),
+        final_seeds=(2,),
+        trials_per_tunable_method=max(
+            len(candidates[method]) for method in ("sm9rrs", "vert", "alignins")
+        ),
+        run_final_evaluation=False,
+        max_clean_accuracy_drop=0.05,
+        min_round_completion_rate=1.0,
+        max_nonfinite_updates=0,
+        objective=dict(OBJECTIVE),
+        objective_mode="learned_leave_one_attacked_ratio_out",
+        formal_ratios=(0.0, 0.2, 0.4),
+        calibration_ratios=(0.0, 0.1, 0.3),
+        ratio_schedule=None,
+        auto_ours=False,
+        preinvalid_candidates=(),
+        candidates=candidates,
+    )
 
 
 def _result(
@@ -788,6 +824,9 @@ def _result(
     *,
     accepted_updates=10,
     false_positive_revocations=0,
+    attack_success="default",
+    honest_weight_loss=0.0,
+    malicious_weight_mass=None,
     stopped_round=None,
     config=None,
 ):
@@ -801,22 +840,36 @@ def _result(
         malicious_ratio=ratio,
         num_clients=10,
         rounds=len(accepted_by_round),
+        attack_start_round=1,
+    )
+    attack_success_value = (
+        (0.1 if ratio > 0.0 else 0.0)
+        if attack_success == "default"
+        else attack_success
+    )
+    malicious_weight_mass_value = (
+        float(ratio)
+        if malicious_weight_mass is None
+        else float(malicious_weight_mass)
     )
     records = [
         RoundRecord(
-            method,
-            ratio,
-            round_id,
-            accuracy,
-            1.0 - accuracy,
-            accepted,
-            max(0, config.num_clients - accepted),
-            false_positive_revocations,
-            0,
-            false_positive_revocations,
-            "",
-            attack_target_success_rate=0.1 if ratio > 0.0 else 0.0,
+            method=method,
+            malicious_ratio=ratio,
+            round=round_id,
+            accuracy=accuracy,
+            error=1.0 - accuracy,
+            accepted_updates=accepted,
+            rejected_updates=max(0, config.num_clients - accepted),
+            blacklisted_clients=false_positive_revocations,
+            true_positive_revocations=0,
+            false_positive_revocations=false_positive_revocations,
+            krum_selected_client="",
+            attack_target_success_rate=attack_success_value,
             nonfinite_updates=nonfinite,
+            attack_active=ratio > 0.0,
+            honest_weight_loss=honest_weight_loss,
+            malicious_weight_mass=malicious_weight_mass_value,
         )
         for round_id, accepted in enumerate(accepted_by_round, start=1)
     ]

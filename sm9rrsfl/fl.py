@@ -19,7 +19,7 @@ from .crypto import (
 )
 from .ding13_detector import Ding13TrajectoryDetector
 from .datasets import ImageDataset, partition_clients
-from .fedredefense import FedREDefense
+from .alignins import AlignInsDefense, aggregate_with_coefficients
 from .model import (
     accuracy,
     alternating_minimization_delta,
@@ -89,15 +89,9 @@ class ExperimentConfig:
     vert_predict_lr: float = 1e-2
     vert_top_k: int = 0
     vert_use_ratio_prior: bool = False
-    fedre_threshold: float = 0.6
-    fedre_initial_iterations: int = 800
-    fedre_max_iterations: int = 2000
-    fedre_synthetic_steps: int = 5
-    fedre_images_per_class: int = 1
-    fedre_image_lr: float = 0.5
-    fedre_label_lr: float = 0.2
-    fedre_teacher_lr: float = 0.1
-    fedre_teacher_lr_lr: float = 5e-6
+    alignins_sparsity: float = 0.3
+    alignins_tda_radius: float = 1.0
+    alignins_mpsa_radius: float = 1.0
     seed: int = 0
 
 
@@ -118,6 +112,8 @@ class RoundRecord:
     attack_target_confidence: float | None = None
     nonfinite_updates: int = 0
     attack_active: bool = False
+    honest_weight_loss: float = 0.0
+    malicious_weight_mass: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -243,6 +239,16 @@ class ExperimentResult:
                 if final_record is not None
                 else None
             ),
+            "final_honest_weight_loss": (
+                final_record.honest_weight_loss
+                if final_record is not None
+                else None
+            ),
+            "final_malicious_weight_mass": (
+                final_record.malicious_weight_mass
+                if final_record is not None
+                else None
+            ),
             "stopped_round": self.stopped_round,
             "effective_attack_start_round": (
                 self.config.attack_start_round or self.config.detector_window + 2
@@ -316,14 +322,14 @@ def run_experiment(
     supported_methods = {
         "sm9rrs",
         "vert",
-        "fedredefense",
+        "alignins",
         "krum",
         "ding13",
         "fedavg",
     }
     if config.method not in supported_methods:
         raise ValueError(
-            "method must be one of: sm9rrs, vert, fedredefense, "
+            "method must be one of: sm9rrs, vert, alignins, "
             "krum, ding13, fedavg"
         )
     if not 0.0 <= config.malicious_ratio < 1.0:
@@ -448,19 +454,14 @@ def run_experiment(
         raise ValueError(
             "vert_use_ratio_prior cannot be combined with a positive vert_top_k"
         )
-    if not np.isfinite(config.fedre_threshold) or config.fedre_threshold <= 0.0:
-        raise ValueError("fedre_threshold must be finite and positive")
-    if config.fedre_initial_iterations < 1 or config.fedre_max_iterations < 1:
-        raise ValueError("FedREDefense iteration counts must be at least 1")
-    if config.fedre_synthetic_steps < 1 or config.fedre_images_per_class < 1:
-        raise ValueError(
-            "FedREDefense synthetic steps and images per class must be at least 1"
-        )
+    if (
+        not np.isfinite(config.alignins_sparsity)
+        or not 0.0 < config.alignins_sparsity <= 1.0
+    ):
+        raise ValueError("alignins_sparsity must be in (0, 1]")
     for name, value in {
-        "fedre_image_lr": config.fedre_image_lr,
-        "fedre_label_lr": config.fedre_label_lr,
-        "fedre_teacher_lr": config.fedre_teacher_lr,
-        "fedre_teacher_lr_lr": config.fedre_teacher_lr_lr,
+        "alignins_tda_radius": config.alignins_tda_radius,
+        "alignins_mpsa_radius": config.alignins_mpsa_radius,
     }.items():
         if not np.isfinite(value) or value <= 0.0:
             raise ValueError(f"{name} must be finite and positive")
@@ -480,6 +481,10 @@ def run_experiment(
         dirichlet_alpha=config.dirichlet_alpha,
         seed=config.seed,
     )
+    client_sample_counts = {
+        identity: int(len(client_indices[index]))
+        for index, identity in enumerate(client_ids)
+    }
     malicious_clients = _choose_malicious(client_ids, config.malicious_ratio, config.seed)
     malicious_set = set(malicious_clients)
     detector_window, z_threshold, suspicion_remove_after = _effective_detector_settings(
@@ -608,7 +613,7 @@ def run_experiment(
     detector = None
     ding13_detector = None
     vert_defense = None
-    fedre_defense = None
+    alignins_defense = None
     sm9_weight_manager = None
     if config.method == "sm9rrs":
         crypto_setup_started = perf_counter()
@@ -687,21 +692,11 @@ def run_experiment(
             device=config.device,
             seed=config.seed,
         )
-    elif config.method == "fedredefense":
-        fedre_defense = FedREDefense(
-            client_ids,
-            model_spec=model_spec,
-            threshold=config.fedre_threshold,
-            initial_iterations=config.fedre_initial_iterations,
-            max_iterations=config.fedre_max_iterations,
-            synthetic_steps=config.fedre_synthetic_steps,
-            images_per_class=config.fedre_images_per_class,
-            image_lr=config.fedre_image_lr,
-            label_lr=config.fedre_label_lr,
-            teacher_lr=config.fedre_teacher_lr,
-            teacher_lr_lr=config.fedre_teacher_lr_lr,
-            device=config.device,
-            seed=config.seed,
+    elif config.method == "alignins":
+        alignins_defense = AlignInsDefense(
+            alignins_sparsity=config.alignins_sparsity,
+            alignins_tda_radius=config.alignins_tda_radius,
+            alignins_mpsa_radius=config.alignins_mpsa_radius,
         )
 
     if resume_state is not None:
@@ -712,8 +707,6 @@ def run_experiment(
             ding13_detector = resume_state["ding13_detector"]
         elif config.method == "vert":
             vert_defense = resume_state["vert_defense"]
-        elif config.method == "fedredefense":
-            fedre_defense = resume_state["fedre_defense"]
 
     task_exhausted = False
     if config.method == "sm9rrs":
@@ -786,7 +779,6 @@ def run_experiment(
                 weight_manager=sm9_weight_manager,
                 ding13_detector=ding13_detector,
                 vert_defense=vert_defense,
-                fedre_defense=fedre_defense,
                 crypto=crypto,
                 training_seconds=training_seconds,
                 attack_seconds=attack_seconds,
@@ -819,6 +811,7 @@ def run_experiment(
         sm9_candidates_by_tag: dict[str, _VerifiedSM9Candidate] = {}
         rejected = 0
         round_nonfinite_updates = 0
+        round_actual_weights: dict[str, float] = {}
 
         for client_idx, identity in enumerate(client_ids):
             if identity in blacklisted:
@@ -939,6 +932,7 @@ def run_experiment(
                     # 若多个非有限更新被拒绝后 Krum 条件临时失效，本轮保持
                     # 全局模型不变，而不是再次让整个长任务崩溃。
                     record_rejected += len(updates)
+                    record_accepted = 0
                 else:
                     result = _krum(
                         updates,
@@ -948,6 +942,9 @@ def run_experiment(
                     )
                     aggregate = result.update
                     krum_selected = update_clients[result.selected_index]
+                    round_actual_weights[krum_selected] = 1.0
+                    record_accepted = 1
+                    record_rejected += len(updates) - 1
             elif config.method == "sm9rrs":
                 assert (
                     sm9_weight_manager is not None
@@ -1167,6 +1164,9 @@ def run_experiment(
                 # The manager contains the final zero/non-zero decision for
                 # every C_tol trigger and any successfully revoked tag.
                 weights = [sm9_weight_manager.weights[tag] for tag in update_clients]
+                for tag, weight in zip(update_clients, weights):
+                    identity = sm9_result.client_ids_by_tag[tag]
+                    round_actual_weights[identity] = float(weight)
                 # Section 4.3.3 already normalizes w_pi over A^(r).  Applying
                 # sample counts again would implement w_pi*n_pi rather than
                 # the aggregation equation stated in the Word scheme.
@@ -1218,6 +1218,13 @@ def run_experiment(
                     1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
                 )
                 record_rejected = rejected + len(ding13_result.outliers)
+                round_actual_weights.update(
+                    _normalized_client_coefficients(
+                        update_clients,
+                        weights,
+                        sample_counts=update_samples,
+                    )
+                )
             elif config.method == "vert":
                 assert vert_defense is not None
                 cpu_update_by_client = _cpu_updates_by_client(
@@ -1244,13 +1251,20 @@ def run_experiment(
                     vert_result.weights[update_clients[index]]
                     for index in selected_indices
                 ]
-                aggregate = _weighted_fedavg(
-                    selected_updates,
-                    selected_weights,
-                    sample_counts=None,
-                    config=config,
-                    torch_context=torch_context,
-                )
+                if selected_updates:
+                    aggregate = _weighted_fedavg(
+                        selected_updates,
+                        selected_weights,
+                        sample_counts=None,
+                        config=config,
+                        torch_context=torch_context,
+                    )
+                    round_actual_weights.update(
+                        _normalized_client_coefficients(
+                            [update_clients[index] for index in selected_indices],
+                            selected_weights,
+                        )
+                    )
                 detection_started = perf_counter()
                 vert_defense.finalize_round(
                     cpu_update_by_client,
@@ -1266,49 +1280,38 @@ def run_experiment(
                 detection_inside_aggregation += detection_elapsed
                 record_accepted = len(selected_indices)
                 record_rejected = rejected + len(vert_result.rejected_clients)
-            elif config.method == "fedredefense":
-                assert fedre_defense is not None
-                cpu_update_by_client = _cpu_updates_by_client(
-                    update_clients,
-                    updates,
-                    torch_context,
-                )
+            elif config.method == "alignins":
+                assert alignins_defense is not None
+                update_by_client = dict(zip(update_clients, updates))
                 detection_started = perf_counter()
-                fedre_result = fedre_defense.evaluate_round(
-                    _params_for_checkpoint(params),
-                    cpu_update_by_client,
-                    round_id=round_id,
+                alignins_result = alignins_defense.evaluate_round(
+                    params,
+                    update_by_client,
                 )
                 detection_elapsed = perf_counter() - detection_started
                 detection_seconds += detection_elapsed
                 detection_inside_aggregation += detection_elapsed
-                newly_removed = set(fedre_result.rejected_clients) - blacklisted
-                blacklisted.update(newly_removed)
-                true_positive_revocations += len(newly_removed & malicious_set)
-                false_positive_revocations += len(newly_removed - malicious_set)
-                accepted_set = set(fedre_result.accepted_clients)
-                accepted_indices = [
-                    index
-                    for index, identity in enumerate(update_clients)
-                    if identity in accepted_set
-                ]
-                if accepted_indices:
-                    # The official FedREDefense path applies equal-client
-                    # FedAvg after filtering rather than reusing sample counts.
-                    aggregate = _fedavg(
-                        [updates[index] for index in accepted_indices],
-                        None,
-                        config=config,
-                        torch_context=torch_context,
-                    )
-                record_accepted = len(accepted_indices)
-                record_rejected = rejected + len(fedre_result.rejected_clients)
+                aggregate = aggregate_with_coefficients(
+                    update_by_client,
+                    alignins_result.aggregation_coefficients,
+                )
+                round_actual_weights.update(
+                    alignins_result.aggregation_coefficients
+                )
+                record_accepted = len(alignins_result.selected_clients)
+                record_rejected = rejected + len(alignins_result.rejected_clients)
             else:
                 aggregate = _fedavg(
                     updates,
                     update_samples,
                     config=config,
                     torch_context=torch_context,
+                )
+                round_actual_weights.update(
+                    _normalized_client_coefficients(
+                        update_clients,
+                        update_samples,
+                    )
                 )
             if aggregate is not None:
                 params = (
@@ -1323,6 +1326,13 @@ def run_experiment(
                 - crypto_inside_aggregation
             )
 
+        round_honest_weight_loss, round_malicious_weight_mass = (
+            _aggregation_weight_diagnostics(
+                client_sample_counts,
+                malicious_set,
+                round_actual_weights,
+            )
+        )
         should_evaluate = round_id == config.rounds or round_id % config.eval_interval == 0
         if should_evaluate:
             evaluation_started = perf_counter()
@@ -1353,6 +1363,8 @@ def run_experiment(
                     attack_target_success=target_success,
                     attack_target_confidence=target_confidence,
                     nonfinite_updates=round_nonfinite_updates,
+                    honest_weight_loss=round_honest_weight_loss,
+                    malicious_weight_mass=round_malicious_weight_mass,
                 )
             )
             can_stop = not malicious_clients or round_id >= attack_start
@@ -1374,7 +1386,6 @@ def run_experiment(
                     weight_manager=sm9_weight_manager,
                     ding13_detector=ding13_detector,
                     vert_defense=vert_defense,
-                    fedre_defense=fedre_defense,
                     crypto=crypto,
                     training_seconds=training_seconds,
                     attack_seconds=attack_seconds,
@@ -1423,7 +1434,6 @@ def run_experiment(
                     weight_manager=sm9_weight_manager,
                     ding13_detector=ding13_detector,
                     vert_defense=vert_defense,
-                    fedre_defense=fedre_defense,
                     crypto=crypto,
                     training_seconds=training_seconds,
                     attack_seconds=attack_seconds,
@@ -1751,7 +1761,6 @@ def _build_checkpoint_state(
     weight_manager,
     ding13_detector,
     vert_defense,
-    fedre_defense,
     crypto: SM9RRSContext | None,
     training_seconds: float,
     attack_seconds: float,
@@ -1783,7 +1792,6 @@ def _build_checkpoint_state(
         "weight_manager": weight_manager,
         "ding13_detector": ding13_detector,
         "vert_defense": vert_defense,
-        "fedre_defense": fedre_defense,
         "crypto_state": crypto.export_state() if crypto is not None else None,
         "timings": {
             "training_seconds": training_seconds,
@@ -1994,6 +2002,109 @@ def _weighted_fedavg(
     return weighted_fedavg(updates, weights, sample_counts=sample_counts)
 
 
+def _normalized_client_coefficients(
+    client_ids: list[str],
+    weights,
+    *,
+    sample_counts=None,
+) -> dict[str, float]:
+    """Return the coefficients actually used by normalized aggregation."""
+
+    values = np.asarray(weights, dtype=np.float64)
+    if values.shape != (len(client_ids),):
+        raise ValueError("weights must match client_ids")
+    if sample_counts is not None:
+        samples = np.asarray(sample_counts, dtype=np.float64)
+        if samples.shape != values.shape:
+            raise ValueError("sample_counts must match client_ids")
+        values = values * np.maximum(samples, 0.0)
+    values = np.maximum(values, 0.0)
+    total = float(np.sum(values))
+    if total <= 0.0:
+        if not client_ids:
+            return {}
+        values = np.ones(len(client_ids), dtype=np.float64)
+        total = float(len(client_ids))
+    return {
+        identity: float(value / total)
+        for identity, value in zip(client_ids, values)
+    }
+
+
+def _aggregation_weight_diagnostics(
+    nominal_sample_counts: dict[str, int],
+    malicious_clients: set[str],
+    actual_weights: dict[str, float],
+) -> tuple[float, float]:
+    """Measure defense impact after aggregation without exposing labels to it.
+
+    The defense-free baseline is canonical FedAvg over *all configured client
+    sample counts*: ``b_i = n_i / sum_j n_j``.  Permanently revoked, rejected,
+    or non-finite clients remain in this nominal population with an actual
+    coefficient of zero.  ``actual_weights`` contains each original update's
+    coefficient in the final linear aggregate and is deliberately not forced
+    to sum to one (AlignIns norm clipping attenuates its total mass).  Attack
+    labels are consulted only here, after the defense has already decided.
+    """
+
+    if not nominal_sample_counts:
+        return 0.0, 0.0
+    nominal_client_ids = tuple(nominal_sample_counts)
+    nominal_client_set = set(nominal_client_ids)
+    unknown = set(actual_weights) - nominal_client_set
+    if unknown:
+        raise ValueError(f"actual weights contain unknown clients: {sorted(unknown)}")
+    unknown_malicious = malicious_clients - nominal_client_set
+    if unknown_malicious:
+        raise ValueError(
+            "malicious_clients contains unknown clients: "
+            f"{sorted(unknown_malicious)}"
+        )
+    sample_counts: dict[str, float] = {}
+    for identity, value in nominal_sample_counts.items():
+        sample_count = float(value)
+        if not np.isfinite(sample_count) or sample_count < 0.0:
+            raise ValueError(f"invalid nominal sample count for {identity}")
+        sample_counts[identity] = sample_count
+    total_samples = float(sum(sample_counts.values()))
+    if total_samples <= 0.0:
+        raise ValueError("nominal sample counts must have positive total mass")
+    for identity, value in actual_weights.items():
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"invalid actual aggregation weight for {identity}")
+
+    baseline_weights = {
+        identity: sample_counts[identity] / total_samples
+        for identity in nominal_client_ids
+    }
+    honest_ids = [
+        identity for identity in nominal_client_ids
+        if identity not in malicious_clients
+    ]
+    honest_base_mass = sum(baseline_weights[identity] for identity in honest_ids)
+    honest_loss_mass = sum(
+        max(
+            0.0,
+            baseline_weights[identity]
+            - float(actual_weights.get(identity, 0.0)),
+        )
+        for identity in honest_ids
+    )
+    honest_weight_loss = (
+        honest_loss_mass / honest_base_mass
+        if honest_base_mass > 0.0
+        else 0.0
+    )
+    malicious_weight_mass = sum(
+        float(actual_weights.get(identity, 0.0))
+        for identity in malicious_clients
+    )
+    return (
+        float(np.clip(honest_weight_loss, 0.0, 1.0)),
+        float(max(0.0, malicious_weight_mass)),
+    )
+
+
 def _krum(
     updates: list[Any],
     *,
@@ -2098,6 +2209,8 @@ def _make_record(
     attack_target_success: float | None = None,
     attack_target_confidence: float | None = None,
     nonfinite_updates: int = 0,
+    honest_weight_loss: float = 0.0,
+    malicious_weight_mass: float = 0.0,
 ) -> RoundRecord:
     return RoundRecord(
         method=config.method,
@@ -2122,6 +2235,8 @@ def _make_record(
             else None
         ),
         nonfinite_updates=nonfinite_updates,
+        honest_weight_loss=float(honest_weight_loss),
+        malicious_weight_mass=float(malicious_weight_mass),
         attack_active=(
             config.malicious_ratio > 0.0
             and config.attack != "none"

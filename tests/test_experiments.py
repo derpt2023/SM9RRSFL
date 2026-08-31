@@ -393,15 +393,10 @@ class ExperimentOutputDirTest(unittest.TestCase):
             ["--vert-predict-lr", "0"],
             ["--vert-top-k", "-1"],
             ["--vert-use-ratio-prior", "--vert-top-k", "1"],
-            ["--fedre-threshold", "0"],
-            ["--fedre-initial-iterations", "0"],
-            ["--fedre-max-iterations", "0"],
-            ["--fedre-synthetic-steps", "0"],
-            ["--fedre-images-per-class", "0"],
-            ["--fedre-image-lr", "0"],
-            ["--fedre-label-lr", "0"],
-            ["--fedre-teacher-lr", "0"],
-            ["--fedre-teacher-lr-lr", "0"],
+            ["--alignins-sparsity", "0"],
+            ["--alignins-sparsity", "1.01"],
+            ["--alignins-tda-radius", "0"],
+            ["--alignins-mpsa-radius", "0"],
             [
                 "--ours-parameter-mode",
                 "auto",
@@ -570,7 +565,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
             [
                 "sm9rrs",
                 "vert",
-                "fedredefense",
+                "alignins",
                 "krum",
                 "ding13",
                 "fedavg",
@@ -598,10 +593,44 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(args.vert_predict_lr, 1e-2)
         self.assertEqual(args.vert_top_k, 0)
         self.assertFalse(args.vert_use_ratio_prior)
-        self.assertEqual(args.fedre_threshold, 0.6)
-        self.assertEqual(args.fedre_initial_iterations, 800)
-        self.assertEqual(args.fedre_max_iterations, 2000)
-        self.assertEqual(args.fedre_synthetic_steps, 5)
+        self.assertAlmostEqual(args.alignins_sparsity, 0.3)
+        self.assertAlmostEqual(args.alignins_tda_radius, 1.0)
+        self.assertAlmostEqual(args.alignins_mpsa_radius, 1.0)
+
+    def test_alignins_parameters_map_to_experiment_config(self):
+        args = parse_args(
+            [
+                "--methods",
+                "alignins",
+                "--alignins-sparsity",
+                "0.5",
+                "--alignins-tda-radius",
+                "1.25",
+                "--alignins-mpsa-radius",
+                "0.75",
+            ]
+        )
+
+        config = build_experiment_configs(args)[0]
+
+        self.assertEqual(config.method, "alignins")
+        self.assertAlmostEqual(config.alignins_sparsity, 0.5)
+        self.assertAlmostEqual(config.alignins_tda_radius, 1.25)
+        self.assertAlmostEqual(config.alignins_mpsa_radius, 0.75)
+
+    def test_removed_fedre_and_attack_hard_constraint_cli_options_are_rejected(self):
+        for argv in (
+            ["--methods", "fedredefense"],
+            ["--fedre-threshold", "0.6"],
+            ["--ASR", "0.2"],
+            ["--min-attack-recall", "0.8"],
+            ["--max-attack-FP", "0.05"],
+        ):
+            with self.subTest(argv=argv), mock.patch(
+                "sys.stderr",
+                new=io.StringIO(),
+            ), self.assertRaises(SystemExit):
+                parse_args(argv)
 
     def test_alternating_alias_and_parameters_map_to_config(self):
         args = parse_args(
@@ -775,10 +804,10 @@ class ExperimentOutputDirTest(unittest.TestCase):
                     with self.assertRaises(SystemExit):
                         parse_args(["--z-threshold", "3", option, "3"])
 
-    def test_checkpoint_schema_is_v12_for_shadow_calibration_state(self):
-        self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 12)
+    def test_checkpoint_schema_is_v13_for_weight_metric_state(self):
+        self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 13)
 
-    def test_v11_binary_checkpoints_are_not_loaded_as_shadow_state(self):
+    def test_v12_binary_checkpoints_are_not_loaded_as_weight_metric_state(self):
         config = ExperimentConfig(method="fedavg")
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -788,7 +817,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
             with checkpoint_path.open("wb") as handle:
                 pickle.dump(
                     {
-                        "schema_version": 11,
+                        "schema_version": 12,
                         "run_fingerprint": "v3-test",
                         "config": asdict(config),
                         "state": {"completed_round": 1},
@@ -796,7 +825,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
                     handle,
                 )
             with (output_dir / ".completed_results.pickle").open("wb") as handle:
-                pickle.dump({"schema_version": 11, "results": []}, handle)
+                pickle.dump({"schema_version": 12, "results": []}, handle)
 
             state, runtime, peak = _load_round_checkpoint(
                 checkpoint_path,
@@ -1135,6 +1164,17 @@ class ExperimentOutputDirTest(unittest.TestCase):
                 seed=4,
             ),
         )
+        result = replace(
+            result,
+            records=[
+                replace(
+                    record,
+                    honest_weight_loss=0.25,
+                    malicious_weight_mass=0.125,
+                )
+                for record in result.records
+            ],
+        )
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             write_result_files(output_dir, [result])
@@ -1155,6 +1195,10 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertIn("nonfinite_updates", row)
         self.assertEqual(int(row["effective_attack_start_round"]), 5)
         self.assertEqual(round_row["attack_active"], "False")
+        self.assertEqual(round_row["honest_weight_loss"], "0.25")
+        self.assertEqual(round_row["malicious_weight_mass"], "0.125")
+        self.assertAlmostEqual(restored[0].records[0].honest_weight_loss, 0.25)
+        self.assertAlmostEqual(restored[0].records[0].malicious_weight_mass, 0.125)
         self.assertGreaterEqual(restored[0].stage_timings.training_seconds, 0.0)
 
     def test_legacy_summary_uses_z_threshold_and_c_tol_for_v3_fallbacks(self):

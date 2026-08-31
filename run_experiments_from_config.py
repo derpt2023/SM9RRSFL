@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Start the experiment declared in configs/experiment.json."""
 
+from __future__ import annotations
+
 from pathlib import Path
 import errno
 import os
@@ -10,7 +12,11 @@ import sys
 _RECOVERABLE_EXEC_ERRNOS = {errno.EACCES, errno.ENOENT, errno.ENOEXEC}
 
 
-def _try_project_virtualenv(project_root: Path) -> bool:
+def _try_project_virtualenv(
+    project_root: Path,
+    *,
+    launcher_path: Path | None = None,
+) -> bool:
     """Re-exec a usable project venv, or keep the current interpreter.
 
     Virtual environments are not portable across operating systems.  In
@@ -38,10 +44,15 @@ def _try_project_virtualenv(project_root: Path) -> bool:
         )
         return False
 
+    target_launcher = (
+        Path(__file__).resolve()
+        if launcher_path is None
+        else launcher_path.resolve()
+    )
     try:
         os.execv(
             str(virtualenv_python),
-            [str(virtualenv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+            [str(virtualenv_python), str(target_launcher), *sys.argv[1:]],
         )
     except OSError as exc:
         if exc.errno not in _RECOVERABLE_EXEC_ERRNOS:

@@ -1,9 +1,11 @@
 import unittest
 
 from sm9rrsfl.calibration_policy import (
+    CalibrationHardConstraints,
     OBJECTIVE_WEIGHT_NAMES,
     build_ratio_schedule,
     objective_weight_grid,
+    weighted_score,
 )
 from sm9rrsfl.ours_calibration import _automatic_candidate_specs
 
@@ -30,6 +32,34 @@ class CalibrationPolicyTest(unittest.TestCase):
             self.assertEqual(set(weights), set(OBJECTIVE_WEIGHT_NAMES))
             self.assertAlmostEqual(sum(weights.values()), 1.0)
             self.assertGreaterEqual(min(weights.values()), 0.05)
+
+    def test_score_uses_four_benefits_and_no_legacy_false_positive_field(self):
+        weights = {
+            "clean_accuracy_weight": 0.25,
+            "robust_accuracy_weight": 0.25,
+            "attack_success_weight": 0.25,
+            "honest_weight_loss_weight": 0.25,
+        }
+        score = weighted_score(
+            {
+                "clean_accuracy": 0.8,
+                "robust_accuracy": 0.6,
+                "attack_success_rate": 0.2,
+                "honest_weight_loss": 0.1,
+            },
+            weights,
+        )
+
+        self.assertAlmostEqual(score, (0.8 + 0.6 + 0.8 + 0.9) / 4.0)
+        self.assertNotIn("false_positive_weight", OBJECTIVE_WEIGHT_NAMES)
+
+    def test_public_hard_constraints_only_cover_execution_integrity(self):
+        constraints = CalibrationHardConstraints().to_dict()
+
+        self.assertEqual(
+            set(constraints),
+            {"min_round_completion_rate", "max_nonfinite_updates"},
+        )
 
     def test_automatic_ours_space_expands_every_requested_axis_but_is_bounded(self):
         candidates = _automatic_candidate_specs(

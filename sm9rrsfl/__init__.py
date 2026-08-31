@@ -2,12 +2,12 @@
 
 __all__ = [
     "aggregation",
+    "alignins",
     "attacks",
     "benchmarks",
     "crypto",
     "datasets",
     "ding13_detector",
-    "fedredefense",
     "fl",
     "mnist",
     "model",

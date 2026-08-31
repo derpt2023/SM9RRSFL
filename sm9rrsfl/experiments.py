@@ -27,11 +27,8 @@ import numpy as np
 
 from .calibration_policy import (
     CalibrationHardConstraints,
-    DEFAULT_MAX_ASR,
-    DEFAULT_MAX_ATTACK_FALSE_POSITIVE_RATE,
     DEFAULT_MAX_NONFINITE_UPDATES,
     DEFAULT_MIN_ROUND_COMPLETION_RATE,
-    DEFAULT_MIN_THREE_ROUND_RECALL,
     build_ratio_schedule,
 )
 from .datasets import load_image_dataset
@@ -57,7 +54,7 @@ _WORKER_DATASET = None
 _WORKER_CHECKPOINT_DIR = None
 _WORKER_RUN_FINGERPRINT = None
 _CHECKPOINT_WRITE_LOCK = Lock()
-CHECKPOINT_SCHEMA_VERSION = 12
+CHECKPOINT_SCHEMA_VERSION = 13
 COMPLETED_RESULTS_SNAPSHOT = ".completed_results.pickle"
 CUDA_MEMORY_SAFETY_FRACTION = 0.75
 DATASET_TRAINING_PRESETS = {
@@ -450,7 +447,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=[
             "sm9rrs",
             "vert",
-            "fedredefense",
+            "alignins",
             "krum",
             "ding13",
             "fedavg",
@@ -458,7 +455,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[
             "sm9rrs",
             "vert",
-            "fedredefense",
+            "alignins",
             "krum",
             "ding13",
             "fedavg",
@@ -623,34 +620,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--ASR",
-        "--calibration-max-asr",
-        dest="calibration_max_asr",
-        type=float,
-        default=DEFAULT_MAX_ASR,
-        help="Maximum worst attacked-scenario ASR allowed by offline calibration.",
-    )
-    parser.add_argument(
-        "--min-attack-recall",
-        "--calibration-min-three-round-recall",
-        dest="calibration_min_three_round_recall",
-        type=float,
-        default=DEFAULT_MIN_THREE_ROUND_RECALL,
-        help=(
-            "Minimum cumulative malicious-client suspicious recall within the "
-            "first three attack rounds."
-        ),
-    )
-    parser.add_argument(
-        "--max-attack-FP",
-        "--calibration-max-attack-fp",
-        "--calibration-max-attack-false-positive-rate",
-        dest="calibration_max_attack_false_positive_rate",
-        type=float,
-        default=DEFAULT_MAX_ATTACK_FALSE_POSITIVE_RATE,
-        help="Maximum honest-client revocation rate in any attacked scenario.",
-    )
-    parser.add_argument(
         "--min-round-completion",
         "--calibration-min-round-completion",
         "--calibration-min-round-completion-rate",
@@ -794,39 +763,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--fedre-threshold",
+        "--alignins-sparsity",
         type=float,
-        default=0.6,
-        help="FedREDefense normalized reconstruction-error threshold.",
+        default=0.3,
+        help="AlignIns fraction of largest-magnitude coordinates inspected per update.",
     )
     parser.add_argument(
-        "--fedre-initial-iterations",
-        type=int,
-        default=800,
-        help="FedREDefense synthesis iterations for a client's first observation.",
+        "--alignins-tda-radius",
+        type=float,
+        default=1.0,
+        help="AlignIns trusted-direction-alignment modified-z-score radius.",
     )
     parser.add_argument(
-        "--fedre-max-iterations",
-        type=int,
-        default=2000,
-        help="FedREDefense synthesis iterations after the first observation.",
+        "--alignins-mpsa-radius",
+        type=float,
+        default=1.0,
+        help="AlignIns majority-parameter-sign-alignment modified-z-score radius.",
     )
-    parser.add_argument(
-        "--fedre-synthetic-steps",
-        type=int,
-        default=5,
-        help="Differentiable synthetic SGD steps per reconstruction iteration.",
-    )
-    parser.add_argument(
-        "--fedre-images-per-class",
-        type=int,
-        default=1,
-        help="FedREDefense persistent synthetic images per class.",
-    )
-    parser.add_argument("--fedre-image-lr", type=float, default=0.5)
-    parser.add_argument("--fedre-label-lr", type=float, default=0.2)
-    parser.add_argument("--fedre-teacher-lr", type=float, default=0.1)
-    parser.add_argument("--fedre-teacher-lr-lr", type=float, default=5e-6)
     parser.add_argument("--no-visualizations", action="store_true")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress and ETA output.")
     parser.add_argument(
@@ -932,11 +885,6 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
     effective_attack_start = args.attack_start_round or args.detector_window + 2
     try:
         CalibrationHardConstraints(
-            max_asr=args.calibration_max_asr,
-            min_three_round_recall=args.calibration_min_three_round_recall,
-            max_attack_false_positive_rate=(
-                args.calibration_max_attack_false_positive_rate
-            ),
             min_round_completion_rate=args.calibration_min_round_completion_rate,
             max_nonfinite_updates=args.calibration_max_nonfinite_updates,
         ).validate()
@@ -1112,42 +1060,19 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
             "--vert-top-k",
         ),
         (
-            math.isfinite(args.fedre_threshold) and args.fedre_threshold > 0.0,
-            "--fedre-threshold must be finite and positive",
+            math.isfinite(args.alignins_sparsity)
+            and 0.0 < args.alignins_sparsity <= 1.0,
+            "--alignins-sparsity must be finite and in (0, 1]",
         ),
         (
-            args.fedre_initial_iterations >= 1,
-            "--fedre-initial-iterations must be at least 1",
+            math.isfinite(args.alignins_tda_radius)
+            and args.alignins_tda_radius > 0.0,
+            "--alignins-tda-radius must be finite and positive",
         ),
         (
-            args.fedre_max_iterations >= 1,
-            "--fedre-max-iterations must be at least 1",
-        ),
-        (
-            args.fedre_synthetic_steps >= 1,
-            "--fedre-synthetic-steps must be at least 1",
-        ),
-        (
-            args.fedre_images_per_class >= 1,
-            "--fedre-images-per-class must be at least 1",
-        ),
-        (
-            math.isfinite(args.fedre_image_lr) and args.fedre_image_lr > 0.0,
-            "--fedre-image-lr must be finite and positive",
-        ),
-        (
-            math.isfinite(args.fedre_label_lr) and args.fedre_label_lr > 0.0,
-            "--fedre-label-lr must be finite and positive",
-        ),
-        (
-            math.isfinite(args.fedre_teacher_lr)
-            and args.fedre_teacher_lr > 0.0,
-            "--fedre-teacher-lr must be finite and positive",
-        ),
-        (
-            math.isfinite(args.fedre_teacher_lr_lr)
-            and args.fedre_teacher_lr_lr > 0.0,
-            "--fedre-teacher-lr-lr must be finite and positive",
+            math.isfinite(args.alignins_mpsa_radius)
+            and args.alignins_mpsa_radius > 0.0,
+            "--alignins-mpsa-radius must be finite and positive",
         ),
         (
             1 <= args.dkg_threshold <= args.dkg_nodes,
@@ -1244,15 +1169,9 @@ def build_experiment_configs(args: argparse.Namespace) -> list[ExperimentConfig]
                             vert_predict_lr=args.vert_predict_lr,
                             vert_top_k=args.vert_top_k,
                             vert_use_ratio_prior=args.vert_use_ratio_prior,
-                            fedre_threshold=args.fedre_threshold,
-                            fedre_initial_iterations=args.fedre_initial_iterations,
-                            fedre_max_iterations=args.fedre_max_iterations,
-                            fedre_synthetic_steps=args.fedre_synthetic_steps,
-                            fedre_images_per_class=args.fedre_images_per_class,
-                            fedre_image_lr=args.fedre_image_lr,
-                            fedre_label_lr=args.fedre_label_lr,
-                            fedre_teacher_lr=args.fedre_teacher_lr,
-                            fedre_teacher_lr_lr=args.fedre_teacher_lr_lr,
+                            alignins_sparsity=args.alignins_sparsity,
+                            alignins_tda_radius=args.alignins_tda_radius,
+                            alignins_mpsa_radius=args.alignins_mpsa_radius,
                             seed=args.seed,
                         )
                     )
@@ -2833,6 +2752,10 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
                 ),
                 nonfinite_updates=int(row.get("nonfinite_updates") or 0),
                 attack_active=_parse_bool(row.get("attack_active", "False")),
+                honest_weight_loss=float(row.get("honest_weight_loss") or 0.0),
+                malicious_weight_mass=float(
+                    row.get("malicious_weight_mass") or 0.0
+                ),
             )
         )
 
@@ -2923,21 +2846,9 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
             vert_use_ratio_prior=_parse_bool(
                 row.get("vert_use_ratio_prior", "False")
             ),
-            fedre_threshold=float(row.get("fedre_threshold") or 0.6),
-            fedre_initial_iterations=int(
-                row.get("fedre_initial_iterations") or 800
-            ),
-            fedre_max_iterations=int(row.get("fedre_max_iterations") or 2000),
-            fedre_synthetic_steps=int(row.get("fedre_synthetic_steps") or 5),
-            fedre_images_per_class=int(
-                row.get("fedre_images_per_class") or 1
-            ),
-            fedre_image_lr=float(row.get("fedre_image_lr") or 0.5),
-            fedre_label_lr=float(row.get("fedre_label_lr") or 0.2),
-            fedre_teacher_lr=float(row.get("fedre_teacher_lr") or 0.1),
-            fedre_teacher_lr_lr=float(
-                row.get("fedre_teacher_lr_lr") or 5e-6
-            ),
+            alignins_sparsity=float(row.get("alignins_sparsity") or 0.3),
+            alignins_tda_radius=float(row.get("alignins_tda_radius") or 1.0),
+            alignins_mpsa_radius=float(row.get("alignins_mpsa_radius") or 1.0),
             seed=int(row["seed"]),
         )
         seed = int(row["seed"])

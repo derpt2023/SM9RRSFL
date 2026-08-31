@@ -13,7 +13,7 @@ from .experiments import main as run_experiments
 from .experiments import parse_args
 
 
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
 LIST_PARAMETERS = {
     "methods",
     "ratios",
@@ -46,11 +46,6 @@ PARAMETER_ALIASES = {
     "h": "detector_drift_threshold",
     "C_max": "suspicion_count_max",
     "c_max": "suspicion_count_max",
-    "ASR": "calibration_max_asr",
-    "asr": "calibration_max_asr",
-    "attack_recall": "calibration_min_three_round_recall",
-    "attack_FP": "calibration_max_attack_false_positive_rate",
-    "attack_fp": "calibration_max_attack_false_positive_rate",
 }
 
 
@@ -179,7 +174,10 @@ def main(
         "--config",
         default=str(default_config) if default_config is not None else None,
         required=default_config is None,
-        help="Path to a schema_version=1 JSON experiment configuration.",
+        help=(
+            "Path to a schema_version="
+            f"{CONFIG_SCHEMA_VERSION} JSON experiment configuration."
+        ),
     )
     parser.add_argument(
         "--dry-run",
