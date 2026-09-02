@@ -603,6 +603,34 @@ class FairTuningTest(unittest.TestCase):
 
         self.assertFalse(trial.valid)
         self.assertAlmostEqual(trial.worst_clean_accuracy_drop, 0.10)
+        self.assertTrue(trial.clean_accuracy_gate_applied)
+        self.assertIn("clean_accuracy_drop", trial.invalid_reasons)
+
+    def test_non_tunable_baseline_reports_clean_drop_without_being_rejected(self):
+        clean = _result(0.0, 0.60, 0, "krum")
+        attacked = _result(0.4, 0.50, 0, "krum")
+        trial = score_trial(
+            "krum",
+            "krum-001",
+            {},
+            [clean, attacked],
+            objective=OBJECTIVE,
+            clean_accuracy_reference={
+                (
+                    clean.config.partition,
+                    clean.config.dirichlet_alpha,
+                    clean.config.num_clients,
+                    clean.config.seed,
+                ): 0.80
+            },
+            max_clean_accuracy_drop=0.05,
+        )
+
+        self.assertTrue(trial.valid)
+        self.assertFalse(trial.clean_accuracy_gate_applied)
+        self.assertAlmostEqual(trial.worst_clean_accuracy_drop, 0.20)
+        self.assertEqual(trial.invalid_reasons, ())
+        self.assertFalse(trial.row()["clean_accuracy_gate_applied"])
 
     def test_clean_accuracy_gate_distinguishes_dirichlet_alphas(self):
         clean = _result(

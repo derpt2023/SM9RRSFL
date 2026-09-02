@@ -173,6 +173,8 @@ class TrialScore:
     all_runs_completed: bool
     nonfinite_updates: int
     result_count: int
+    clean_accuracy_gate_applied: bool
+    invalid_reasons: tuple[str, ...]
 
     def row(self) -> dict[str, Any]:
         return {
@@ -199,6 +201,8 @@ class TrialScore:
             "all_runs_completed": self.all_runs_completed,
             "nonfinite_updates": self.nonfinite_updates,
             "result_count": self.result_count,
+            "clean_accuracy_gate_applied": self.clean_accuracy_gate_applied,
+            "invalid_reasons": ",".join(self.invalid_reasons),
         }
 
 
@@ -752,22 +756,52 @@ def score_trial(
         )
     )
     worst_clean_accuracy_drop = 0.0
-    clean_accuracy_valid = True
+    clean_reference_complete = True
+    clean_accuracy_within_limit = True
     if clean_accuracy_reference is not None:
         clean_drops: list[float] = []
         for result in clean:
             reference = clean_accuracy_reference.get(_clean_scenario_key(result))
             if reference is None:
-                clean_accuracy_valid = False
+                clean_reference_complete = False
                 continue
             clean_drops.append(max(0.0, reference - float(result.final_accuracy)))
         if len(clean_drops) != len(clean):
-            clean_accuracy_valid = False
+            clean_reference_complete = False
         worst_clean_accuracy_drop = max(clean_drops, default=1.0)
-        clean_accuracy_valid = (
-            clean_accuracy_valid
-            and worst_clean_accuracy_drop <= max_clean_accuracy_drop + 1.0e-12
+        clean_accuracy_within_limit = (
+            worst_clean_accuracy_drop <= max_clean_accuracy_drop + 1.0e-12
         )
+    # This gate prevents a tunable defense from winning by sacrificing clean
+    # utility.  Krum/TAD/FedAvg have no candidate to choose: a poor clean result
+    # is itself a comparison result and must not abort the entire study.
+    clean_accuracy_gate_applied = method in TUNABLE_METHODS
+    clean_accuracy_valid = clean_reference_complete and (
+        clean_accuracy_within_limit or not clean_accuracy_gate_applied
+    )
+    invalid_reasons: list[str] = []
+    if minimum_round_completion_rate + 1.0e-12 < float(min_round_completion_rate):
+        invalid_reasons.append("round_completion_rate")
+    if nonfinite_updates > int(max_nonfinite_updates):
+        invalid_reasons.append("nonfinite_updates")
+    if not all(
+        bool(result.records)
+        and int(result.records[-1].round) == int(result.stopped_round)
+        for result in results
+    ):
+        invalid_reasons.append("record_continuity")
+    if not accuracy_metrics_present:
+        invalid_reasons.append("accuracy_metrics")
+    if not attack_metrics_present:
+        invalid_reasons.append("attack_metrics")
+    if not weight_metrics_present:
+        invalid_reasons.append("honest_weight_metrics")
+    if not early_mass_metrics_present:
+        invalid_reasons.append("early_malicious_weight_metrics")
+    if not clean_reference_complete:
+        invalid_reasons.append("matched_fedavg_clean_reference")
+    if clean_accuracy_gate_applied and not clean_accuracy_within_limit:
+        invalid_reasons.append("clean_accuracy_drop")
     valid = (
         integrity_valid
         and accuracy_metrics_present
@@ -804,6 +838,8 @@ def score_trial(
         all_runs_completed=all_runs_completed,
         nonfinite_updates=nonfinite_updates,
         result_count=len(results),
+        clean_accuracy_gate_applied=clean_accuracy_gate_applied,
+        invalid_reasons=tuple(invalid_reasons),
     )
 
 
@@ -1003,11 +1039,17 @@ def select_best_trials(trials: list[TrialScore]) -> dict[str, TrialScore]:
     for method in ALL_METHODS:
         method_trials = [trial for trial in trials if trial.method == method and trial.valid]
         if not method_trials:
+            rejected = [trial for trial in trials if trial.method == method]
+            details = "; ".join(
+                f"{trial.candidate_id}="
+                f"{','.join(trial.invalid_reasons) or 'unknown'}"
+                for trial in rejected
+            )
             raise FairTuningError(
                 f"no valid candidate remains for {method}; fix the shared attack/training "
                 "configuration or the method grid instead of selecting a run that "
                 "violates execution-integrity, metric-availability, or matched-FedAvg "
-                "clean-accuracy constraints"
+                f"clean-accuracy constraints. invalid_candidates: {details}"
             )
         selected[method] = max(
             method_trials,
@@ -1677,17 +1719,27 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
                 max_nonfinite_updates=spec.max_nonfinite_updates,
             )
             if candidate_id in spec.preinvalid_candidates:
-                trial = replace(trial, valid=False, score=float("-inf"))
+                trial = replace(
+                    trial,
+                    valid=False,
+                    score=float("-inf"),
+                    invalid_reasons=tuple(
+                        dict.fromkeys(
+                            (*trial.invalid_reasons, "ours_clean_calibration")
+                        )
+                    ),
+                )
             trial_scores.append(trial)
             print(
                 f"tuning_candidate_complete={candidate_id} valid={trial.valid} "
-                f"score={trial.score:.6f}",
+                f"score={trial.score:.6f} invalid_reasons="
+                f"{','.join(trial.invalid_reasons) or 'none'}",
                 flush=True,
             )
 
-    selected = select_best_trials(trial_scores)
     _write_csv(output_dir / "tuning_trials.csv", [trial.row() for trial in trial_scores])
     _write_csv(output_dir / "validation_results.csv", validation_rows)
+    selected = select_best_trials(trial_scores)
     best_payload = {
         "schema_version": TUNING_SCHEMA_VERSION,
         "dataset": args.dataset,

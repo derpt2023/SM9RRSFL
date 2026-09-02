@@ -224,7 +224,7 @@ Ours 离线校准也复用公共资源参数。`jobs=auto, device=auto` 时，cl
 3. 方案 B 中，Ours、VERT 和 AlignIns 必须具有完全相同的候选数 `trials_per_tunable_method`。Ours 写成 `method_spaces.sm9rrs="auto"`，候选由 clean shadow 和上述有界规则生成；此阶段只派生/修复干净候选，不提前运行攻击选参。Ours 的攻击候选选择被延后到与 VERT/AlignIns 完全相同的外层验证任务，因此三者共享候选预算、攻击比例、验证种子和场景。FedAvg、Krum 和当前 TAD 没有额外防御参数，各自只有一个空候选，但仍完整参加验证和最终主实验。
 4. 所有候选使用同一组 `validation_seeds` 和场景，最终主实验使用与之不重叠的 `final_seeds`。配置强制 `early_stop=false` 和 `eval_interval=1`，避免某个候选少跑轮次，并完整审计非有限更新。
 5. 所有方法统一执行 `calibration_min_round_completion_rate` 和 `calibration_max_nonfinite_updates`。缺失最终 ASR、提前终止或产生 NaN/Inf 的攻击运行不能被解释为“攻击失败”，而会使候选/留出折无效。
-6. 干净稳定性按相同数据划分、seed 和场景匹配 FedAvg；默认 `max_clean_accuracy_drop=0.05`，即候选最终干净准确率最多比对应 FedAvg 低 5 个百分点。`H_loss` 仍进入连续 Score，而不是另设一个会天然排斥 Krum 或裁剪方法的任意接纳率门槛。Ours 的永久误撤销属于不可逆机制，因此在其内部 clean shadow/闭环中继续执行更严格安全检查。
+6. 干净稳定性按相同数据划分、seed 和场景匹配 FedAvg；默认 `max_clean_accuracy_drop=0.05`，即**具有可选参数的 Ours、VERT、AlignIns 候选**最终干净准确率最多比对应 FedAvg 低 5 个百分点，防止候选靠牺牲干净效用入选。Krum、TAD、FedAvg 没有可供选择的防御候选，其干净准确率下降会完整记录到 `tuning_trials.csv`，但不会把这一性能结果误当成配置非法并中止整套实验；执行不完整、非有限更新或指标缺失仍会使任何方法无效。`H_loss` 进入连续 Score，而不是另设接纳率门槛。Ours 的永久误撤销属于不可逆机制，因此在其内部 clean shadow/闭环中继续执行更严格安全检查。
 7. `objective="auto"` 时，Score 权重通过无泄漏的留一攻击校准比例交叉验证统一学习；每项权重至少 0.05。三种可调防御共用同一组学习结果，不能为某一方法单独改权重。最终论文表格使用独立 `final_seeds` 的均值/标准差，不从正式比例或官方测试集反向选择候选。
 8. 参数选择阶段把“候选 × 验证种子 × 场景”展开为独立配置，复用主实验的资源规划：CUDA/MPS 使用线程队列和设备端 Torch 训练，多个 CUDA 设备自动轮转；NumPy/Torch CPU 使用多进程。进度条按实际配置数显示完成比例、已用时间和 ETA。最终阶段由 `tuning.final_jobs` 独立控制：示例为 `"auto"`，适合在多张同型号 GPU 上快速生成准确率/ASR 结果；若论文要报告严格单任务墙钟时间，应改为 `1`，避免并发资源和设备差异污染计时。
 
@@ -318,7 +318,7 @@ python -m sm9rrsfl.fair_tuning \
 
 调参目录会输出：
 
-- `tuning_trials.csv`：每个候选的统一验证分数、干净/鲁棒准确率、ASR、诚实权重损失、干净准确率下降、有效性与非有限更新数。
+- `tuning_trials.csv`：每个候选的统一验证分数、干净/鲁棒准确率、ASR、诚实权重损失、干净准确率下降、是否应用干净准确率候选门槛、有效性、`invalid_reasons` 与非有限更新数。该文件会在最终选取前写入，因此即使某种方法无有效候选，失败原因也不会只剩一条笼统终端报错。
 - `validation_results.csv`：所有候选、种子和场景的原始验证摘要。
 - `tuning_progress.json`：可随时读取的阶段进度，分别记录验证/最终复验的指纹、`completed/total/pending` 和状态；不再需要等整个验证阶段结束才知道 `x/总数`。
 - `best_parameters.json` 与 `tuning_manifest.json`：共享协议、数据隔离声明、候选预算和各方法入选参数。
