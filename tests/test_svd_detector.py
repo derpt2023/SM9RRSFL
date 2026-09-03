@@ -1,383 +1,182 @@
 import pickle
 import unittest
-from unittest.mock import patch
-
+from unittest import mock
+from dataclasses import replace
 import numpy as np
 
-from sm9rrsfl.svd_detector import LongitudinalSVDDetector, _projector_distance
+from sm9rrsfl.ours_policy import OursParameters, bounded_candidates
+from sm9rrsfl.svd_detector import LongitudinalSVDDetector, _fit_normal
 
 
-def _normal_update(round_id: int) -> np.ndarray:
-    """A stable top-two subspace with a linear per-round log-spectrum drift."""
+class NormalStateDetectorTest(unittest.TestCase):
+    def setUp(self):
+        self.x = np.random.default_rng(11).normal(size=1030)
+        self.detector = LongitudinalSVDDetector(
+            window_size=7, expected_update_size=1030, matrix_offset=0, matrix_shape=(100, 10))
 
-    matrix = np.diag(
-        [
-            np.exp(4.0 - 0.1 * round_id),
-            np.exp(3.0 - 0.1 * round_id),
-            np.exp(1.0 - 0.02 * round_id),
-        ]
-    )
-    return matrix.astype(np.float32).reshape(-1)
+    def warmup(self, tag="a"):
+        for r in range(1, 8):
+            d = self.detector.evaluate(tag, self.x, round_id=r)
+            self.assertFalse(d.would_flag)
+            self.assertTrue(self.detector.commit(tag, admit_history=True))
 
+    def test_identical_clean_updates_do_not_force_two_clusters(self):
+        self.warmup()
+        for r in range(8, 15):
+            d = self.detector.evaluate("a", self.x, round_id=r)
+            self.assertTrue(d.accepted)
+            self.assertFalse(d.would_flag)
+            self.assertEqual(d.normal_cluster_count, 1)
+            self.detector.commit("a", admit_history=True)
 
-def _attack_update(scale: float = 1.0) -> np.ndarray:
-    """A large spectrum shift whose top-two subspace is span(e2, e3)."""
+    def test_sign_flip_is_visible_despite_identical_svd(self):
+        self.warmup()
+        d = self.detector.evaluate("a", -self.x, round_id=8)
+        self.assertFalse(d.accepted)
+        self.assertTrue(d.count_increment)
+        self.assertTrue(d.immediate_revocation)
+        self.assertGreater(d.signed_score, 4)
+        self.assertGreater(d.class_score, 4)
+        self.detector.commit("a", admit_history=False)
 
-    attack_basis = np.asarray(
-        [
-            [0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ],
-        dtype=np.float32,
-    )
-    matrix = attack_basis @ np.diag([np.exp(6.0), np.exp(5.0), np.exp(1.0)])
-    return (scale * matrix).astype(np.float32).reshape(-1)
+    def test_mild_deviation_counts_without_immediate_revocation(self):
+        self.warmup()
+        with mock.patch.object(self.detector, "_scores", return_value=np.array([2.5, 0., 0.])):
+            d = self.detector.evaluate("a", self.x, round_id=8)
+        self.assertTrue(d.accepted)
+        self.assertTrue(d.would_flag)
+        self.assertTrue(d.count_increment)
+        self.assertFalse(d.immediate_revocation)
+        self.assertFalse(d.history_eligible)
 
+    def test_severe_spectral_only_deviation_no_longer_requires_corroboration(self):
+        self.warmup()
+        with mock.patch.object(self.detector, "_scores", return_value=np.array([5., 0., 0.])):
+            d = self.detector.evaluate("a", self.x, round_id=8)
+        self.assertFalse(d.accepted)
+        self.assertTrue(d.immediate_revocation)
+        self.assertTrue(d.count_increment)
+        self.assertEqual(d.signed_score, 0.)
+        self.assertEqual(d.class_score, 0.)
 
-def _detector(*, decision_rule: str = "any", window_size: int = 5):
-    return LongitudinalSVDDetector(
-        window_size=window_size,
-        z_threshold=3.0,
-        subspace_dim=2,
-        gap_threshold=0.1,
-        adjacent_threshold=3.0,
-        anchor_threshold=3.0,
-        drift_memory=1.0,
-        drift_allowance=0.1,
-        drift_threshold=3.0,
-        decision_rule=decision_rule,
-        matrix_offset=0,
-        matrix_shape=(3, 3),
-    )
+    def test_accumulated_drift_counts_as_suspicious_not_immediate(self):
+        self.warmup()
+        self.detector._states["a"].drift = 10.
+        d = self.detector.evaluate("a", self.x, round_id=8)
+        self.assertTrue(d.would_flag)
+        self.assertTrue(d.count_increment)
+        self.assertTrue(d.accepted)
+        self.assertFalse(d.immediate_revocation)
 
+    def test_warning_and_reject_boundaries_use_strict_exceedance(self):
+        for score, flagged in ((2., False), (4., True)):
+            with self.subTest(score=score):
+                self.setUp()
+                self.warmup()
+                with mock.patch.object(self.detector, "_scores", return_value=np.array([score, 0., 0.])):
+                    d = self.detector.evaluate("a", self.x, round_id=8)
+                self.assertEqual(d.count_increment, flagged)
+                self.assertFalse(d.immediate_revocation)
+                self.assertTrue(d.accepted)
 
-def _warm_with_clean_updates(detector, *, through_round: int = 6) -> None:
-    for round_id in range(1, through_round + 1):
-        result = detector.evaluate(
-            "tag-1",
-            _normal_update(round_id),
-            round_id=round_id,
-        )
-        if not result.accepted:
-            raise AssertionError(f"normal round {round_id} was rejected: {result}")
+    def test_all_kmeans_clusters_are_normal_states(self):
+        model = _fit_normal([[-2., 0.]] * 4 + [[2., 0.]] * 4, 2)
+        self.assertEqual(len(model.centers), 2)
+        self.assertTrue(np.isfinite(model.radii).all())
 
+    def test_singleton_mode_falls_back_to_one(self):
+        model = _fit_normal([[0., 0.]] * 6 + [[100., 0.]], 2)
+        self.assertEqual(len(model.centers), 1)
 
-def _state_snapshot(detector):
-    state = detector._states["tag-1"]
-    trusted = [
-        (
-            item.round_id,
-            item.feature.log_spectrum.copy(),
-            item.feature.basis.copy(),
-            item.feature.singular_values.copy(),
-            item.feature.spectral_gap,
-        )
-        for item in state.trusted_history
-    ]
-    distances = {key: tuple(values) for key, values in state.normal_distances.items()}
-    gram = None if state.trusted_gram is None else state.trusted_gram.copy()
-    return trusted, distances, gram
+    def test_evaluate_cannot_admit_history_and_commit_is_required(self):
+        self.warmup()
+        before = pickle.dumps(self.detector._states["a"].history)
+        d = self.detector.evaluate("a", self.x, round_id=8)
+        self.assertFalse(d.history_eligible)  # first of three confirmations
+        self.assertEqual(before, pickle.dumps(self.detector._states["a"].history))
+        with self.assertRaisesRegex(RuntimeError, "commit"):
+            self.detector.evaluate("a", self.x, round_id=9)
+        self.assertFalse(self.detector.commit("a", admit_history=False))
 
+    def test_repeated_attacks_never_become_normal(self):
+        self.warmup()
+        anchor = pickle.dumps(self.detector._states["a"].anchor)
+        history = pickle.dumps(self.detector._states["a"].history)
+        for r in range(8, 25):
+            d = self.detector.evaluate("a", -self.x, round_id=r)
+            self.assertTrue(d.would_flag)
+            self.assertFalse(self.detector.commit("a", admit_history=True))
+        self.assertEqual(anchor, pickle.dumps(self.detector._states["a"].anchor))
+        self.assertEqual(history, pickle.dumps(self.detector._states["a"].history))
 
-class SVDDetectorTest(unittest.TestCase):
-    def test_default_decision_rule_matches_v3_or_formula(self):
-        detector = LongitudinalSVDDetector(
-            matrix_offset=0,
-            matrix_shape=(3, 3),
-        )
-        self.assertEqual(detector.decision_rule, "any")
+    def test_three_normal_confirmations_eventually_admit_history(self):
+        self.warmup()
+        admitted = []
+        for r in range(8, 11):
+            self.detector.evaluate("a", self.x, round_id=r)
+            admitted.append(self.detector.commit("a", admit_history=True))
+        self.assertEqual(admitted, [False, False, True])
 
-    def assertTrustedSnapshotEqual(self, before, after):
-        before_trusted, before_distances, before_gram = before
-        after_trusted, after_distances, after_gram = after
-        self.assertEqual(len(before_trusted), len(after_trusted))
-        for expected, actual in zip(before_trusted, after_trusted):
-            self.assertEqual(expected[0], actual[0])
-            np.testing.assert_array_equal(expected[1], actual[1])
-            np.testing.assert_array_equal(expected[2], actual[2])
-            np.testing.assert_array_equal(expected[3], actual[3])
-            self.assertEqual(expected[4], actual[4])
-        self.assertEqual(before_distances, after_distances)
-        if before_gram is None or after_gram is None:
-            self.assertIs(before_gram, after_gram)
-        else:
-            np.testing.assert_array_equal(before_gram, after_gram)
+    def test_learning_rate_decay_is_not_itself_novelty(self):
+        self.warmup()
+        d = self.detector.evaluate("a", self.x * .01, round_id=8, learning_rate=.01)
+        self.assertFalse(d.would_flag)
 
-    def test_linear_normal_drift_is_accepted_and_refreshes_trusted_window(self):
-        detector = _detector()
-        results = []
-        for round_id in range(1, 9):
-            results.append(
-                detector.evaluate(
-                    "tag-1",
-                    _normal_update(round_id),
-                    round_id=round_id,
-                )
-            )
+    def test_norm_clip_uses_only_clean_prefix(self):
+        self.warmup()
+        d = self.detector.evaluate("a", self.x * 100, round_id=8)
+        self.assertAlmostEqual(d.clip_factor, .02)
+        self.detector.commit("a", admit_history=True)
+        self.assertAlmostEqual(self.detector._states["a"].norm_limit, np.linalg.norm(self.x))
 
-        self.assertEqual(results[0].reason, "initial_observation")
-        self.assertTrue(all(item.accepted for item in results))
-        self.assertTrue(all(np.isfinite(item.adjacent_score) for item in results))
-        self.assertTrue(all(np.isfinite(item.anchor_score) for item in results))
-        self.assertTrue(all(not item.count_increment for item in results))
-        self.assertLess(results[-1].cumulative_drift, detector.drift_threshold)
+    def test_clipped_but_accepted_updates_cannot_enter_trusted_history(self):
+        self.warmup()
+        before = pickle.dumps(self.detector._states["a"].history)
+        for r in range(8, 13):
+            d = self.detector.evaluate("a", self.x * 2.1, round_id=r)
+            self.assertTrue(d.accepted)
+            self.assertLess(d.clip_factor, 1.)
+            self.assertFalse(d.history_eligible)
+            self.assertFalse(self.detector.commit("a", admit_history=True))
+        self.assertEqual(before, pickle.dumps(self.detector._states["a"].history))
 
-        state = detector._states["tag-1"]
-        self.assertEqual(
-            [item.round_id for item in state.trusted_history],
-            [4, 5, 6, 7, 8],
-        )
-        self.assertEqual(results[-1].trusted_history_size, detector.window_size)
+    def test_late_tag_cannot_bootstrap_on_attacks(self):
+        d = self.detector.evaluate("late", self.x, round_id=8)
+        self.assertFalse(d.accepted)
+        self.assertFalse(d.count_increment)
+        self.assertFalse(d.immediate_revocation)
+        self.assertFalse(self.detector.commit("late", admit_history=True))
 
-    def test_first_attack_is_rejected_without_polluting_trusted_history(self):
-        detector = _detector(decision_rule="any")
-        _warm_with_clean_updates(detector)
-        before = _state_snapshot(detector)
+    def test_round_order_shapes_and_nonfinite_rejected(self):
+        self.warmup()
+        for vector in (np.ones(12), np.full(1030, np.nan), np.ones((103, 10))):
+            with self.assertRaises(ValueError):
+                self.detector.evaluate("a", vector, round_id=8)
+        with self.assertRaises(ValueError):
+            self.detector.evaluate("a", self.x, round_id=7)
 
-        result = detector.evaluate("tag-1", _attack_update(), round_id=7)
+    def test_checkpoint_restores_exact_detection_state(self):
+        self.warmup()
+        restored = pickle.loads(pickle.dumps(self.detector))
+        self.assertEqual(self.detector.evaluate("a", -self.x, round_id=8),
+                         restored.evaluate("a", -self.x, round_id=8))
 
-        self.assertFalse(result.accepted)
-        self.assertEqual(result.reason, "composite_threshold_any")
-        self.assertTrue(result.count_increment)
-        self.assertTrue(result.adjacent_exceeded)
-        self.assertTrue(result.anchor_exceeded)
-        self.assertTrue(result.drift_exceeded)
-        self.assertTrustedSnapshotEqual(before, _state_snapshot(detector))
-        state = detector._states["tag-1"]
-        self.assertEqual(state.last_observed.round_id, 7)
-        np.testing.assert_allclose(
-            state.last_observed.feature.log_spectrum,
-            np.asarray([6.0, 5.0]),
-            atol=1e-6,
-        )
+    def test_compact_state_and_forget(self):
+        self.warmup()
+        before = self.detector.memory_bytes()
+        self.assertLess(before, 100000)
+        self.detector.forget("a")
+        self.assertLess(self.detector.memory_bytes(), before)
 
-    def test_shadow_records_would_flag_and_keeps_extreme_point_trusted(self):
-        detector = _detector(decision_rule="any")
-        detector.enforce = False
-        _warm_with_clean_updates(detector)
-        before_history = len(detector._states["tag-1"].trusted_history)
-
-        result = detector.evaluate("tag-1", _attack_update(), round_id=7)
-
-        self.assertTrue(result.would_flag)
-        self.assertTrue(result.accepted)
-        self.assertFalse(result.count_increment)
-        self.assertEqual(result.reason, "shadow_would_flag")
-        self.assertEqual(
-            len(detector._states["tag-1"].trusted_history),
-            before_history,
-        )
-        self.assertEqual(
-            detector._states["tag-1"].trusted_history[-1].round_id,
-            7,
-        )
-
-    def test_any_rule_rejects_similar_attack_to_attack_via_trusted_anchor(self):
-        detector = _detector(decision_rule="any")
-        _warm_with_clean_updates(detector)
-        trusted_before = _state_snapshot(detector)
-
-        first_attack = detector.evaluate("tag-1", _attack_update(), round_id=7)
-        second_attack = detector.evaluate(
-            "tag-1",
-            _attack_update(scale=1.001),
-            round_id=8,
-        )
-
-        self.assertFalse(first_attack.accepted)
-        self.assertFalse(second_attack.accepted)
-        self.assertFalse(second_attack.adjacent_exceeded)
-        self.assertAlmostEqual(second_attack.adjacent_score, 0.0, places=7)
-        self.assertTrue(second_attack.anchor_exceeded)
-        self.assertTrue(second_attack.drift_exceeded)
-        self.assertGreater(second_attack.anchor_score, detector.anchor_threshold)
-        self.assertTrue(second_attack.count_increment)
-        self.assertTrustedSnapshotEqual(trusted_before, _state_snapshot(detector))
-        self.assertEqual(detector._states["tag-1"].last_observed.round_id, 8)
-
-    def test_and_rule_is_not_supported(self):
-        with self.assertRaisesRegex(ValueError, "v3 OR formula"):
-            _detector(decision_rule="all")
-
-    def test_trusted_trend_uses_real_round_gaps(self):
-        detector = _detector(window_size=3)
-        for round_id in (1, 2, 5):
-            result = detector.evaluate(
-                "tag-1",
-                _normal_update(round_id),
-                round_id=round_id,
-            )
-            self.assertTrue(result.accepted)
-
-        predicted, _ = detector._trusted_reference(
-            detector._states["tag-1"],
-            8,
-        )
-        np.testing.assert_allclose(predicted, [3.2, 2.2], atol=2e-6)
-
-        result = detector.evaluate("tag-1", _normal_update(8), round_id=8)
-        self.assertTrue(result.accepted)
-        self.assertLess(result.spectrum_anchor_distance, 2e-6)
-
-    def test_pickle_round_trip_preserves_dual_reference_state(self):
-        detector = _detector(decision_rule="any")
-        _warm_with_clean_updates(detector)
-        detector.evaluate("tag-1", _attack_update(), round_id=7)
-        restored = pickle.loads(pickle.dumps(detector))
-
-        expected = detector.evaluate(
-            "tag-1",
-            _attack_update(scale=1.001),
-            round_id=8,
-        )
-        actual = restored.evaluate(
-            "tag-1",
-            _attack_update(scale=1.001),
-            round_id=8,
-        )
-
-        self.assertEqual(expected, actual)
-        self.assertTrustedSnapshotEqual(
-            _state_snapshot(detector),
-            _state_snapshot(restored),
-        )
-        expected_state = detector._states["tag-1"]
-        actual_state = restored._states["tag-1"]
-        self.assertEqual(expected_state.last_observed.round_id, actual_state.last_observed.round_id)
-        self.assertEqual(expected_state.observed_count, actual_state.observed_count)
-        self.assertEqual(expected_state.cumulative_drift, actual_state.cumulative_drift)
-
-    def test_projector_distance_ignores_sign_and_top_two_basis_rotation(self):
-        basis = np.eye(3, dtype=np.float64)[:, :2]
-        sign_flipped = basis @ np.diag([-1.0, 1.0])
-        angle = np.pi / 4.0
-        rotation = np.asarray(
-            [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]],
-            dtype=np.float64,
-        )
-        rotated = basis @ rotation
-
-        self.assertAlmostEqual(_projector_distance(basis, sign_flipped, 2), 0.0)
-        self.assertAlmostEqual(_projector_distance(basis, rotated, 2), 0.0, places=6)
-
-    def test_small_q_q_plus_one_gap_downweights_direction_evidence(self):
-        permutation = np.asarray(
-            [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
-            dtype=np.float32,
-        )
-
-        def scored_transition(values):
-            detector = _detector(window_size=2)
-            baseline = np.diag(values).astype(np.float32).reshape(-1)
-            changed = (permutation @ np.diag(values)).astype(np.float32).reshape(-1)
-            detector.evaluate("tag-1", baseline, round_id=1)
-            detector.evaluate("tag-1", baseline, round_id=2)
-            return detector.evaluate("tag-1", changed, round_id=3)
-
-        reliable = scored_transition([5.0, 3.0, 1.0])
-        near_degenerate = scored_transition([5.0, 3.0, 2.999])
-
-        self.assertAlmostEqual(reliable.direction_reliability, 1.0)
-        self.assertLess(near_degenerate.direction_reliability, 0.01)
-        self.assertAlmostEqual(
-            near_degenerate.z_subspace_adjacent,
-            reliable.z_subspace_adjacent,
-            places=4,
-        )
-        self.assertLess(
-            near_degenerate.adjacent_score,
-            reliable.adjacent_score * 0.01,
-        )
-
-    def test_default_matrix_uses_complete_update_and_zero_padding(self):
-        detector = LongitudinalSVDDetector(num_classes=3, subspace_dim=2)
-        update = np.arange(1, 9, dtype=np.float64)
-        fake_values = np.asarray([3.0, 2.0, 1.0], dtype=np.float64)
-        fake_basis = np.eye(3, dtype=np.float32)[:, :2]
-
-        with patch(
-            "sm9rrsfl.torch_backend.numpy_top_singular_subspace",
-            return_value=(fake_values, fake_basis),
-        ) as top_feature:
-            detector._extract(update)
-
-        matrix = top_feature.call_args.args[0]
-        self.assertEqual(top_feature.call_args.kwargs["rank"], 2)
-        self.assertEqual(matrix.dtype, np.float32)
-        self.assertEqual(matrix.shape, (3, 3))
-        np.testing.assert_array_equal(matrix.reshape(-1)[:8], update.astype(np.float32))
-        self.assertEqual(float(matrix[-1, -1]), 0.0)
-
-    def test_explicit_matrix_slice_remains_available_for_compatibility(self):
-        detector = LongitudinalSVDDetector(
-            num_classes=4,
-            subspace_dim=2,
-            matrix_offset=2,
-            matrix_shape=(3, 3),
-        )
-        update = np.arange(12, dtype=np.float32)
-        fake_values = np.asarray([3.0, 2.0, 1.0], dtype=np.float64)
-        fake_basis = np.eye(3, dtype=np.float32)[:, :2]
-
-        with patch(
-            "sm9rrsfl.torch_backend.numpy_top_singular_subspace",
-            return_value=(fake_values, fake_basis),
-        ) as top_feature:
-            detector._extract(update)
-
-        matrix = top_feature.call_args.args[0]
-        np.testing.assert_array_equal(matrix, update[2:11].reshape(3, 3))
-
-    def test_default_matrix_requires_finite_nonempty_one_dimensional_update(self):
-        detector = LongitudinalSVDDetector()
-        with self.assertRaisesRegex(ValueError, "one-dimensional"):
-            detector.evaluate("tag-1", np.zeros((2, 2), dtype=np.float32))
-        with self.assertRaisesRegex(ValueError, "must not be empty"):
-            detector.evaluate("tag-1", np.asarray([], dtype=np.float32))
-        with self.assertRaisesRegex(ValueError, "NaN or infinity"):
-            detector.evaluate("tag-1", np.full(20, np.nan, dtype=np.float32))
-
-    def test_registered_model_size_is_enforced(self):
-        detector = LongitudinalSVDDetector(expected_update_size=20)
-        with self.assertRaisesRegex(ValueError, "registered model"):
-            detector.evaluate("tag-1", np.zeros(30, dtype=np.float32))
-
-    def test_round_id_must_increase_for_each_tag(self):
-        detector = _detector()
-        detector.evaluate("tag-1", _normal_update(1), round_id=1)
-        with self.assertRaisesRegex(ValueError, "must increase"):
-            detector.evaluate("tag-1", _normal_update(1), round_id=1)
-
-    def test_forget_releases_revoked_tag_state(self):
-        detector = _detector()
-        detector.evaluate("tag-1", _normal_update(1), round_id=1)
-
-        self.assertGreater(detector.estimated_state_bytes(), 0)
-        self.assertTrue(detector.forget("tag-1"))
-        self.assertEqual(detector.estimated_state_bytes(), 0)
-        self.assertNotIn("tag-1", detector._states)
-        self.assertFalse(detector.forget("tag-1"))
-
-    def test_detector_rejects_degenerate_configuration(self):
-        with self.assertRaisesRegex(ValueError, "at least 2"):
-            LongitudinalSVDDetector(window_size=1)
-        with self.assertRaisesRegex(ValueError, "finite and positive"):
-            LongitudinalSVDDetector(z_threshold=float("nan"))
-        with self.assertRaisesRegex(ValueError, "finite and positive"):
-            LongitudinalSVDDetector(eps=0.0)
-        with self.assertRaisesRegex(ValueError, "v3 OR formula"):
-            LongitudinalSVDDetector(decision_rule="unknown")
-        with self.assertRaisesRegex(ValueError, r"q\+1"):
-            LongitudinalSVDDetector(subspace_dim=3, matrix_shape=(2, 3))
-        with self.assertRaisesRegex(ValueError, r"q\+1"):
-            LongitudinalSVDDetector(subspace_dim=3, num_classes=3)
-        LongitudinalSVDDetector(
-            subspace_dim=3,
-            num_classes=3,
-            matrix_shape=(4, 4),
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_candidates_are_bounded_unique_and_cover_important_axes(self):
+        candidates = bounded_candidates(12)
+        self.assertEqual(len({tuple(c.items()) for c in candidates}), 12)
+        for name in candidates[0]:
+            self.assertGreater(len({c[name] for c in candidates}), 1, name)
+        for p in candidates:
+            OursParameters(**p).validate()
+        self.assertEqual(len({tuple(c.items()) for c in bounded_candidates(36)}), 36)
+        with self.assertRaises(ValueError):
+            bounded_candidates(37)
+        with self.assertRaises(ValueError):
+            replace(OursParameters(), detector_reject_threshold=1.).validate()

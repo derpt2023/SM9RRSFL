@@ -55,7 +55,7 @@ from sm9rrsfl.fl import (
     malicious_client_count,
     run_experiment,
 )
-from sm9rrsfl.svd_detector import LongitudinalSVDDetector
+from sm9rrsfl.svd_detector import DetectionResult, LongitudinalSVDDetector
 
 
 class ExperimentOutputDirTest(unittest.TestCase):
@@ -120,67 +120,16 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
     def test_one_applied_auto_parameter_set_is_frozen_across_main_grid(self):
         from types import SimpleNamespace
-
-        from sm9rrsfl.ours_calibration import OursParameters, apply_ours_parameters
-
-        args = parse_args(
-            [
-                "--methods",
-                "sm9rrs",
-                "fedavg",
-                "--ratios",
-                "0",
-                "0.2",
-                "--partitions",
-                "iid",
-                "dirichlet",
-                "--ours-parameter-mode",
-                "auto",
-                "--no-early-stop",
-            ]
-        )
-        selected = OursParameters(
-            q=1,
-            g0=0.23,
-            theta_adj=8.0,
-            theta_anc=9.0,
-            beta=0.8,
-            kappa=1.5,
-            h=12.0,
-            C_tol=5,
-            C_max=5,
-            penalty_factor=0.05,
-            recovery_factor=4.0,
-        )
-        apply_ours_parameters(
-            args,
-            SimpleNamespace(selected_parameters=selected),
-        )
-        ours = [
-            config
-            for config in build_experiment_configs(args)
-            if config.method == "sm9rrs"
-        ]
-
-        self.assertEqual(len(ours), 4)
-        frozen = {
-            (
-                item.detector_subspace_dim,
-                item.detector_gap_threshold,
-                item.detector_adjacent_threshold,
-                item.detector_anchor_threshold,
-                item.detector_drift_memory,
-                item.detector_drift_allowance,
-                item.detector_drift_threshold,
-                item.suspicion_remove_after,
-                item.suspicion_count_max,
-                item.suspicion_penalty_factor,
-                item.suspicion_recovery_factor,
-            )
-            for item in ours
-        }
-        self.assertEqual(len(frozen), 1)
-        self.assertTrue(all(item.detector_enforce for item in ours))
+        from sm9rrsfl.ours_policy import OursParameters
+        from sm9rrsfl.ours_calibration import apply_ours_parameters
+        args = parse_args(["--methods", "sm9rrs", "--ratios", "0", ".2",
+                           "--partitions", "iid", "dirichlet", "--ours-parameter-mode",
+                           "auto", "--no-early-stop"])
+        selected = OursParameters(detector_subspace_dim=1, suspicion_remove_after=5)
+        apply_ours_parameters(args, SimpleNamespace(status="frozen", selected_parameters=selected))
+        configs = build_experiment_configs(args)
+        self.assertEqual(len(configs), 4)
+        self.assertTrue(all(OursParameters.from_object(c) == selected for c in configs))
 
     def test_matching_checkpoint_prompts_for_resume_or_restart(self):
         dataset = make_synthetic_mnist_like(train_samples=40, test_samples=10, seed=18)
@@ -732,80 +681,50 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(args.sm9_workers, 3)
 
     def test_paper_k_and_c_tol_cli_names_map_to_internal_config_fields(self):
-        args = parse_args(
-            [
-                "--K",
-                "10",
-                "--detector-subspace-dim",
-                "2",
-                "--detector-gap-threshold",
-                "0.15",
-                "--detector-adjacent-threshold",
-                "2.5",
-                "--detector-anchor-threshold",
-                "3.5",
-                "--detector-drift-memory",
-                "0.8",
-                "--detector-drift-allowance",
-                "0.75",
-                "--detector-drift-threshold",
-                "4.5",
-                "--detector-decision-rule",
-                "any",
-                "--C_tol",
-                "6",
-                "--C_max",
-                "8",
-            ]
-        )
+        args = parse_args(["--K", "7", "--C_tol", "5", "--detector-normal-clusters", "2",
+                           "--detector-distance-threshold", "2.5", "--detector-reject-threshold", "5"])
         config = build_experiment_configs(args)[0]
+        self.assertEqual(config.detector_window, 7)
+        self.assertEqual(config.suspicion_remove_after, 5)
+        self.assertEqual(config.detector_normal_clusters, 2)
+        self.assertEqual(config.detector_reject_threshold, 5)
 
-        self.assertEqual(args.detector_window, 10)
-        self.assertEqual(args.suspicion_remove_after, 6)
-        self.assertEqual(config.detector_window, 10)
-        self.assertEqual(config.detector_subspace_dim, 2)
-        self.assertAlmostEqual(config.detector_gap_threshold, 0.15)
-        self.assertAlmostEqual(config.detector_adjacent_threshold, 2.5)
-        self.assertAlmostEqual(config.detector_anchor_threshold, 3.5)
-        self.assertAlmostEqual(config.detector_drift_memory, 0.8)
-        self.assertAlmostEqual(config.detector_drift_allowance, 0.75)
-        self.assertAlmostEqual(config.detector_drift_threshold, 4.5)
-        self.assertEqual(config.detector_decision_rule, "any")
-        self.assertEqual(config.suspicion_remove_after, 6)
-        self.assertEqual(config.suspicion_count_max, 8)
+    def test_retired_detector_options_are_rejected(self):
+        for option in ("--z-threshold", "--detector-gap-threshold", "--detector-decision-rule",
+                       "--detector-adjacent-threshold", "--detector-anchor-threshold", "--C_max"):
+            with self.subTest(option=option), mock.patch("sys.stderr", new=io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parse_args([option, "3"])
 
-        legacy = parse_args(
-            ["--detector-window", "8", "--suspicion-remove-after", "5"]
-        )
-        self.assertEqual(legacy.detector_window, 8)
-        self.assertEqual(legacy.suspicion_remove_after, 5)
-        self.assertEqual(legacy.detector_decision_rule, "any")
-        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
-            parse_args(["--detector-decision-rule", "all"])
+    def test_checkpoint_schema_is_v15_for_aggressive_revocation(self):
+        self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 15)
 
-        lowercase = parse_args(["--k", "7", "--c-tol", "4"])
-        self.assertEqual(lowercase.detector_window, 7)
-        self.assertEqual(lowercase.suspicion_remove_after, 4)
-
-    def test_legacy_z_threshold_sets_both_v3_thresholds_and_cannot_be_mixed(self):
-        args = parse_args(["--z-threshold", "2.75", "--C_tol", "5"])
-        config = build_experiment_configs(args)[0]
-
-        self.assertAlmostEqual(config.detector_adjacent_threshold, 2.75)
-        self.assertAlmostEqual(config.detector_anchor_threshold, 2.75)
-        self.assertEqual(config.suspicion_count_max, 5)
-
-        for option in (
-            "--detector-adjacent-threshold",
-            "--detector-anchor-threshold",
-        ):
-            with self.subTest(option=option):
-                with mock.patch("sys.stderr", new=io.StringIO()):
-                    with self.assertRaises(SystemExit):
-                        parse_args(["--z-threshold", "3", option, "3"])
-
-    def test_checkpoint_schema_is_v13_for_weight_metric_state(self):
-        self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 13)
+    def test_failed_revocation_forces_durable_checkpoint_between_periodic_saves(self):
+        from sm9rrsfl import fl as f
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=129)
+        config = ExperimentConfig(num_clients=1, malicious_ratio=0., rounds=2,
+                                  eval_interval=2, checkpoint_interval=10, suspicion_remove_after=5,
+                                  crypto_mode="simulated", early_stop=False)
+        decision = DetectionResult(False, "strong_novelty", would_flag=True,
+                                   count_increment=True, immediate_revocation=True, novelty_score=8.)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / ".checkpoints"
+            with mock.patch.object(f.LongitudinalSVDDetector, "evaluate", return_value=decision), \
+                 mock.patch.object(f.LongitudinalSVDDetector, "commit", return_value=False), \
+                 mock.patch.object(f.ASVerifier, "verify_trace_result", return_value=False), \
+                 self.assertRaisesRegex(RuntimeError, "trace remains pending"):
+                run_measured_experiment(dataset, config, checkpoint_dir=directory,
+                                        run_fingerprint="pending-evidence")
+            state, _, _ = _load_round_checkpoint(_checkpoint_path(directory, config), config,
+                                                 "pending-evidence")
+            self.assertEqual(state["completed_round"], 1)
+            self.assertEqual(len(state["crypto_state"].pending_audits), 1)
+            self.assertEqual(len(state["weight_manager"].pending_trace), 1)
+            resumed = run_measured_experiment(dataset, config, checkpoint_dir=directory,
+                                              run_fingerprint="pending-evidence")
+            self.assertEqual(resumed.stopped_round, 1)
+            self.assertEqual(resumed.records[-1].blacklisted_clients, 1)
+            self.assertTrue(resumed.diagnostics[0].revoked)
 
     def test_checkpoint_resume_allows_runtime_only_device_and_worker_changes(self):
         original = ExperimentConfig(
@@ -834,7 +753,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertEqual(runtime, 3.0)
         self.assertEqual(peak, 4.0)
 
-    def test_v12_binary_checkpoints_are_not_loaded_as_weight_metric_state(self):
+    def test_v14_binary_checkpoints_cannot_restore_conservative_revocation(self):
         config = ExperimentConfig(method="fedavg")
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -844,7 +763,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
             with checkpoint_path.open("wb") as handle:
                 pickle.dump(
                     {
-                        "schema_version": 12,
+                        "schema_version": 14,
                         "run_fingerprint": "v3-test",
                         "config": asdict(config),
                         "state": {"completed_round": 1},
@@ -852,7 +771,7 @@ class ExperimentOutputDirTest(unittest.TestCase):
                     handle,
                 )
             with (output_dir / ".completed_results.pickle").open("wb") as handle:
-                pickle.dump({"schema_version": 12, "results": []}, handle)
+                pickle.dump({"schema_version": 14, "results": []}, handle)
 
             state, runtime, peak = _load_round_checkpoint(
                 checkpoint_path,
@@ -1008,7 +927,6 @@ class ExperimentOutputDirTest(unittest.TestCase):
         detector = LongitudinalSVDDetector(
             window_size=3,
             num_classes=3,
-            subspace_dim=2,
         )
         for round_id in range(1, 4):
             detector.evaluate(
@@ -1016,10 +934,11 @@ class ExperimentOutputDirTest(unittest.TestCase):
                 (np.eye(3, dtype=np.float32) * round_id).reshape(-1),
                 round_id=round_id,
             )
+            detector.commit("tag", admit_history=True)
 
         estimate = _estimated_checkpoint_write_bytes({"detector": detector})
 
-        minimum = detector.estimated_state_bytes() + 256 * 1024**2
+        minimum = detector.memory_bytes() + 256 * 1024**2
         self.assertGreaterEqual(estimate, int(minimum * 1.1))
 
     def test_checkpoint_space_estimate_does_not_walk_foreign_object_graphs(self):
@@ -1073,14 +992,14 @@ class ExperimentOutputDirTest(unittest.TestCase):
         host_mb = _estimated_parallel_worker_memory_mb(dataset, [config])
         cuda_mb = _estimated_cuda_worker_memory_mb(dataset, [config])
 
-        self.assertGreater(host_mb, cuda_mb + 1024.0)
-        self.assertEqual(_effective_checkpoint_interval(dataset, config), 10)
+        self.assertLess(host_mb, cuda_mb + 256.0)
+        self.assertEqual(_effective_checkpoint_interval(dataset, config), 1)
         self.assertEqual(
             _effective_checkpoint_interval(
                 dataset,
                 replace(config, num_clients=200),
             ),
-            25,
+            1,
         )
         self.assertEqual(
             _effective_checkpoint_interval(
@@ -1228,59 +1147,17 @@ class ExperimentOutputDirTest(unittest.TestCase):
         self.assertAlmostEqual(restored[0].records[0].malicious_weight_mass, 0.125)
         self.assertGreaterEqual(restored[0].stage_timings.training_seconds, 0.0)
 
-    def test_legacy_summary_uses_z_threshold_and_c_tol_for_v3_fallbacks(self):
+    def test_normal_state_parameters_roundtrip_csv(self):
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=73)
-        result = run_experiment(
-            dataset,
-            ExperimentConfig(
-                method="fedavg",
-                num_clients=2,
-                rounds=1,
-                z_threshold=2.75,
-                suspicion_remove_after=4,
-                early_stop=False,
-                seed=73,
-            ),
-        )
-        v3_only_fields = {
-            "detector_subspace_dim",
-            "detector_gap_threshold",
-            "detector_adjacent_threshold",
-            "detector_anchor_threshold",
-            "detector_drift_memory",
-            "detector_drift_allowance",
-            "detector_drift_threshold",
-            "detector_decision_rule",
-            "suspicion_count_max",
-        }
+        config = ExperimentConfig(method="fedavg", num_clients=2, rounds=1, early_stop=False,
+                                  detector_normal_clusters=3, detector_weight_cap=1.5,
+                                  suspicion_remove_after=5)
+        result = run_experiment(dataset, config)
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             write_result_files(output_dir, [result])
-            summary_path = output_dir / "summary.csv"
-            with summary_path.open(newline="", encoding="utf-8") as handle:
-                current_rows = list(csv.DictReader(handle))
-            legacy_rows = [
-                {key: value for key, value in row.items() if key not in v3_only_fields}
-                for row in current_rows
-            ]
-            with summary_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=list(legacy_rows[0]))
-                writer.writeheader()
-                writer.writerows(legacy_rows)
-
-            restored = read_results(summary_path, output_dir / "rounds.csv")
-
-        self.assertEqual(len(restored), 1)
-        config = restored[0].config
-        self.assertEqual(config.detector_subspace_dim, 2)
-        self.assertAlmostEqual(config.detector_gap_threshold, 0.1)
-        self.assertAlmostEqual(config.detector_adjacent_threshold, 2.75)
-        self.assertAlmostEqual(config.detector_anchor_threshold, 2.75)
-        self.assertAlmostEqual(config.detector_drift_memory, 0.9)
-        self.assertAlmostEqual(config.detector_drift_allowance, 1.0)
-        self.assertAlmostEqual(config.detector_drift_threshold, 5.0)
-        self.assertEqual(config.detector_decision_rule, "any")
-        self.assertEqual(config.suspicion_count_max, 4)
+            restored = read_results(output_dir / "summary.csv", output_dir / "rounds.csv")
+        self.assertEqual(restored[0].config, config)
 
     def test_protocol_free_runtime_uses_wall_spans_not_parallel_operation_sums(self):
         timings = StageTimings(
@@ -1371,8 +1248,10 @@ class ExperimentOutputDirTest(unittest.TestCase):
 
         self.assertEqual(len(rows), 4)
         self.assertEqual({row["method"] for row in rows}, {"sm9rrs"})
-        self.assertIn("z_sigma", rows[0])
-        self.assertIn("z_direction", rows[0])
+        self.assertIn("novelty_score", rows[0])
+        self.assertIn("history_admitted", rows[0])
+        self.assertIn("seed", rows[0])
+        self.assertIn("signed_score", rows[0])
         self.assertIn("weight_after_penalty_recovery", rows[0])
         self.assertIn("aggregation_weight", rows[0])
         self.assertIn("count_after", rows[0])

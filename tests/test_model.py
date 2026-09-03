@@ -62,22 +62,23 @@ class CIFARModelTest(unittest.TestCase):
 
     @unittest.skipIf(importlib.util.find_spec("torch") is None, "torch is not installed")
     def test_torch_context_runs_resident_alternating_minimization(self):
-        from sm9rrsfl.datasets import make_synthetic_mnist_like
+        from sm9rrsfl.datasets import make_synthetic_mnist_like, stratified_training_three_way_split
         from sm9rrsfl.torch_backend import TorchTrainingContext
 
         dataset = make_synthetic_mnist_like(
-            train_samples=20,
+            train_samples=400,
             test_samples=100,
             seed=41,
         )
+        dataset = stratified_training_three_way_split(dataset, seed=41).main_dataset
         indices = [
             np.arange(0, 10, dtype=np.int64),
             np.arange(10, 20, dtype=np.int64),
         ]
         context = TorchTrainingContext(dataset, indices, device="cpu")
         params = init_params(seed=42, spec=context.spec)
-        source_label = int(dataset.y_test[0])
-        target_indices = np.flatnonzero(dataset.y_test == source_label)[:1]
+        source_label = int(dataset.y_attack[0])
+        target_indices = np.flatnonzero(dataset.y_attack == source_label)[:1]
 
         delta, stats = context.alternating_minimization_delta_resident(
             params,

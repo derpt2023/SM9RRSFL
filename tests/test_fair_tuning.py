@@ -19,7 +19,6 @@ from sm9rrsfl.fair_tuning import (
     execute_resumable_tuning_phase,
     execute_tuning_tasks,
     load_fair_tuning_config,
-    make_validation_dataset,
     prepare_tuning_tasks,
     score_trial,
     select_best_trials,
@@ -51,6 +50,20 @@ def _set_four_candidate_tunable_spaces(payload):
 
 
 class FairTuningTest(unittest.TestCase):
+    def test_same_final_result_cannot_hide_early_attack_collapse(self):
+        clean = _result(0., .9, 0)
+        stable = _result(.2, .9, 0, accepted_updates=[10, 10, 10])
+        collapsed = replace(stable, records=[
+            replace(stable.records[0], accuracy=.1, attack_target_success_rate=1.),
+            replace(stable.records[1], accuracy=.1, attack_target_success_rate=1.),
+            stable.records[-1],
+        ])
+        good = score_trial("fedavg", "good", {}, [clean, stable], objective=OBJECTIVE)
+        bad = score_trial("fedavg", "bad", {}, [clean, collapsed], objective=OBJECTIVE)
+        self.assertTrue(good.valid and bad.valid)
+        self.assertLess(bad.score, good.score)
+        self.assertEqual(bad.worst_attack_success_rate, 1.)
+
     def test_example_enforces_all_methods_and_equal_tunable_budget(self):
         spec = load_fair_tuning_config(
             PROJECT_ROOT / "configs" / "fair_tuning.example.json"
@@ -85,13 +98,11 @@ class FairTuningTest(unittest.TestCase):
         )
         payload["tuning"]["method_spaces"]["sm9rrs"] = {
             "detector_subspace_dim": [2],
-            "detector_gap_threshold": [0.1],
-            "detector_adjacent_threshold": [2.5, 3.0],
-            "detector_anchor_threshold": [2.5, 3.0],
+            "detector_distance_threshold": [2.5, 3.0],
+            "detector_reject_threshold": [5.0, 6.0],
             "detector_drift_memory": [0.9],
             "detector_drift_allowance": [1.0],
             "detector_drift_threshold": [5.0],
-            "suspicion_count_max": [3],
         }
         payload["shared_parameters"]["ours_parameter_mode"] = "fixed"
         _set_four_candidate_tunable_spaces(payload)
@@ -110,13 +121,12 @@ class FairTuningTest(unittest.TestCase):
         self.assertTrue(
             all(
                 candidate["detector_subspace_dim"] == 2
-                and candidate["suspicion_count_max"] == 3
                 for candidate in spec.candidates["sm9rrs"]
             )
         )
         self.assertEqual(
-            parse_args(parameters_to_argv(spec.shared_parameters)).detector_decision_rule,
-            "any",
+            parse_args(parameters_to_argv(spec.shared_parameters)).detector_normal_clusters,
+            2,
         )
 
     def test_fixed_objective_requires_complete_normalized_weights(self):
@@ -208,7 +218,7 @@ class FairTuningTest(unittest.TestCase):
         )
         payload["tuning"]["method_spaces"]["sm9rrs"] = {
             "detector_decision_rule": ["any"],
-            "detector_anchor_threshold": [2.5, 3.0],
+            "detector_reject_threshold": [2.5, 3.0],
         }
         payload["shared_parameters"]["ours_parameter_mode"] = "fixed"
         with tempfile.TemporaryDirectory() as tmp:
@@ -228,7 +238,7 @@ class FairTuningTest(unittest.TestCase):
         _set_four_candidate_tunable_spaces(base_payload)
         base_payload["tuning"]["method_spaces"]["sm9rrs"] = {
             "detector_window": [7, 10],
-            "detector_anchor_threshold": [2.5, 3.0],
+            "detector_reject_threshold": [2.5, 3.0],
         }
 
         invalid_cases = (
@@ -515,19 +525,16 @@ class FairTuningTest(unittest.TestCase):
                 load_fair_tuning_config(path)
 
     def test_validation_split_uses_training_samples_and_leaves_test_unused(self):
-        dataset = make_synthetic_mnist_like(
-            train_samples=250,
-            test_samples=40,
-            seed=19,
-        )
-        validation = make_validation_dataset(dataset, fraction=0.2, seed=91)
-
-        self.assertEqual(validation.name, dataset.name)
-        self.assertEqual(
-            len(validation.y_train) + len(validation.y_test),
-            len(dataset.y_train),
-        )
-        self.assertNotEqual(len(validation.y_test), len(dataset.y_test))
+        from sm9rrsfl.datasets import stratified_training_three_way_split
+        dataset = make_synthetic_mnist_like(train_samples=400, test_samples=30, seed=91)
+        split = stratified_training_three_way_split(dataset, seed=91)
+        self.assertIs(split.main_dataset.x_train, split.calibration_dataset.x_train)
+        self.assertIs(split.main_dataset.y_train, split.calibration_dataset.y_train)
+        self.assertIs(split.main_dataset.x_attack, split.calibration_dataset.x_attack)
+        self.assertIs(split.main_dataset.x_test, dataset.x_test)
+        self.assertFalse(set(split.train_indices) & set(split.calibration_indices))
+        self.assertFalse(set(split.train_indices) & set(split.attack_indices))
+        self.assertFalse(set(split.calibration_indices) & set(split.attack_indices))
 
     def test_nonfinite_trial_is_never_selected_even_with_high_accuracy(self):
         bad = score_trial(
@@ -842,8 +849,7 @@ def _minimal_spec(candidates):
         calibration_ratios=(0.0, 0.1, 0.3),
         ratio_schedule=None,
         auto_ours=False,
-        preinvalid_candidates=(),
-        candidates=candidates,
+            candidates=candidates,
     )
 
 

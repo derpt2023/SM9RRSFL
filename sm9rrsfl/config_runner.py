@@ -13,7 +13,10 @@ from .experiments import main as run_experiments
 from .experiments import parse_args
 
 
-CONFIG_SCHEMA_VERSION = 2
+from .ours_policy import OURS_PARAMETER_NAMES, OursParameters
+from dataclasses import asdict
+
+CONFIG_SCHEMA_VERSION = 3
 LIST_PARAMETERS = {
     "methods",
     "ratios",
@@ -38,14 +41,9 @@ PARAMETER_ALIASES = {
     "C_tol": "suspicion_remove_after",
     "c_tol": "suspicion_remove_after",
     "q": "detector_subspace_dim",
-    "g0": "detector_gap_threshold",
-    "theta_adj": "detector_adjacent_threshold",
-    "theta_anc": "detector_anchor_threshold",
     "beta": "detector_drift_memory",
     "kappa": "detector_drift_allowance",
     "h": "detector_drift_threshold",
-    "C_max": "suspicion_count_max",
-    "c_max": "suspicion_count_max",
 }
 
 
@@ -218,20 +216,7 @@ def main(
             resolved_args.ours_parameter_mode == "auto"
             and "sm9rrs" in resolved_args.methods
         ):
-            for key in (
-                "z_threshold",
-                "detector_subspace_dim",
-                "detector_gap_threshold",
-                "detector_adjacent_threshold",
-                "detector_anchor_threshold",
-                "detector_drift_memory",
-                "detector_drift_allowance",
-                "detector_drift_threshold",
-                "suspicion_remove_after",
-                "suspicion_count_max",
-                "suspicion_penalty_factor",
-                "suspicion_recovery_factor",
-            ):
+            for key in OURS_PARAMETER_NAMES:
                 resolved[key] = "<pending_global_offline_calibration>"
         print(
             "resolved_parameters="
@@ -254,21 +239,7 @@ def main(
         else:
             effective_detector = {
                 "status": "fixed",
-                "detector_adjacent_threshold": (
-                    resolved_args.z_threshold
-                    if resolved_args.detector_adjacent_threshold is None
-                    else resolved_args.detector_adjacent_threshold
-                ),
-                "detector_anchor_threshold": (
-                    resolved_args.z_threshold
-                    if resolved_args.detector_anchor_threshold is None
-                    else resolved_args.detector_anchor_threshold
-                ),
-                "suspicion_count_max": (
-                    resolved_args.suspicion_remove_after
-                    if resolved_args.suspicion_count_max == 0
-                    else resolved_args.suspicion_count_max
-                ),
+                **asdict(OursParameters.from_object(resolved_args)),
                 "effective_attack_start_round": (
                     resolved_args.attack_start_round
                     or resolved_args.detector_window + 2

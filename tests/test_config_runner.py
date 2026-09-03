@@ -105,40 +105,28 @@ class ConfigRunnerTest(unittest.TestCase):
             {
                 "K": 10,
                 "q": 2,
-                "g0": 0.15,
-                "theta_adj": 2.5,
-                "theta_anc": 3.5,
                 "beta": 0.8,
                 "kappa": 0.75,
                 "h": 4.5,
                 "C_tol": 4,
-                "C_max": 6,
             }
         )
         args = parse_args(argv)
 
         self.assertEqual(args.detector_window, 10)
         self.assertEqual(args.detector_subspace_dim, 2)
-        self.assertAlmostEqual(args.detector_gap_threshold, 0.15)
-        self.assertAlmostEqual(args.detector_adjacent_threshold, 2.5)
-        self.assertAlmostEqual(args.detector_anchor_threshold, 3.5)
         self.assertAlmostEqual(args.detector_drift_memory, 0.8)
         self.assertAlmostEqual(args.detector_drift_allowance, 0.75)
         self.assertAlmostEqual(args.detector_drift_threshold, 4.5)
         self.assertEqual(args.suspicion_remove_after, 4)
-        self.assertEqual(args.suspicion_count_max, 6)
 
     def test_paper_alias_and_canonical_key_cannot_conflict(self):
         conflicts = (
             {"K": 10, "detector_window": 5},
             {"q": 2, "detector_subspace_dim": 3},
-            {"g0": 0.1, "detector_gap_threshold": 0.2},
-            {"theta_adj": 3.0, "detector_adjacent_threshold": 2.5},
-            {"theta_anc": 3.0, "detector_anchor_threshold": 2.5},
             {"beta": 0.9, "detector_drift_memory": 0.8},
             {"kappa": 1.0, "detector_drift_allowance": 0.5},
             {"h": 5.0, "detector_drift_threshold": 4.0},
-            {"C_max": 3, "suspicion_count_max": 4},
         )
         for parameters in conflicts:
             with self.subTest(parameters=parameters):
@@ -160,14 +148,14 @@ class ConfigRunnerTest(unittest.TestCase):
                 json.dumps({"schema_version": 1, "parameters": {}}),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ConfigError, "schema_version must be 2"):
+            with self.assertRaisesRegex(ConfigError, "schema_version must be 3"):
                 load_experiment_config(wrong_schema)
 
             unknown_root = Path(tmp) / "unknown-root.json"
             unknown_root.write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "parameters": {},
                         "unexpected": True,
                     }
@@ -195,44 +183,17 @@ class ConfigRunnerTest(unittest.TestCase):
         self.assertIn('"dataset":', text)
 
     def test_auto_mode_rejects_every_manual_ours_parameter_but_allows_k(self):
-        allowed = parameters_to_argv(
-            {
-                "dataset": "synthetic",
-                "methods": ["sm9rrs", "fedavg"],
-                "ours_parameter_mode": "auto",
-                "K": 7,
-                "early_stop": False,
-            }
-        )
-        self.assertEqual(parse_args(allowed).detector_window, 7)
-
-        for name, value in (
-            ("q", 2),
-            ("g0", 0.1),
-            ("theta_adj", 3.0),
-            ("theta_anc", 3.0),
-            ("beta", 0.9),
-            ("kappa", 1.0),
-            ("h", 5.0),
-            ("C_tol", 3),
-            ("C_max", 3),
-            ("suspicion_penalty_factor", 0.5),
-            ("suspicion_recovery_factor", 2.0),
-        ):
-            with self.subTest(name=name), mock.patch(
-                "sys.stderr",
-                new=io.StringIO(),
-            ), self.assertRaises(SystemExit):
-                parse_args(
-                    parameters_to_argv(
-                        {
-                            "methods": ["sm9rrs"],
-                            "ours_parameter_mode": "auto",
-                            "early_stop": False,
-                            name: value,
-                        }
-                    )
-                )
+        from dataclasses import asdict
+        from sm9rrsfl.ours_policy import OursParameters
+        base = {"methods": ["sm9rrs"], "ours_parameter_mode": "auto", "early_stop": False, "K": 7}
+        self.assertEqual(parse_args(parameters_to_argv(base)).detector_window, 7)
+        for name, value in asdict(OursParameters()).items():
+            with self.subTest(name=name), mock.patch("sys.stderr", new=io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parse_args(parameters_to_argv({**base, name: value}))
+        for name in ("g0", "theta_adj", "theta_anc", "C_max"):
+            with self.assertRaises(ConfigError):
+                parameters_to_argv({name: 3})
 
     def test_non_dry_run_dispatches_to_authoritative_experiment_entry(self):
         config = PROJECT_ROOT / "configs" / "experiment.json"

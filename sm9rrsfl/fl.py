@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from time import perf_counter
 from typing import Any, Callable
 import numpy as np
@@ -30,11 +30,12 @@ from .model import (
 )
 from .svd_detector import DetectionResult, LongitudinalSVDDetector
 from .vert import VERTDefense
-from .weighting import SuspicionWeightManager
+from .weighting import SuspicionWeightManager, bounded_aggregation_coefficients
+from .ours_policy import OursParameters
 
 
 @dataclass(frozen=True)
-class ExperimentConfig:
+class ExperimentConfig(OursParameters):
     method: str = "sm9rrs"
     malicious_ratio: float = 0.1
     num_clients: int = 20
@@ -59,19 +60,6 @@ class ExperimentConfig:
     attack_target_count: int = 1
     attack_start_round: int = 0
     detector_window: int = 3
-    z_threshold: float = 3.0
-    detector_subspace_dim: int = 2
-    detector_gap_threshold: float = 0.1
-    detector_adjacent_threshold: float | None = None
-    detector_anchor_threshold: float | None = None
-    detector_drift_memory: float = 0.9
-    detector_drift_allowance: float = 1.0
-    detector_drift_threshold: float = 5.0
-    detector_decision_rule: str = "any"
-    # Internal calibration switch.  It is never exposed as a paper-facing
-    # hyperparameter: formal main-run configs always enforce decisions, while
-    # clean shadow probes only observe and extend the trusted trajectory.
-    detector_enforce: bool = True
     crypto_mode: str = "sm9"
     dkg_threshold: int = 2
     dkg_nodes: int = 3
@@ -79,10 +67,6 @@ class ExperimentConfig:
     eval_interval: int = 1
     checkpoint_interval: int = 0
     sm9_workers: int = 1
-    suspicion_penalty_factor: float = 0.5
-    suspicion_recovery_factor: float = 2.0
-    suspicion_remove_after: int = 3
-    suspicion_count_max: int = 0
     vert_history_window: int = 10
     vert_projection_dim: int = 128
     vert_predict_epochs: int = 5
@@ -125,39 +109,29 @@ class ClientDiagnosticRecord:
     task_tag: str
     is_malicious: bool
     decision_reason: str
-    z_sigma: float
-    z_direction: float
-    sigma_delta: float
-    cosine_similarity: float
-    sigma_exceeded: bool
-    direction_exceeded: bool
     suspicious: bool
     count_increment: bool
     weight_before: float
     weight_after_penalty_recovery: float
     aggregation_weight: float
-    count_before: int
-    count_after: int
+    count_before: float
+    count_after: float
     trace_requested: bool
     trace_pending: bool
     revoked: bool
-    spectrum_adjacent_distance: float
-    subspace_adjacent_distance: float
-    spectrum_anchor_distance: float
-    subspace_anchor_distance: float
-    z_spectrum_adjacent: float
-    z_subspace_adjacent: float
-    z_spectrum_anchor: float
-    z_subspace_anchor: float
-    adjacent_score: float
+    novelty_score: float
     anchor_score: float
+    signed_score: float
+    class_score: float
     cumulative_drift: float
-    spectral_gap: float
-    direction_reliability: float
-    adjacent_exceeded: bool
-    anchor_exceeded: bool
-    drift_exceeded: bool
+    clip_factor: float
+    aggregation_accepted: bool
+    history_eligible: bool
+    history_admitted: bool
+    history_frozen: bool
+    immediate_revocation: bool
     trusted_history_size: int
+    normal_cluster_count: int
     attack_active: bool
 
 
@@ -389,57 +363,13 @@ def run_experiment(
         )
     if config.attack_start_round < 0:
         raise ValueError("attack_start_round must be non-negative")
-    if config.detector_window < 2:
-        raise ValueError("detector_window must be at least 2")
-    if not np.isfinite(config.z_threshold) or config.z_threshold <= 0.0:
-        raise ValueError("z_threshold must be finite and positive")
-    if config.detector_subspace_dim < 1:
-        raise ValueError("detector_subspace_dim must be at least 1")
-    if config.detector_subspace_dim >= dataset.num_classes:
-        raise ValueError(
-            "detector_subspace_dim must leave room for the q+1 singular value"
-        )
-    if (
-        not np.isfinite(config.detector_gap_threshold)
-        or config.detector_gap_threshold <= 0.0
-    ):
-        raise ValueError("detector_gap_threshold must be finite and positive")
-    for name, value in {
-        "detector_adjacent_threshold": config.detector_adjacent_threshold,
-        "detector_anchor_threshold": config.detector_anchor_threshold,
-    }.items():
-        if value is not None and (not np.isfinite(value) or value <= 0.0):
-            raise ValueError(f"{name} must be finite and positive")
-    if (
-        not np.isfinite(config.detector_drift_memory)
-        or not 0.0 < config.detector_drift_memory <= 1.0
-    ):
-        raise ValueError("detector_drift_memory must be in (0, 1]")
-    for name, value in {
-        "detector_drift_allowance": config.detector_drift_allowance,
-        "detector_drift_threshold": config.detector_drift_threshold,
-    }.items():
-        if not np.isfinite(value) or value <= 0.0:
-            raise ValueError(f"{name} must be finite and positive")
-    if config.detector_decision_rule != "any":
-        raise ValueError(
-            "detector_decision_rule must be 'any' (the v3 OR formula)"
-        )
-    if not isinstance(config.detector_enforce, bool):
-        raise TypeError("detector_enforce must be boolean")
+    if config.detector_window < 3:
+        raise ValueError("detector_window must be at least 3")
+    OursParameters.from_object(config).validate()
+    if config.method == "sm9rrs" and config.attack_start_round and config.attack_start_round <= config.detector_window:
+        raise ValueError("Ours requires a clean first K rounds: attack_start_round must exceed K")
     if config.checkpoint_interval < 0:
         raise ValueError("checkpoint_interval must be non-negative")
-    if not 0.0 < config.suspicion_penalty_factor < 1.0:
-        raise ValueError("suspicion_penalty_factor must be in (0, 1)")
-    if config.suspicion_recovery_factor <= 1.0:
-        raise ValueError("suspicion_recovery_factor must be greater than 1")
-    if config.suspicion_remove_after < 1:
-        raise ValueError("suspicion_remove_after must be at least 1")
-    if (
-        config.suspicion_count_max != 0
-        and config.suspicion_count_max < config.suspicion_remove_after
-    ):
-        raise ValueError("suspicion_count_max must be 0 or at least C_tol")
     if config.vert_history_window < 2:
         raise ValueError("vert_history_window must be at least 2")
     if config.vert_projection_dim < 2:
@@ -487,22 +417,7 @@ def run_experiment(
     }
     malicious_clients = _choose_malicious(client_ids, config.malicious_ratio, config.seed)
     malicious_set = set(malicious_clients)
-    detector_window, z_threshold, suspicion_remove_after = _effective_detector_settings(
-        dataset,
-        config,
-    )
-    adjacent_threshold = (
-        z_threshold
-        if config.detector_adjacent_threshold is None
-        else config.detector_adjacent_threshold
-    )
-    anchor_threshold = (
-        z_threshold
-        if config.detector_anchor_threshold is None
-        else config.detector_anchor_threshold
-    )
-    suspicion_count_max = config.suspicion_count_max or suspicion_remove_after
-    attack_start = config.attack_start_round or (detector_window + 2)
+    attack_start = config.attack_start_round or (config.detector_window + 2)
 
     model_spec = model_spec_for_dataset(dataset)
     attack_auxiliary_indices = (
@@ -511,7 +426,7 @@ def run_experiment(
             config,
             required=bool(malicious_set),
         )
-        if is_alternating_minimization_attack(config.attack)
+        if is_alternating_minimization_attack(config.attack) and malicious_set and attack_start <= config.rounds
         else np.empty(0, dtype=np.int64)
     )
     evaluation_target_indices = (
@@ -615,6 +530,7 @@ def run_experiment(
     vert_defense = None
     alignins_defense = None
     sm9_weight_manager = None
+    task_exhausted = False
     if config.method == "sm9rrs":
         crypto_setup_started = perf_counter()
         crypto_state = resume_state.get("crypto_state") if resume_state else None
@@ -628,10 +544,14 @@ def run_experiment(
             seed=config.seed,
             state=crypto_state,
         )
-        crypto.register_task(
-            dataset.name,
-            [identity for identity in client_ids if identity not in blacklisted],
-        )
+        # An all-revoked/finished checkpoint may be saved just before the
+        # terminal result. Never resurrect its finalized cryptographic task.
+        task_exhausted = crypto.is_task_finalized(dataset.name)
+        if not task_exhausted:
+            crypto.register_task(
+                dataset.name,
+                [identity for identity in client_ids if identity not in blacklisted],
+            )
         client_signers = {
             identity: crypto.client_signer(identity) for identity in client_ids
         }
@@ -641,28 +561,17 @@ def run_experiment(
         auditor = crypto.auditor_service()
         crypto_setup_wall_seconds += perf_counter() - crypto_setup_started
         detector = LongitudinalSVDDetector(
-            window_size=detector_window,
-            z_threshold=z_threshold,
-            subspace_dim=config.detector_subspace_dim,
-            gap_threshold=config.detector_gap_threshold,
-            adjacent_threshold=adjacent_threshold,
-            anchor_threshold=anchor_threshold,
-            drift_memory=config.detector_drift_memory,
-            drift_allowance=config.detector_drift_allowance,
-            drift_threshold=config.detector_drift_threshold,
-            decision_rule=config.detector_decision_rule,
-            enforce=config.detector_enforce,
+            window_size=config.detector_window,
+            policy=OursParameters.from_object(config),
             num_classes=model_spec.num_classes,
             expected_update_size=model_spec.parameter_size,
-            compute_backend=config.compute_backend,
-            device=config.device,
+            matrix_offset=model_spec.svd_matrix_offset,
+            matrix_shape=model_spec.svd_matrix_shape,
         )
         sm9_weight_manager = SuspicionWeightManager(
-            participant_count=len(client_ids),
             penalty_factor=config.suspicion_penalty_factor,
             recovery_factor=config.suspicion_recovery_factor,
-            remove_after=suspicion_remove_after,
-            max_count=suspicion_count_max,
+            remove_after=config.suspicion_remove_after,
         )
     elif config.method == "ding13":
         ding13_detector = Ding13TrajectoryDetector(
@@ -708,8 +617,7 @@ def run_experiment(
         elif config.method == "vert":
             vert_defense = resume_state["vert_defense"]
 
-    task_exhausted = False
-    if config.method == "sm9rrs":
+    if config.method == "sm9rrs" and not task_exhausted:
         assert (
             crypto is not None
             and as_verifier is not None
@@ -719,7 +627,8 @@ def run_experiment(
         )
         # A failed audit is checkpointed with its complete immutable evidence.
         # Resolve it before accepting any later-round update so a restart cannot
-        # strand a digest-only pending entry or silently bypass C_tol.
+        # strand a digest-only pending entry or bypass either revocation path.
+        restored_revocations = set()
         for evidence in as_verifier.pending_audit_evidence(dataset.name):
             tag = as_verifier.tag_key(evidence.packet)
             if tag not in sm9_weight_manager.pending_trace:
@@ -741,11 +650,26 @@ def run_experiment(
                 ) from exc
             sm9_weight_manager.confirm_revocation(tag)
             detector.forget(tag)
+            restored_revocations.add((tag, evidence.packet.round_id))
             blacklisted.add(trace_result.identity)
             if trace_result.identity in malicious_set:
                 true_positive_revocations += 1
             else:
                 false_positive_revocations += 1
+
+        if restored_revocations:
+            # The interrupted round already excluded these updates. Repair
+            # its certificate status, including when retry revokes the last
+            # identity and there will be no next training/evaluation round.
+            diagnostics = [
+                replace(d, trace_pending=False, revoked=True)
+                if (d.task_tag, d.round) in restored_revocations else d
+                for d in diagnostics
+            ]
+            records[-1] = replace(
+                records[-1], blacklisted_clients=len(blacklisted),
+                true_positive_revocations=true_positive_revocations,
+                false_positive_revocations=false_positive_revocations)
 
         if as_verifier.pending_audit_digests(dataset.name):
             raise RuntimeError("restored audit queue was not closed after successful retry")
@@ -899,6 +823,7 @@ def run_experiment(
                 round_id=round_id,
                 task_id=dataset.name,
                 workers=config.sm9_workers,
+                learning_rate=config.lr * config.lr_decay ** (round_id - 1),
             )
             crypto_packet_wall_seconds += max(
                 0.0,
@@ -955,25 +880,34 @@ def run_experiment(
                 weight_before_by_tag = {
                     tag: sm9_weight_manager.weights.get(
                         tag,
-                        1.0 / len(update_clients),
+                        1.0,
                     )
                     for tag in update_clients
                 }
                 count_before_by_tag = {
-                    tag: sm9_weight_manager.consecutive_suspicions.get(tag, 0)
+                    tag: sm9_weight_manager.evidence_counts.get(tag, 0.0)
                     for tag in update_clients
                 }
                 weight_result = sm9_weight_manager.update(
                     update_clients,
                     suspicious_tags,
                     count_increment_tags,
+                    recovery_tags={
+                        tag for tag in update_clients
+                        if sm9_result.decisions_by_tag[tag].history_eligible
+                        and tag not in suspicious_tags
+                    },
+                    immediate_revocation_tags={
+                        tag for tag in update_clients
+                        if sm9_result.decisions_by_tag[tag].immediate_revocation
+                    },
                 )
                 accepted_trace_identities: set[str] = set()
-                for tag in weight_result.trace_requested_tags:
+                for tag in sorted(weight_result.trace_requested_tags):
                     candidate = sm9_candidates_by_tag.get(tag)
                     if candidate is None:
                         raise RuntimeError(
-                            "C_tol trace request has no matching verified evidence"
+                            "revocation trace request has no matching verified evidence"
                         )
                     try:
                         audit_started = perf_counter()
@@ -993,8 +927,8 @@ def run_experiment(
                         audit_elapsed = perf_counter() - audit_started
                         crypto_audit_wall_seconds += audit_elapsed
                         crypto_inside_aggregation += audit_elapsed
-                        # Word 4.3.3 requires the C_tol trigger update to be
-                        # rejected immediately.  Preserve its exact evidence
+                        # A trace-triggering update is rejected immediately.
+                        # Preserve its exact evidence
                         # for retry and keep its round weight at zero; no
                         # permanent identity removal occurs without Eq. (7).
                         unresolved_audit_error = exc
@@ -1029,168 +963,61 @@ def run_experiment(
                         crypto_inside_aggregation += finalize_elapsed
                         task_exhausted = True
 
+                total_samples = sum(client_sample_counts.values())
+                nominal_weights = {
+                    tag: client_sample_counts[sm9_result.client_ids_by_tag[tag]] / total_samples
+                    for tag in update_clients
+                }
+                coefficients = bounded_aggregation_coefficients(
+                    update_clients, nominal_weights, weight_result.weights,
+                    sm9_result.decisions_by_tag, config.detector_weight_cap)
                 for tag in update_clients:
                     decision = sm9_result.decisions_by_tag[tag]
                     identity = sm9_result.client_ids_by_tag[tag]
-                    z_sigma = float(getattr(decision, "z_sigma", 0.0))
-                    z_direction = float(
-                        getattr(decision, "z_direction", 0.0)
-                    )
-                    z_spectrum_adjacent = float(
-                        getattr(decision, "z_spectrum_adjacent", 0.0)
-                    )
-                    z_subspace_adjacent = float(
-                        getattr(decision, "z_subspace_adjacent", 0.0)
-                    )
-                    z_spectrum_anchor = float(
-                        getattr(decision, "z_spectrum_anchor", 0.0)
-                    )
-                    z_subspace_anchor = float(
-                        getattr(decision, "z_subspace_anchor", 0.0)
-                    )
-                    direction_reliability = float(
-                        getattr(decision, "direction_reliability", 0.0)
-                    )
-                    diagnostics.append(
-                        ClientDiagnosticRecord(
-                            round=round_id,
-                            client_id=identity,
-                            task_tag=tag,
-                            is_malicious=identity in malicious_set,
-                            decision_reason=str(
-                                getattr(decision, "reason", "unknown")
-                            ),
-                            z_sigma=z_sigma,
-                            z_direction=z_direction,
-                            sigma_delta=float(
-                                getattr(decision, "sigma_delta", 0.0)
-                            ),
-                            cosine_similarity=float(
-                                getattr(decision, "cosine_similarity", 0.0)
-                            ),
-                            sigma_exceeded=(
-                                z_spectrum_adjacent > adjacent_threshold
-                                or z_spectrum_anchor > anchor_threshold
-                            ),
-                            direction_exceeded=(
-                                direction_reliability * z_subspace_adjacent
-                                > adjacent_threshold
-                                or direction_reliability * z_subspace_anchor
-                                > anchor_threshold
-                            ),
-                            suspicious=tag in suspicious_tags,
-                            count_increment=tag in count_increment_tags,
-                            weight_before=float(weight_before_by_tag[tag]),
-                            weight_after_penalty_recovery=float(
-                                weight_result.pre_normalization_weights[tag]
-                            ),
-                            aggregation_weight=float(
-                                sm9_weight_manager.weights[tag]
-                            ),
-                            count_before=int(count_before_by_tag[tag]),
-                            count_after=int(
-                                sm9_weight_manager.consecutive_suspicions[tag]
-                            ),
-                            trace_requested=(
-                                tag in weight_result.trace_requested_tags
-                            ),
-                            trace_pending=tag in sm9_weight_manager.pending_trace,
-                            revoked=tag in sm9_weight_manager.revoked,
-                            spectrum_adjacent_distance=float(
-                                getattr(
-                                    decision,
-                                    "spectrum_adjacent_distance",
-                                    0.0,
-                                )
-                            ),
-                            subspace_adjacent_distance=float(
-                                getattr(
-                                    decision,
-                                    "subspace_adjacent_distance",
-                                    0.0,
-                                )
-                            ),
-                            spectrum_anchor_distance=float(
-                                getattr(
-                                    decision,
-                                    "spectrum_anchor_distance",
-                                    0.0,
-                                )
-                            ),
-                            subspace_anchor_distance=float(
-                                getattr(
-                                    decision,
-                                    "subspace_anchor_distance",
-                                    0.0,
-                                )
-                            ),
-                            z_spectrum_adjacent=z_spectrum_adjacent,
-                            z_subspace_adjacent=z_subspace_adjacent,
-                            z_spectrum_anchor=z_spectrum_anchor,
-                            z_subspace_anchor=z_subspace_anchor,
-                            adjacent_score=float(
-                                getattr(decision, "adjacent_score", 0.0)
-                            ),
-                            anchor_score=float(
-                                getattr(decision, "anchor_score", 0.0)
-                            ),
-                            cumulative_drift=float(
-                                getattr(decision, "cumulative_drift", 0.0)
-                            ),
-                            spectral_gap=float(
-                                getattr(decision, "spectral_gap", 0.0)
-                            ),
-                            direction_reliability=direction_reliability,
-                            adjacent_exceeded=bool(
-                                getattr(decision, "adjacent_exceeded", False)
-                            ),
-                            anchor_exceeded=bool(
-                                getattr(decision, "anchor_exceeded", False)
-                            ),
-                            drift_exceeded=bool(
-                                getattr(decision, "drift_exceeded", False)
-                            ),
-                            trusted_history_size=int(
-                                getattr(decision, "trusted_history_size", 0)
-                            ),
-                            attack_active=(
-                                identity in malicious_set
-                                and round_id >= attack_start
-                                and config.attack != "none"
-                            ),
-                        )
-                    )
-
-                # The manager contains the final zero/non-zero decision for
-                # every C_tol trigger and any successfully revoked tag.
-                weights = [sm9_weight_manager.weights[tag] for tag in update_clients]
-                for tag, weight in zip(update_clients, weights):
-                    identity = sm9_result.client_ids_by_tag[tag]
-                    round_actual_weights[identity] = float(weight)
-                # Section 4.3.3 already normalizes w_pi over A^(r).  Applying
-                # sample counts again would implement w_pi*n_pi rather than
-                # the aggregation equation stated in the Word scheme.
-                effective_total = sum(weights)
-                if effective_total <= 0.0:
-                    aggregate = (
-                        torch_context.zeros_like(updates[0])
-                        if torch_context is not None
-                        else np.zeros_like(updates[0])
-                    )
-                else:
-                    aggregate = _weighted_fedavg(
-                        updates,
-                        weights,
-                        sample_counts=None,
-                        config=config,
-                        torch_context=torch_context,
-                    )
-                record_accepted = sum(
-                    1 for weight, samples in zip(weights, update_samples) if weight > 0.0 and samples > 0
-                )
-                # Single anomalies are downweighted but still aggregated.  Only
-                # C_tol-trigger packets have zero weight and are rejected.
-                record_rejected = rejected + sum(weight <= 0.0 for weight in weights)
+                    # Revocation already erased its pending detector state.
+                    admitted = False
+                    if tag not in sm9_weight_manager.revoked:
+                        admitted = detector.commit(
+                            tag, admit_history=(
+                                coefficients[tag] > 0.0
+                                and not weight_result.history_frozen
+                                and tag not in sm9_weight_manager.pending_trace
+                            ))
+                    round_actual_weights[identity] = coefficients[tag]
+                    diagnostics.append(ClientDiagnosticRecord(
+                        round=round_id, client_id=identity, task_tag=tag,
+                        is_malicious=identity in malicious_set,
+                        decision_reason=decision.reason,
+                        suspicious=decision.would_flag,
+                        count_increment=decision.count_increment,
+                        weight_before=weight_before_by_tag[tag],
+                        weight_after_penalty_recovery=weight_result.reliability_after_update[tag],
+                        aggregation_weight=coefficients[tag],
+                        count_before=count_before_by_tag[tag],
+                        count_after=sm9_weight_manager.evidence_counts.get(tag, 0.0),
+                        trace_requested=tag in weight_result.trace_requested_tags,
+                        trace_pending=tag in sm9_weight_manager.pending_trace,
+                        revoked=tag in sm9_weight_manager.revoked,
+                        novelty_score=decision.novelty_score,
+                        anchor_score=decision.anchor_score,
+                        signed_score=decision.signed_score,
+                        class_score=decision.class_score,
+                        cumulative_drift=decision.cumulative_drift,
+                        clip_factor=decision.clip_factor,
+                        aggregation_accepted=coefficients[tag] > 0,
+                        history_eligible=decision.history_eligible,
+                        history_admitted=admitted,
+                        history_frozen=weight_result.history_frozen,
+                        immediate_revocation=decision.immediate_revocation,
+                        trusted_history_size=decision.trusted_history_size,
+                        normal_cluster_count=decision.normal_cluster_count,
+                        attack_active=(identity in malicious_set and
+                                       round_id >= attack_start and config.attack != "none"),
+                    ))
+                aggregate = aggregate_with_coefficients(
+                    dict(zip(update_clients, updates)), coefficients)
+                record_accepted = sum(value > 0 for value in coefficients.values())
+                record_rejected = rejected + len(update_clients) - record_accepted
             elif config.method == "ding13":
                 assert ding13_detector is not None
                 update_by_client = dict(zip(update_clients, updates))
@@ -1333,7 +1160,10 @@ def run_experiment(
                 round_actual_weights,
             )
         )
-        should_evaluate = round_id == config.rounds or round_id % config.eval_interval == 0
+        # Exhaustion and failed audits are terminal/interruption boundaries:
+        # persist their actual round, even between scheduled evaluations.
+        should_evaluate = (task_exhausted or unresolved_audit_error is not None
+                           or round_id == config.rounds or round_id % config.eval_interval == 0)
         if should_evaluate:
             evaluation_started = perf_counter()
             acc = _evaluate_accuracy(params, dataset, model_spec, config, torch_context)
@@ -1496,16 +1326,6 @@ def _trace_and_archive(
     return trace_result
 
 
-def _effective_detector_settings(
-    dataset: ImageDataset,
-    config: ExperimentConfig,
-) -> tuple[int, float, int]:
-    del dataset
-    # Word 4.3.3 uses the configured K, theta=3, and C_tol without a
-    # dataset-specific hidden override.
-    return config.detector_window, config.z_threshold, config.suspicion_remove_after
-
-
 def _maybe_torch_context(
     dataset: ImageDataset,
     client_indices: list[np.ndarray],
@@ -1535,6 +1355,7 @@ def _process_sm9_candidates(
     round_id: int,
     task_id: str,
     workers: int,
+    learning_rate: float = 1.0,
 ) -> _SM9ProcessingResult:
     if workers > 1:
         with ThreadPoolExecutor(max_workers=min(workers, len(candidates))) as executor:
@@ -1589,6 +1410,7 @@ def _process_sm9_candidates(
                 tag,
                 candidate.cpu_delta,
                 round_id=round_id,
+                learning_rate=learning_rate,
             )
         except (TypeError, ValueError):
             # A correctly signed but schema-invalid model vector is not a
@@ -1597,7 +1419,7 @@ def _process_sm9_candidates(
             rejected += 1
             continue
         detection_seconds += perf_counter() - detection_started
-        if not decision.accepted:
+        if decision.would_flag:
             suspicious_tags.add(tag)
             if decision.count_increment:
                 count_increment_tags.add(tag)
@@ -1913,10 +1735,9 @@ def _select_attack_target_indices(
 ) -> np.ndarray:
     """Select deterministic attack auxiliaries without consulting test data.
 
-    Auto-calibrated formal runs attach a dedicated training-derived attack
-    split.  Older fixed-parameter callers without that split retain the legacy
-    test-set fallback for backwards-compatible reproduction, but the selected
-    calibration artifact records which source was used.
+    Both CLI workflows attach a disjoint training-derived attack split.
+    Direct API callers must do likewise; official test data is never an
+    optimizer input.
     """
 
     _features, labels_array = _attack_auxiliary_arrays(dataset)
@@ -1959,12 +1780,12 @@ def _select_evaluation_target_indices(
 
 
 def _attack_auxiliary_arrays(dataset: ImageDataset) -> tuple[np.ndarray, np.ndarray]:
-    """Return the training-derived attack split or the legacy test fallback."""
+    """Return the training-derived attack split; never fall back to test data."""
 
     x_attack = getattr(dataset, "x_attack", None)
     y_attack = getattr(dataset, "y_attack", None)
     if x_attack is None or y_attack is None:
-        return dataset.x_test, dataset.y_test
+        raise ValueError("alternating minimization requires a training-derived x_attack/y_attack split")
     return x_attack, y_attack
 
 

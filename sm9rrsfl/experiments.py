@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import csv
 from dataclasses import asdict, fields, is_dataclass, replace
 import ctypes
@@ -31,7 +31,9 @@ from .calibration_policy import (
     DEFAULT_MIN_ROUND_COMPLETION_RATE,
     build_ratio_schedule,
 )
-from .datasets import load_image_dataset
+from .ours_policy import OursParameters, OURS_PARAMETER_NAMES
+from .execution import completed_pairs, device_affine_futures
+from .datasets import load_image_dataset, stratified_training_three_way_split
 from .crypto import rrs_backend_name, sm3_backend_name
 from .fl import (
     ClientDiagnosticRecord,
@@ -54,7 +56,7 @@ _WORKER_DATASET = None
 _WORKER_CHECKPOINT_DIR = None
 _WORKER_RUN_FINGERPRINT = None
 _CHECKPOINT_WRITE_LOCK = Lock()
-CHECKPOINT_SCHEMA_VERSION = 13
+CHECKPOINT_SCHEMA_VERSION = 15
 COMPLETED_RESULTS_SNAPSHOT = ".completed_results.pickle"
 CUDA_MEMORY_SAFETY_FRACTION = 0.75
 DATASET_TRAINING_PRESETS = {
@@ -123,8 +125,8 @@ def main(argv: list[str] | None = None) -> None:
     ours_calibration = None
     if "sm9rrs" in args.methods and args.ours_parameter_mode == "auto":
         # Import lazily: the calibrator reuses the experiment/tuning execution
-        # machinery, while the ordinary fixed-parameter path pays no import or
-        # data-splitting cost.
+        # machinery. Both fixed and auto entry points reserve training-only
+        # validation/attack data; no official-test attack fallback exists.
         from .ours_calibration import (
             apply_ours_parameters,
             calibration_metadata,
@@ -146,6 +148,9 @@ def main(argv: list[str] | None = None) -> None:
             ),
             flush=True,
         )
+
+    if ours_calibration is None:
+        dataset = stratified_training_three_way_split(dataset, seed=args.seed).main_dataset
 
     # Main-run timing intentionally excludes the one-time offline calibration.
     started = perf_counter()
@@ -325,18 +330,14 @@ def main(argv: list[str] | None = None) -> None:
         progress.start_parallel(jobs, len(pending_configs))
         if executor_kind == "thread":
             with ThreadPoolExecutor(max_workers=jobs) as executor:
-                futures = {
-                    executor.submit(
-                        _run_config_in_thread,
-                        (
-                            dataset,
-                            config,
-                            checkpoint_dir,
-                            manifest["fingerprint"],
-                        ),
-                    ): config
-                    for config in pending_configs
-                }
+                submit = lambda pool, c: pool.submit(
+                    _run_config_in_thread, (dataset, c, checkpoint_dir, manifest["fingerprint"]))
+                if backend_description == "torch:cuda":
+                    futures = device_affine_futures(
+                        executor, pending_configs, submit=submit,
+                        device_key=lambda c: c.device, jobs=jobs)
+                else:
+                    futures = {submit(executor, c): c for c in pending_configs}
                 _consume_parallel_futures(
                     futures,
                     results=results,
@@ -616,7 +617,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Ours detector parameter policy. 'auto' runs or reuses one "
             "training-only global offline calibration, then freezes the selected "
             "parameters across every formal main-run scenario. 'fixed' preserves "
-            "manual/default values for ablations and legacy reproduction."
+            "manual/default values for new-detector ablations."
         ),
     )
     parser.add_argument(
@@ -648,28 +649,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "offline calibration."
         ),
     )
-    parser.add_argument(
-        "--z-threshold",
-        type=float,
-        default=3.0,
-        help=(
-            "Compatibility threshold used for both theta_adj and theta_anc "
-            "when their explicit options are omitted."
-        ),
-    )
-    parser.add_argument("--detector-subspace-dim", type=int, default=2)
-    parser.add_argument("--detector-gap-threshold", type=float, default=0.1)
-    parser.add_argument("--detector-adjacent-threshold", type=float)
-    parser.add_argument("--detector-anchor-threshold", type=float)
-    parser.add_argument("--detector-drift-memory", type=float, default=0.9)
-    parser.add_argument("--detector-drift-allowance", type=float, default=1.0)
-    parser.add_argument("--detector-drift-threshold", type=float, default=5.0)
-    parser.add_argument(
-        "--detector-decision-rule",
-        choices=["any"],
-        default="any",
-        help="Fixed to any, implementing the v3 logical-OR formula.",
-    )
+    for name, default in asdict(OursParameters()).items():
+        options = ["--" + name.replace("_", "-")]
+        if name == "suspicion_remove_after":
+            options += ["--C_tol", "--c-tol"]
+        parser.add_argument(*options, dest=name, type=type(default), default=default)
     parser.add_argument("--crypto-mode", choices=["sm9", "simulated"], default="sm9")
     parser.add_argument("--dkg-threshold", type=int, default=2)
     parser.add_argument("--dkg-nodes", type=int, default=3)
@@ -696,29 +680,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "SM9-RRS per-round packet/signature worker count. Use an integer or 'auto'. "
             "Only independent packet creation and verification are parallelized."
         ),
-    )
-    parser.add_argument("--suspicion-penalty-factor", type=float, default=0.5)
-    parser.add_argument("--suspicion-recovery-factor", type=float, default=2.0)
-    parser.add_argument(
-        "--C_tol",
-        "--c-tol",
-        "--suspicion-remove-after",
-        dest="suspicion_remove_after",
-        type=int,
-        default=3,
-        help=(
-            "Paper parameter C_tol: composite anomaly-evidence count required "
-            "before threshold trace and revocation are requested."
-        ),
-    )
-    parser.add_argument(
-        "--C_max",
-        "--c-max",
-        "--suspicion-count-max",
-        dest="suspicion_count_max",
-        type=int,
-        default=0,
-        help="Paper C_max. 0 resolves to C_tol and avoids a redundant tuning axis.",
     )
     parser.add_argument(
         "--vert-history-window",
@@ -825,32 +786,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "--attack-scale does not control alternating minimization; "
             "use --attack-boost for lambda"
         )
-    if _has_any_option(raw_args, "--z-threshold") and _has_any_option(
-        raw_args,
-        "--detector-adjacent-threshold",
-        "--detector-anchor-threshold",
-    ):
-        parser.error(
-            "--z-threshold cannot be combined with explicit adjacent/anchor thresholds"
-        )
-    auto_ours_options = (
-        "--z-threshold",
-        "--detector-subspace-dim",
-        "--detector-gap-threshold",
-        "--detector-adjacent-threshold",
-        "--detector-anchor-threshold",
-        "--detector-drift-memory",
-        "--detector-drift-allowance",
-        "--detector-drift-threshold",
-        "--C_tol",
-        "--c-tol",
-        "--suspicion-remove-after",
-        "--C_max",
-        "--c-max",
-        "--suspicion-count-max",
-        "--suspicion-penalty-factor",
-        "--suspicion-recovery-factor",
-    )
+    auto_ours_options = tuple("--" + name.replace("_", "-") for name in OURS_PARAMETER_NAMES) + ("--C_tol", "--c-tol")
     explicitly_fixed = tuple(
         option for option in auto_ours_options if _has_any_option(raw_args, option)
     )
@@ -884,6 +820,7 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
     auto_ours = args.ours_parameter_mode == "auto" and "sm9rrs" in args.methods
     effective_attack_start = args.attack_start_round or args.detector_window + 2
     try:
+        OursParameters.from_object(args).validate()
         CalibrationHardConstraints(
             min_round_completion_rate=args.calibration_min_round_completion_rate,
             max_nonfinite_updates=args.calibration_max_nonfinite_updates,
@@ -939,10 +876,10 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
             args.attack_start_round >= 0,
             "--attack-start-round must be non-negative",
         ),
-        (args.detector_window >= 2, "--K must be at least 2"),
+        (args.detector_window >= 3, "--K must be at least 3"),
         (
-            args.calibration_candidate_budget >= 1,
-            "--calibration-candidate-budget must be at least 1",
+            1 <= args.calibration_candidate_budget <= 36,
+            "--calibration-candidate-budget must be in [1, 36]",
         ),
         (
             not auto_ours or args.rounds > args.detector_window,
@@ -957,8 +894,8 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
             "automatic Ours calibration requires at least one attacked ratio",
         ),
         (
-            not auto_ours or args.attack != "none",
-            "automatic Ours calibration requires an enabled attack",
+            not auto_ours or args.attack == "alternating_minimization",
+            "ASR-based automatic calibration requires alternating_minimization; use fixed mode for untargeted attacks",
         ),
         (
             not auto_ours
@@ -978,64 +915,8 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
             "automatic Ours calibration requires --eval-interval 1",
         ),
         (
-            math.isfinite(args.z_threshold) and args.z_threshold > 0.0,
-            "--z-threshold must be finite and positive",
-        ),
-        (
-            1 <= args.detector_subspace_dim < 10,
-            "--detector-subspace-dim must be in [1, 9] so lambda_(q+1) exists",
-        ),
-        (
-            math.isfinite(args.detector_gap_threshold)
-            and args.detector_gap_threshold > 0.0,
-            "--detector-gap-threshold must be finite and positive",
-        ),
-        (
-            args.detector_adjacent_threshold is None
-            or (
-                math.isfinite(args.detector_adjacent_threshold)
-                and args.detector_adjacent_threshold > 0.0
-            ),
-            "--detector-adjacent-threshold must be finite and positive",
-        ),
-        (
-            args.detector_anchor_threshold is None
-            or (
-                math.isfinite(args.detector_anchor_threshold)
-                and args.detector_anchor_threshold > 0.0
-            ),
-            "--detector-anchor-threshold must be finite and positive",
-        ),
-        (
-            math.isfinite(args.detector_drift_memory)
-            and 0.0 < args.detector_drift_memory <= 1.0,
-            "--detector-drift-memory must be in (0, 1]",
-        ),
-        (
-            math.isfinite(args.detector_drift_allowance)
-            and args.detector_drift_allowance > 0.0,
-            "--detector-drift-allowance must be finite and positive",
-        ),
-        (
-            math.isfinite(args.detector_drift_threshold)
-            and args.detector_drift_threshold > 0.0,
-            "--detector-drift-threshold must be finite and positive",
-        ),
-        (args.suspicion_remove_after >= 1, "--C_tol must be at least 1"),
-        (
-            args.suspicion_count_max == 0
-            or args.suspicion_count_max >= args.suspicion_remove_after,
-            "--C_max must be 0 or at least --C_tol",
-        ),
-        (
-            math.isfinite(args.suspicion_penalty_factor)
-            and 0.0 < args.suspicion_penalty_factor < 1.0,
-            "--suspicion-penalty-factor must be in (0, 1)",
-        ),
-        (
-            math.isfinite(args.suspicion_recovery_factor)
-            and args.suspicion_recovery_factor > 1.0,
-            "--suspicion-recovery-factor must be greater than 1",
+            "sm9rrs" not in args.methods or effective_attack_start > args.detector_window,
+            "Ours requires a clean first K rounds; attack start must exceed K",
         ),
         (
             args.vert_history_window >= 2,
@@ -1131,23 +1012,7 @@ def build_experiment_configs(args: argparse.Namespace) -> list[ExperimentConfig]
                             attack_target_count=args.attack_target_count,
                             attack_start_round=args.attack_start_round,
                             detector_window=args.detector_window,
-                            z_threshold=args.z_threshold,
-                            detector_subspace_dim=args.detector_subspace_dim,
-                            detector_gap_threshold=args.detector_gap_threshold,
-                            detector_adjacent_threshold=(
-                                args.z_threshold
-                                if args.detector_adjacent_threshold is None
-                                else args.detector_adjacent_threshold
-                            ),
-                            detector_anchor_threshold=(
-                                args.z_threshold
-                                if args.detector_anchor_threshold is None
-                                else args.detector_anchor_threshold
-                            ),
-                            detector_drift_memory=args.detector_drift_memory,
-                            detector_drift_allowance=args.detector_drift_allowance,
-                            detector_drift_threshold=args.detector_drift_threshold,
-                            detector_decision_rule=args.detector_decision_rule,
+                            **asdict(OursParameters.from_object(args)),
                             crypto_mode=args.crypto_mode,
                             dkg_threshold=args.dkg_threshold,
                             dkg_nodes=args.dkg_nodes,
@@ -1155,14 +1020,6 @@ def build_experiment_configs(args: argparse.Namespace) -> list[ExperimentConfig]
                             eval_interval=args.eval_interval,
                             checkpoint_interval=args.checkpoint_interval,
                             sm9_workers=args.sm9_workers,
-                            suspicion_penalty_factor=args.suspicion_penalty_factor,
-                            suspicion_recovery_factor=args.suspicion_recovery_factor,
-                            suspicion_remove_after=args.suspicion_remove_after,
-                            suspicion_count_max=(
-                                args.suspicion_remove_after
-                                if args.suspicion_count_max == 0
-                                else args.suspicion_count_max
-                            ),
                             vert_history_window=args.vert_history_window,
                             vert_projection_dim=args.vert_projection_dim,
                             vert_predict_epochs=args.vert_predict_epochs,
@@ -1308,27 +1165,20 @@ def _estimated_cuda_worker_memory_mb(dataset, configs: list[ExperimentConfig]) -
 
 
 def _detector_state_memory_mb(dataset, configs: list[ExperimentConfig]) -> float:
-    """Conservative host footprint of trusted/last-observed float32 thin bases."""
-
+    """Compact normal models + one full-model signed-sketch mask per run."""
     sm9_configs = [config for config in configs if config.method == "sm9rrs"]
     if not sm9_configs:
         return 0.0
-    max_params = _parameter_size_for_dataset(dataset)
-    classes = max(1, int(dataset.num_classes))
-    rows = math.ceil(max_params / classes)
+    feature_size = 1 + 9 + dataset.num_classes ** 2 + 32 + 2 * dataset.num_classes
     return max(
-        config.num_clients
-        * (config.detector_window + 1)
-        * rows
-        * config.detector_subspace_dim
-        * 4
-        / (1024 * 1024)
+        (config.num_clients * (config.detector_window + 16) * feature_size
+         + _parameter_size_for_dataset(dataset)) * 8 / (1024 * 1024)
         for config in sm9_configs
     )
 
 
 def _effective_checkpoint_interval(dataset, config: ExperimentConfig) -> int:
-    """Resolve 0=auto while bounding write amplification for large v3 state."""
+    """Resolve 0=auto while bounding checkpoint write amplification."""
 
     if config.checkpoint_interval > 0 or config.method != "sm9rrs":
         return max(1, config.checkpoint_interval)
@@ -1488,9 +1338,7 @@ def assign_auto_cuda_devices(
     """Spread auto-selected CUDA configurations over usable GPUs.
 
     Explicit ``--device cuda`` remains pinned to PyTorch's default device.
-    With one GPU the assignments intentionally share that device, which lets
-    independent small CNN jobs keep it busy while CPU work from another job is
-    in flight.
+    The device-affine executor runs at most one complete job per device.
     """
 
     if backend_description != "torch:cuda" or requested_device.strip().lower() != "auto":
@@ -1680,8 +1528,7 @@ def _consume_parallel_futures(
 ) -> None:
     """Commit completed configurations serially in the parent process."""
 
-    for future in as_completed(futures):
-        config = futures[future]
+    for future, config in completed_pairs(futures):
         result = future.result()
         results.append(result)
         write_result_files(output_dir, results)
@@ -2413,9 +2260,13 @@ def run_measured_experiment(
             nonlocal last_checkpointed_round, checkpoint_io_seconds
             completed_round = int(state["completed_round"])
             latest_state = state
-            if completed_round == last_checkpointed_round:
+            crypto_state = state.get("crypto_state")
+            pending_audit = bool(crypto_state is not None and crypto_state.pending_audits)
+            # Revocation evidence must survive an audit failure even when
+            # ordinary round checkpoints are spaced several rounds apart.
+            if completed_round == last_checkpointed_round and not pending_audit:
                 return
-            if completed_round != 0 and completed_round % checkpoint_interval != 0:
+            if not pending_audit and completed_round != 0 and completed_round % checkpoint_interval != 0:
                 return
             checkpoint_started = perf_counter()
             _write_round_checkpoint(
@@ -2716,6 +2567,7 @@ def write_diagnostics(path: Path, results: list[ExperimentResult]) -> None:
         "num_clients",
         "method",
         "malicious_ratio",
+        "seed",
     ]
     diagnostic_fields = [item.name for item in fields(ClientDiagnosticRecord)]
     rows = []
@@ -2728,6 +2580,7 @@ def write_diagnostics(path: Path, results: list[ExperimentResult]) -> None:
                     "num_clients": result.config.num_clients,
                     "method": result.config.method,
                     "malicious_ratio": result.config.malicious_ratio,
+                    "seed": result.config.seed,
                     **asdict(record),
                 }
             )
@@ -2791,89 +2644,15 @@ def read_results(summary_path: Path, rounds_path: Path) -> list[ExperimentResult
         partition = row["partition"]
         alpha = float(row["dirichlet_alpha"])
         num_clients = int(row["num_clients"])
-        config = ExperimentConfig(
-            method=row["method"],
-            malicious_ratio=ratio,
-            num_clients=num_clients,
-            rounds=int(row["rounds"]),
-            target_error=float(row["target_error"]),
-            local_epochs=int(row["local_epochs"]),
-            batch_size=int(row["batch_size"]),
-            lr=float(row["lr"]),
-            lr_decay=float(row.get("lr_decay") or 1.0),
-            compute_backend=row.get("compute_backend") or "numpy",
-            device=row.get("device") or "auto",
-            partition=partition,
-            dirichlet_alpha=alpha,
-            attack=row["attack"],
-            attack_scale=float(row["attack_scale"]),
-            attack_boost=float(row.get("attack_boost") or 10.0),
-            attack_epochs=int(row.get("attack_epochs") or 10),
-            attack_stealth_steps=int(row.get("attack_stealth_steps") or 10),
-            attack_distance_weight=float(
-                row.get("attack_distance_weight") or 1e-4
-            ),
-            attack_source_label=int(row.get("attack_source_label") or 5),
-            attack_target_label=int(row.get("attack_target_label") or 7),
-            attack_target_count=int(row.get("attack_target_count") or 1),
-            attack_start_round=int(row["attack_start_round"]),
-            detector_window=int(row["detector_window"]),
-            z_threshold=float(row["z_threshold"]),
-            checkpoint_interval=int(row.get("checkpoint_interval") or 0),
-            detector_subspace_dim=int(row.get("detector_subspace_dim") or 2),
-            detector_gap_threshold=float(
-                row.get("detector_gap_threshold") or 0.1
-            ),
-            detector_adjacent_threshold=float(
-                row.get("detector_adjacent_threshold")
-                or row.get("z_threshold")
-                or 3.0
-            ),
-            detector_anchor_threshold=float(
-                row.get("detector_anchor_threshold")
-                or row.get("z_threshold")
-                or 3.0
-            ),
-            detector_drift_memory=float(
-                row.get("detector_drift_memory") or 0.9
-            ),
-            detector_drift_allowance=float(
-                row.get("detector_drift_allowance") or 1.0
-            ),
-            detector_drift_threshold=float(
-                row.get("detector_drift_threshold") or 5.0
-            ),
-            detector_decision_rule=(
-                row.get("detector_decision_rule") or "any"
-            ),
-            detector_enforce=_parse_bool(row.get("detector_enforce", "True")),
-            crypto_mode=row["crypto_mode"],
-            dkg_threshold=int(row.get("dkg_threshold") or 2),
-            dkg_nodes=int(row.get("dkg_nodes") or 3),
-            early_stop=_parse_bool(row.get("early_stop", "True")),
-            eval_interval=int(row.get("eval_interval") or 1),
-            sm9_workers=int(row.get("sm9_workers") or 1),
-            suspicion_penalty_factor=float(row.get("suspicion_penalty_factor") or 0.5),
-            suspicion_recovery_factor=float(row.get("suspicion_recovery_factor") or 2.0),
-            suspicion_remove_after=int(row.get("suspicion_remove_after") or 3),
-            suspicion_count_max=int(
-                row.get("suspicion_count_max")
-                or row.get("suspicion_remove_after")
-                or 3
-            ),
-            vert_history_window=int(row.get("vert_history_window") or 10),
-            vert_projection_dim=int(row.get("vert_projection_dim") or 128),
-            vert_predict_epochs=int(row.get("vert_predict_epochs") or 5),
-            vert_predict_lr=float(row.get("vert_predict_lr") or 1e-2),
-            vert_top_k=int(row.get("vert_top_k") or 0),
-            vert_use_ratio_prior=_parse_bool(
-                row.get("vert_use_ratio_prior", "False")
-            ),
-            alignins_sparsity=float(row.get("alignins_sparsity") or 0.3),
-            alignins_tda_radius=float(row.get("alignins_tda_radius") or 1.0),
-            alignins_mpsa_radius=float(row.get("alignins_mpsa_radius") or 1.0),
-            seed=int(row["seed"]),
-        )
+        # Defaults permit historical CSV visualization only. Resume uses the
+        # versioned manifest, never this lossy tabular reconstruction.
+        defaults = asdict(ExperimentConfig())
+        values = {}
+        for name, default in defaults.items():
+            value = row.get(name)
+            if value is not None and value != "":
+                values[name] = _parse_bool(value) if isinstance(default, bool) else type(default)(value)
+        config = ExperimentConfig(**values)
         seed = int(row["seed"])
         record_key = (partition, alpha, num_clients, row["method"], ratio, seed)
         legacy_seed_key = (partition, alpha, num_clients, row["method"], ratio, None)

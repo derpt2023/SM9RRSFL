@@ -1,12 +1,12 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "name": "MNIST unified fair grid search",
-  "description": "Scheme B: derive a bounded Ours space without hand-set detector parameters, evaluate Ours/VERT/AlignIns with the same 12-candidate budget on disjoint calibration ratios, learn the Score weights, then freeze every selected method for formal ratios and independent final seeds.",
+  "description": "Scheme B: calibrate aggressive Ours (immediate severe revocation, C_tol suspicion with normal-round halving), VERT and AlignIns with the same 12-candidate budget on disjoint calibration ratios, learn shared Score weights, then freeze parameters for formal ratios and independent final seeds.",
   "shared_parameters": {
     "dataset": "mnist",
     "data_dir": "data/mnist",
     "download": true,
-    "output_dir": "outputs/mnist_v4_alignins_fair_tuning",
+    "output_dir": "outputs/mnist_v6_aggressive_revocation_fair_tuning",
     "methods": [
       "sm9rrs",
       "vert",
@@ -56,7 +56,7 @@
   },
   "tuning": {
     "algorithm": "grid",
-    "validation_fraction": 0.1,
+    "validation_fraction": 0.05,
     "split_seed": 20260810,
     "validation_seeds": [41, 42, 43],
     "final_seeds": [141, 142, 143],

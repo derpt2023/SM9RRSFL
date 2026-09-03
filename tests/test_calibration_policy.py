@@ -7,7 +7,7 @@ from sm9rrsfl.calibration_policy import (
     objective_weight_grid,
     weighted_score,
 )
-from sm9rrsfl.ours_calibration import _automatic_candidate_specs
+from sm9rrsfl.ours_policy import bounded_candidates
 
 
 class CalibrationPolicyTest(unittest.TestCase):
@@ -62,35 +62,14 @@ class CalibrationPolicyTest(unittest.TestCase):
         )
 
     def test_automatic_ours_space_expands_every_requested_axis_but_is_bounded(self):
-        candidates = _automatic_candidate_specs(
-            detector_window=7,
-            num_classes=10,
-            max_clients=100,
-            budget=12,
-        )
-
+        candidates = bounded_candidates(12)
         self.assertEqual(len(candidates), 12)
-        self.assertEqual({item["q"] for item in candidates}, {1, 2, 3})
-        self.assertEqual({item["C_tol"] for item in candidates}, {1, 2, 3, 5})
-        self.assertEqual(len({item["beta"] for item in candidates}), 3)
-        self.assertEqual(
-            len(
-                {
-                    (item["penalty_factor"], item["recovery_factor"])
-                    for item in candidates
-                }
-            ),
-            3,
-        )
-
-        complete = _automatic_candidate_specs(
-            detector_window=7,
-            num_classes=10,
-            max_clients=100,
-            budget=10_000,
-        )
-        self.assertEqual(len(complete), 108)
-
+        self.assertEqual({c["detector_subspace_dim"] for c in candidates}, {1, 2, 3})
+        self.assertEqual({c["suspicion_remove_after"] for c in candidates}, {2, 3, 5})
+        self.assertEqual(len({c["detector_drift_memory"] for c in candidates}), 3)
+        self.assertEqual(len(bounded_candidates(36)), 36)
+        with self.assertRaises(ValueError):
+            bounded_candidates(10000)
 
 if __name__ == "__main__":
     unittest.main()

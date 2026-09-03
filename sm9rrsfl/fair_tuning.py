@@ -8,7 +8,7 @@ set, and only then runs the unified main evaluation on the untouched test set.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import csv
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -24,7 +24,9 @@ import numpy as np
 
 from .calibration_policy import objective_weight_grid, weighted_score
 from .config_runner import ConfigError, parameters_to_argv
-from .datasets import ImageDataset, load_image_dataset
+from .datasets import ImageDataset, load_image_dataset, stratified_training_three_way_split
+from .ours_policy import OURS_PARAMETER_NAMES
+from .execution import completed_pairs, device_affine_futures
 from .experiments import (
     ProgressReporter,
     _cuda_capacity_error,
@@ -52,7 +54,7 @@ from .model import describe_compute_backend
 from .visualization import generate_visualizations
 
 
-TUNING_SCHEMA_VERSION = 2
+TUNING_SCHEMA_VERSION = 3
 ALL_METHODS = (
     "sm9rrs",
     "vert",
@@ -63,23 +65,7 @@ ALL_METHODS = (
 )
 TUNABLE_METHODS = ("sm9rrs", "vert", "alignins")
 METHOD_TUNABLE_PARAMETERS = {
-    "sm9rrs": frozenset(
-        {
-            "detector_window",
-            "z_threshold",
-            "detector_subspace_dim",
-            "detector_gap_threshold",
-            "detector_adjacent_threshold",
-            "detector_anchor_threshold",
-            "detector_drift_memory",
-            "detector_drift_allowance",
-            "detector_drift_threshold",
-            "suspicion_penalty_factor",
-            "suspicion_recovery_factor",
-            "suspicion_remove_after",
-            "suspicion_count_max",
-        }
-    ),
+    "sm9rrs": frozenset(OURS_PARAMETER_NAMES + ("detector_window",)),
     "vert": frozenset(
         {
             "vert_history_window",
@@ -151,7 +137,6 @@ class FairTuningConfig:
     calibration_ratios: tuple[float, ...]
     ratio_schedule: dict[str, Any] | None
     auto_ours: bool
-    preinvalid_candidates: tuple[str, ...]
     candidates: dict[str, tuple[dict[str, Any], ...]]
 
 
@@ -261,6 +246,8 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
         args = parse_args(parameters_to_argv(shared))
     except (ConfigError, SystemExit) as exc:
         raise FairTuningError("invalid shared experiment parameters") from exc
+    if args.attack != "alternating_minimization":
+        raise FairTuningError("ASR-based tuning requires alternating_minimization; untargeted attacks need a different declared objective")
     if tuple(args.methods) != ALL_METHODS and set(args.methods) != set(ALL_METHODS):
         raise FairTuningError(
             "shared_parameters.methods must contain all six methods exactly once"
@@ -359,18 +346,8 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
                 "calibration_candidate_budget must equal "
                 "trials_per_tunable_method for unified fair tuning"
             )
-        bounded_ours_pool_size = 27 * len(
-            {
-                max(1, min(value, int(args.detector_window)))
-                for value in (1, 2, 3, 5)
-            }
-        )
-        if budget > bounded_ours_pool_size:
-            raise FairTuningError(
-                "trials_per_tunable_method exceeds the bounded Ours pool "
-                f"of {bounded_ours_pool_size} candidates for K="
-                f"{args.detector_window}"
-            )
+        if budget > 36:
+            raise FairTuningError("trials_per_tunable_method exceeds the bounded Ours pool of 36")
     candidates: dict[str, tuple[dict[str, Any], ...]] = {}
     for method in ALL_METHODS:
         space = spaces[method]
@@ -453,7 +430,6 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
             dict(args.ratio_schedule) if args.ratio_schedule is not None else None
         ),
         auto_ours=auto_ours,
-        preinvalid_candidates=(),
         candidates=candidates,
     )
 
@@ -481,52 +457,6 @@ def _grid_candidates(space: dict[str, Any], method: str) -> Iterable[dict[str, A
         values.append(choices)
     for combination in product(*values):
         yield dict(zip(names, combination))
-
-
-def make_validation_dataset(
-    dataset: ImageDataset,
-    *,
-    fraction: float,
-    seed: int,
-) -> ImageDataset:
-    """Create a deterministic stratified holdout from training data only."""
-
-    rng = np.random.default_rng(seed)
-    train_indices: list[np.ndarray] = []
-    validation_indices: list[np.ndarray] = []
-    for label in range(dataset.num_classes):
-        indices = np.flatnonzero(dataset.y_train == label)
-        if len(indices) < 2:
-            raise FairTuningError(
-                f"class {label} needs at least two training samples for a holdout split"
-            )
-        shuffled = rng.permutation(indices)
-        validation_count = min(len(indices) - 1, max(1, int(round(len(indices) * fraction))))
-        validation_indices.append(shuffled[:validation_count])
-        train_indices.append(shuffled[validation_count:])
-    train = rng.permutation(np.concatenate(train_indices))
-    validation = rng.permutation(np.concatenate(validation_indices))
-    return ImageDataset(
-        x_train=dataset.x_train[train].copy(),
-        y_train=dataset.y_train[train].copy(),
-        x_test=dataset.x_train[validation].copy(),
-        y_test=dataset.y_train[validation].copy(),
-        x_attack=(
-            dataset.x_attack.copy()
-            if getattr(dataset, "x_attack", None) is not None
-            else None
-        ),
-        y_attack=(
-            dataset.y_attack.copy()
-            if getattr(dataset, "y_attack", None) is not None
-            else None
-        ),
-        # Preserve the exact name because it selects the CIFAR architecture and
-        # also remains the task identifier in the SM9-RRS protocol.
-        name=dataset.name,
-        input_shape=dataset.input_shape,
-        num_classes=dataset.num_classes,
-    )
 
 
 def _clean_scenario_key(
@@ -692,7 +622,15 @@ def score_trial(
     if not clean or not attacked:
         raise FairTuningError("each trial needs clean and attacked validation scenarios")
     clean_accuracy_values = [float(result.final_accuracy) for result in clean]
-    robust_accuracy_values = [float(result.final_accuracy) for result in attacked]
+    postattack = {
+        id(result): [r for r in result.records
+                     if r.round >= (result.config.attack_start_round or result.config.detector_window + 2)]
+        for result in attacked
+    }
+    robust_accuracy_values = [
+        fmean(r.accuracy for r in postattack[id(result)]) if postattack[id(result)] else float("nan")
+        for result in attacked
+    ]
     accuracy_metrics_present = all(
         np.isfinite(value) and 0.0 <= value <= 1.0
         for value in (*clean_accuracy_values, *robust_accuracy_values)
@@ -705,20 +643,14 @@ def score_trial(
     )
     attack_rates: list[float] = []
     attack_metrics_present = True
+    peak_attack_rates = []
     for result in attacked:
-        raw = (
-            result.records[-1].attack_target_success_rate
-            if result.records
-            else None
-        )
-        if raw is None:
+        rates = [r.attack_target_success_rate for r in postattack[id(result)]]
+        if not rates or any(v is None or not np.isfinite(v) or not 0 <= v <= 1 for v in rates):
             attack_metrics_present = False
             continue
-        value = float(raw)
-        if not np.isfinite(value) or not 0.0 <= value <= 1.0:
-            attack_metrics_present = False
-            continue
-        attack_rates.append(value)
+        attack_rates.append(fmean(rates))
+        peak_attack_rates.append(max(rates))
     attack_metrics_present = (
         attack_metrics_present and len(attack_rates) == len(attacked)
     )
@@ -728,7 +660,7 @@ def score_trial(
         else 1.0
     )
     worst_attack_success_rate = max(
-        (float(value) for value in attack_rates),
+        (float(value) for value in peak_attack_rates),
         default=1.0,
     )
     # Honest-client utility is method-neutral and matters in clean as well as
@@ -855,6 +787,22 @@ def _learn_unified_objective_weights(
     high clean/robust accuracy, and low honest-client aggregation-weight loss.
     """
 
+    methods = tuple(method for method in TUNABLE_METHODS if spec.candidates.get(method))
+    # Cache the sufficient metrics once per fold/candidate. Weight search only
+    # does four-term dot products, not 969 full rescans of all round records.
+    metric_cache = {}
+    def cached_trial(method, candidate_id, parameters, results, **kwargs):
+        weights = kwargs.pop("objective")
+        key = (candidate_id, tuple(id(result) for result in results))
+        if key not in metric_cache:
+            metric_cache[key] = score_trial(method, candidate_id, parameters, results,
+                                            objective=OBJECTIVE_DEFAULTS, **kwargs)
+        trial = metric_cache[key]
+        return replace(trial, score=weighted_score({
+            "clean_accuracy": trial.clean_accuracy, "robust_accuracy": trial.robust_accuracy,
+            "attack_success_rate": trial.attack_success_rate,
+            "honest_weight_loss": trial.honest_weight_loss}, weights) if trial.valid else float("-inf"))
+
     attacked_ratios = tuple(
         sorted({value for value in spec.calibration_ratios if value > 0.0})
     )
@@ -870,11 +818,9 @@ def _learn_unified_objective_weights(
             "cannot learn Score weights without matched FedAvg clean controls"
         )
     clean_valid_candidate_ids: set[str] = set()
-    for method in TUNABLE_METHODS:
+    for method in methods:
         for index, parameters in enumerate(spec.candidates[method], start=1):
             candidate_id = f"{method}-{index:03d}"
-            if candidate_id in spec.preinvalid_candidates:
-                continue
             if _clean_candidate_valid(
                 results_by_candidate.get(candidate_id, []),
                 clean_accuracy_reference=clean_reference,
@@ -895,12 +841,13 @@ def _learn_unified_objective_weights(
     best_key: tuple[Any, ...] | None = None
     best_folds: list[dict[str, Any]] = []
     weight_candidates = objective_weight_grid()
+    selection_signatures = set()
     for weights in weight_candidates:
         folds: list[dict[str, Any]] = []
         admissible = True
         for held_out in attacked_ratios:
             selected_rows: list[dict[str, Any]] = []
-            for method in TUNABLE_METHODS:
+            for method in methods:
                 scored: list[TrialScore] = []
                 for index, parameters in enumerate(
                     spec.candidates[method],
@@ -919,7 +866,7 @@ def _learn_unified_objective_weights(
                             atol=1.0e-12,
                         )
                     ]
-                    trial = score_trial(
+                    trial = cached_trial(
                         method,
                         candidate_id,
                         parameters,
@@ -954,7 +901,7 @@ def _learn_unified_objective_weights(
                         )
                     )
                 ]
-                held_trial = score_trial(
+                held_trial = cached_trial(
                     method,
                     selected.candidate_id,
                     selected.parameters,
@@ -993,6 +940,7 @@ def _learn_unified_objective_weights(
         if not admissible:
             continue
         rows = [row for fold in folds for row in fold["selected"]]
+        selection_signatures.add(tuple(row["candidate_id"] for row in rows))
         worst_asr = max(float(row["attack_success_rate"]) for row in rows)
         worst_accuracy = min(float(row["robust_accuracy"]) for row in rows)
         worst_honest_loss = max(float(row["honest_weight_loss"]) for row in rows)
@@ -1020,7 +968,10 @@ def _learn_unified_objective_weights(
     return best_weights, {
         "algorithm": "leave_one_attacked_ratio_out",
         "status": "learned",
-        "scope": list(TUNABLE_METHODS),
+        "scope": list(methods),
+        "distinct_selection_patterns": len(selection_signatures),
+        "weights_identifiable": len(selection_signatures) > 1,
+        "interpretation": "Validation choice, not a statistically identified universal utility.",
         "weight_floor": 0.05,
         "weight_step": 0.05,
         "evaluated_weight_vectors": len(weight_candidates),
@@ -1053,7 +1004,7 @@ def select_best_trials(trials: list[TrialScore]) -> dict[str, TrialScore]:
             )
         selected[method] = max(
             method_trials,
-            key=lambda trial: (trial.score, tuple(sorted(trial.parameters.items()))),
+            key=lambda trial: (trial.score, -trial.worst_attack_success_rate, trial.candidate_id),
         )
     return selected
 
@@ -1123,49 +1074,11 @@ def build_final_tasks(
     return tasks
 
 
-def _ours_candidates_from_artifact(
-    artifact,
-    *,
-    expected_budget: int,
-) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
-    """Translate every bounded auto-calibration candidate to FL config fields."""
-
-    mapping = {
-        "q": "detector_subspace_dim",
-        "g0": "detector_gap_threshold",
-        "theta_adj": "detector_adjacent_threshold",
-        "theta_anc": "detector_anchor_threshold",
-        "beta": "detector_drift_memory",
-        "kappa": "detector_drift_allowance",
-        "h": "detector_drift_threshold",
-        "C_tol": "suspicion_remove_after",
-        "C_max": "suspicion_count_max",
-        "penalty_factor": "suspicion_penalty_factor",
-        "recovery_factor": "suspicion_recovery_factor",
-    }
-    candidates: list[dict[str, Any]] = []
-    invalid: list[str] = []
-    for index, row in enumerate(artifact.candidate_results, start=1):
-        parameters = row.get("parameters")
-        if not isinstance(parameters, dict):
-            raise FairTuningError(
-                "automatic Ours artifact contains a candidate without parameters"
-            )
-        candidates.append(
-            {
-                target: parameters[source]
-                for source, target in mapping.items()
-            }
-        )
-        if not bool(row.get("valid", False)):
-            invalid.append(f"sm9rrs-{index:03d}")
+def _ours_candidates_from_artifact(artifact, *, expected_budget):
+    candidates = tuple(dict(row["parameters"]) for row in artifact.candidate_results)
     if len(candidates) != expected_budget:
-        raise FairTuningError(
-            "bounded Ours space produced "
-            f"{len(candidates)} candidates, but unified tuning requires "
-            f"{expected_budget}; reduce trials_per_tunable_method or K"
-        )
-    return tuple(candidates), tuple(invalid)
+        raise FairTuningError("Ours candidate budget does not match unified tuning")
+    return candidates
 
 
 def prepare_tuning_tasks(
@@ -1275,16 +1188,14 @@ def execute_tuning_tasks(
         progress.start_parallel(jobs, len(tasks))
         if executor_kind == "thread":
             with ThreadPoolExecutor(max_workers=jobs) as executor:
-                futures = {
-                    executor.submit(
-                        _run_tuning_task_in_thread,
-                        dataset,
-                        task,
-                        checkpoint_dir,
-                        run_fingerprint,
-                    ): task
-                    for task in tasks
-                }
+                submit = lambda pool, task: pool.submit(
+                    _run_tuning_task_in_thread, dataset, task, checkpoint_dir, run_fingerprint)
+                if backend_description == "torch:cuda":
+                    futures = device_affine_futures(
+                        executor, tasks, submit=submit,
+                        device_key=lambda t: t.config.device, jobs=jobs)
+                else:
+                    futures = {submit(executor, task): task for task in tasks}
                 _consume_tuning_futures(
                     futures,
                     completed,
@@ -1393,8 +1304,7 @@ def _consume_tuning_futures(
     run_fingerprint: str | None,
     on_complete: Callable[[TuningExperimentTask, ExperimentResult], None] | None,
 ) -> None:
-    for future in as_completed(futures):
-        task = futures[future]
+    for future, task in completed_pairs(futures):
         result = future.result()
         completed.append((task, result))
         if on_complete is not None:
@@ -1555,11 +1465,47 @@ def _write_tuning_progress(
     _write_json(path, payload)
 
 
+def _scenario_audit(result):
+    start = result.config.attack_start_round or result.config.detector_window + 2
+    records = [r for r in result.records if r.round >= start]
+    rates = [r.attack_target_success_rate for r in records if r.attack_target_success_rate is not None]
+    diagnostics = result.diagnostics
+    honest = max(1, result.config.num_clients - len(result.malicious_clients))
+    return {
+        "postattack_accuracy_mean": fmean(r.accuracy for r in records) if records else None,
+        "postattack_accuracy_min": min((r.accuracy for r in records), default=None),
+        "postattack_asr_mean": fmean(rates) if rates else None,
+        "postattack_asr_peak": max(rates, default=None),
+        "false_revocation_rate": result.records[-1].false_positive_revocations / honest if result.records else None,
+        "history_admissions": sum(d.history_admitted for d in diagnostics),
+        "aggregation_without_history": sum(d.aggregation_accepted and not d.history_admitted for d in diagnostics),
+        "clipped_updates": sum(d.clip_factor < 1 for d in diagnostics),
+        "history_frozen_rounds": len({d.round for d in diagnostics if d.history_frozen}),
+        "immediate_revocation_requests": sum(d.trace_requested and d.immediate_revocation for d in diagnostics),
+        "cumulative_revocation_requests": sum(d.trace_requested and not d.immediate_revocation for d in diagnostics),
+    }
+
+
+def _seed_stability(results):
+    groups = {}
+    for result in results:
+        c = result.config
+        key = (c.partition, c.dirichlet_alpha, c.num_clients, c.malicious_ratio)
+        groups.setdefault(key, []).append(result)
+    return [
+        {"partition": key[0], "dirichlet_alpha": key[1], "num_clients": key[2],
+         "malicious_ratio": key[3], "seeds": [r.config.seed for r in runs],
+         "final_accuracy_std": pstdev(r.final_accuracy for r in runs),
+         "final_accuracy_min": min(r.final_accuracy for r in runs)}
+        for key, runs in sorted(groups.items())
+    ]
+
+
 def _validation_rows(
     executions: list[tuple[TuningExperimentTask, ExperimentResult]],
 ) -> list[dict[str, Any]]:
     return [
-        {"candidate_id": task.candidate_id, **result.summary_dict()}
+        {"candidate_id": task.candidate_id, **result.summary_dict(), **_scenario_audit(result)}
         for task, result in sorted(
             executions,
             key=lambda item: _tuning_task_sort_key(item[0]),
@@ -1579,26 +1525,33 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         test_limit=args.test_samples,
         seed=args.seed,
     )
+    # Split ONCE. Every method/phase trains on the very same arrays; only
+    # evaluation changes from training holdout to untouched official test.
+    split = stratified_training_three_way_split(
+        dataset, seed=spec.split_seed, train_fraction=0.95 - spec.validation_fraction,
+        calibration_fraction=spec.validation_fraction, attack_fraction=0.05)
+    from .ours_calibration import split_metadata, validate_targeted_split
+    validate_targeted_split(split, args)
+    data_contract = split_metadata(split, spec.split_seed)
     ours_calibration_metadata: dict[str, Any] | None = None
     if spec.auto_ours:
         from .ours_calibration import (
-            apply_ours_parameters,
             calibration_metadata,
             resolve_or_run_ours_calibration,
         )
 
-        # Scheme B asks the Ours calibrator only to derive/refine its bounded
-        # candidate policies from clean data.  Attacked candidate selection is
-        # deferred to the same outer validation tasks used by VERT/AlignIns.
+        # Candidate construction needs no extra training; each shared
+        # validation run learns its own normal states in its clean prefix.
         args.ours_calibration_selection_mode = "defer_to_unified_tuner"
         dataset, artifact = resolve_or_run_ours_calibration(
             dataset,
             args,
             output_dir,
+            split=split,
+            split_seed=spec.split_seed,
         )
-        apply_ours_parameters(args, artifact)
         candidates = dict(spec.candidates)
-        ours_candidates, preinvalid_candidates = _ours_candidates_from_artifact(
+        ours_candidates = _ours_candidates_from_artifact(
             artifact,
             expected_budget=spec.trials_per_tunable_method,
         )
@@ -1606,21 +1559,17 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         spec = replace(
             spec,
             candidates=candidates,
-            preinvalid_candidates=preinvalid_candidates,
         )
         ours_calibration_metadata = calibration_metadata(artifact)
         print(
             "unified_auto_ours="
             f"candidates={len(candidates['sm9rrs'])} "
-            f"preinvalid={len(preinvalid_candidates)} "
             "objective=pending_unified_validation_learning",
             flush=True,
         )
-    validation_dataset = make_validation_dataset(
-        dataset,
-        fraction=spec.validation_fraction,
-        seed=spec.split_seed,
-    )
+    dataset = split.main_dataset
+    validation_dataset = split.calibration_dataset
+    print("training_data_contract=" + json.dumps(data_contract, sort_keys=True), flush=True)
     base_configs = build_experiment_configs(args)
     validation_tasks = build_validation_tasks(spec, base_configs)
     (
@@ -1680,6 +1629,19 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
     for task, result in validation_executions:
         results_by_candidate.setdefault(task.candidate_id, []).append(result)
 
+    # Persist interpretable per-seed evidence BEFORE weight learning can fail.
+    _write_csv(output_dir / "validation_results.csv", validation_rows)
+    reference = _matched_fedavg_clean_accuracy(results_by_candidate)
+    preliminary = []
+    for method in ALL_METHODS:
+        for i, p in enumerate(spec.candidates[method], 1):
+            cid = f"{method}-{i:03d}"
+            preliminary.append(score_trial(
+                method, cid, p, results_by_candidate[cid], objective=OBJECTIVE_DEFAULTS,
+                clean_accuracy_reference=reference, max_clean_accuracy_drop=spec.max_clean_accuracy_drop,
+                min_round_completion_rate=spec.min_round_completion_rate,
+                max_nonfinite_updates=spec.max_nonfinite_updates).row())
+    _write_csv(output_dir / "candidate_feasibility.csv", preliminary)
     if spec.objective_mode == "learned_leave_one_attacked_ratio_out":
         learned_objective, objective_learning = _learn_unified_objective_weights(
             spec,
@@ -1718,17 +1680,6 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
                 min_round_completion_rate=spec.min_round_completion_rate,
                 max_nonfinite_updates=spec.max_nonfinite_updates,
             )
-            if candidate_id in spec.preinvalid_candidates:
-                trial = replace(
-                    trial,
-                    valid=False,
-                    score=float("-inf"),
-                    invalid_reasons=tuple(
-                        dict.fromkeys(
-                            (*trial.invalid_reasons, "ours_clean_calibration")
-                        )
-                    ),
-                )
             trial_scores.append(trial)
             print(
                 f"tuning_candidate_complete={candidate_id} valid={trial.valid} "
@@ -1744,6 +1695,23 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         "schema_version": TUNING_SCHEMA_VERSION,
         "dataset": args.dataset,
         "selection_data": "stratified holdout from training set only",
+        "score_metrics": {
+            "clean_accuracy": "final clean accuracy",
+            "robust_accuracy": "per-scenario mean accuracy over ALL attack-era rounds",
+            "attack_success_rate": "per-scenario mean ASR over ALL attack-era rounds",
+            "honest_weight_loss": "per-scenario mean lost honest FedAvg coefficient",
+        },
+        "selection_stability": {
+            method: {
+                "valid_candidates": sum(t.valid and t.method == method for t in trial_scores),
+                "score_margin": (
+                    sorted((t.score for t in trial_scores if t.valid and t.method == method), reverse=True)[0]
+                    - sorted((t.score for t in trial_scores if t.valid and t.method == method), reverse=True)[1]
+                    if sum(t.valid and t.method == method for t in trial_scores) > 1 else None),
+                "per_scenario_seed_stability": _seed_stability(
+                    results_by_candidate[trial.candidate_id]),
+            } for method, trial in selected.items()
+        },
         "official_test_used_for_selection": False,
         "validation_fraction": spec.validation_fraction,
         "split_seed": spec.split_seed,
@@ -1768,7 +1736,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         "validation_fingerprint": validation_fingerprint,
         "shared_parameters": spec.shared_parameters,
         "ours_calibration": ours_calibration_metadata,
-        "preinvalid_candidates": list(spec.preinvalid_candidates),
+        "training_data_contract": data_contract,
         "selected": {
             method: {
                 "candidate_id": trial.candidate_id,
@@ -2083,7 +2051,6 @@ __all__ = [
     "execute_resumable_tuning_phase",
     "execute_tuning_tasks",
     "load_fair_tuning_config",
-    "make_validation_dataset",
     "prepare_tuning_tasks",
     "run_fair_tuning",
     "score_trial",

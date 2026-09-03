@@ -1,12 +1,12 @@
 {
-  "schema_version": 2,
-  "name": "mnist-v4-alignins-auto-calibrated",
-  "description": "MNIST six-method study with AlignIns, disjoint calibration/main malicious ratios, and bounded automatic Ours policy calibration.",
+  "schema_version": 3,
+  "name": "mnist-v6-aggressive-revocation-auto-calibrated",
+  "description": "MNIST six-method study with SVD normal-state K-means, immediate severe revocation, C_tol suspicion with normal-round halving, automatically calibrated parameters and bounded aggregation.",
   "parameters": {
     "dataset": "mnist",
     "download": true,
     "data_dir": "data/mnist",
-    "output_dir": "outputs/mnist_v4_alignins_20260830",
+    "output_dir": "outputs/mnist_v6_aggressive_revocation_20260903",
 
     "methods": [
       "sm9rrs",

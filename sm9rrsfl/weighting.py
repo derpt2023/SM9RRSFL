@@ -1,157 +1,104 @@
-"""Task-tag keyed dynamic weights from Word Section 4.3.3."""
-
-from __future__ import annotations
+"""Bounded reliability and aggressive, certificate-gated revocation."""
 
 from dataclasses import dataclass
-from typing import Iterable
+import math
 
 
 @dataclass(frozen=True)
 class WeightUpdateResult:
-    weights: dict[str, float]
-    pre_normalization_weights: dict[str, float]
-    suspicious_tags: set[str]
-    count_increment_tags: set[str]
-    trace_requested_tags: set[str]
+    weights: dict
+    reliability_after_update: dict
+    suspicious_tags: set
+    count_increment_tags: set
+    trace_requested_tags: set
+    history_frozen: bool
 
 
 class SuspicionWeightManager:
-    """Maintain ``w_pi`` and ``Count_pi`` by opaque ``Tag_pi``.
+    """Reliability stays in [0,1]; this class NEVER redistributes lost mass."""
 
-    Reaching ``C_tol`` creates a trace request and assigns zero weight to the
-    trigger-round update.  Permanent removal happens only after AS validates a
-    D-KGC threshold trace certificate via :meth:`confirm_revocation`.
-    """
-
-    def __init__(
-        self,
-        tag_ids: Iterable[str] = (),
-        *,
-        participant_count: int | None = None,
-        penalty_factor: float = 0.5,
-        recovery_factor: float = 2.0,
-        remove_after: int = 3,
-        max_count: int | None = None,
-    ) -> None:
+    def __init__(self, tag_ids=(), *,
+                 penalty_factor=0.1, recovery_factor=1.25, remove_after=3):
         initial = tuple(dict.fromkeys(str(tag) for tag in tag_ids))
-        if participant_count is None:
-            participant_count = len(initial)
-        if participant_count < 1:
-            raise ValueError("participant_count must be positive")
-        if not 0.0 < penalty_factor < 1.0:
-            raise ValueError("penalty_factor must be in (0, 1)")
-        if recovery_factor <= 1.0:
+        if not math.isfinite(penalty_factor) or not 0 < penalty_factor < 1:
+            raise ValueError("penalty_factor must be in (0,1)")
+        if not math.isfinite(recovery_factor) or recovery_factor <= 1:
             raise ValueError("recovery_factor must be greater than 1")
-        if remove_after < 1:
-            raise ValueError("remove_after must be positive")
-        if max_count is None:
-            max_count = remove_after
-        if max_count < remove_after:
-            raise ValueError("max_count must be at least remove_after")
-        self.participant_count = participant_count
+        if isinstance(remove_after, bool) or not isinstance(remove_after, int) or remove_after < 1:
+            raise ValueError("remove_after must be a positive integer")
         self.penalty_factor = penalty_factor
         self.recovery_factor = recovery_factor
         self.remove_after = remove_after
-        self.max_count = max_count
-        initial_weight = 1.0 / participant_count
-        self.weights = {tag: initial_weight for tag in initial}
-        # Keep the historical attribute name for checkpoint compatibility.
-        # Values are non-negative integer anomaly-evidence scores: a composite
-        # R=1 round adds one up to C_max, while R=0 floor-halves the evidence.
-        self.consecutive_suspicions = {tag: 0 for tag in initial}
-        self.pending_trace: set[str] = set()
-        self.revoked: set[str] = set()
+        self.weights = dict.fromkeys(initial, 1.0)
+        self.evidence_counts = dict.fromkeys(initial, 0.0)
+        self.pending_trace = set()
+        self.revoked = set()
+        self.previous_suspicious = set()
 
-    def update(
-        self,
-        active_tags: list[str],
-        suspicious_tags: set[str],
-        count_increment_tags: set[str],
-    ) -> WeightUpdateResult:
-        """Apply the paper's penalty/recovery/count equations for one round.
-
-        The third scheme revision has one composite decision ``R_pi``.
-        Consequently ``suspicious_tags`` and ``count_increment_tags`` must be
-        identical: R=1 both downweights and increments ``Count_pi``; R=0 both
-        recovers the weight and replaces Count with ``floor(Count / 2)``.
-        """
-
+    def update(self, active_tags, suspicious_tags, count_increment_tags, *,
+               immediate_revocation_tags=None, recovery_tags=None):
         active = list(dict.fromkeys(active_tags))
-        if not active:
-            return WeightUpdateResult(
-                dict(self.weights),
-                dict(self.weights),
-                set(),
-                set(),
-                set(),
-            )
-        if count_increment_tags != suspicious_tags:
-            raise ValueError(
-                "count_increment_tags must equal suspicious_tags for composite R"
-            )
-        uniform_weight = 1.0 / len(active)
-        trace_requested: set[str] = set()
-
-        for tag in active:
-            self.weights.setdefault(tag, uniform_weight)
-            self.consecutive_suspicions.setdefault(tag, 0)
-            if tag in self.revoked:
-                self.weights[tag] = 0.0
-                continue
+        immediate = set() if immediate_revocation_tags is None else set(immediate_revocation_tags)
+        if not immediate <= count_increment_tags <= suspicious_tags <= set(active):
+            raise ValueError("immediate revocation must be a subset of counted suspicious active tags")
+        recovery_tags = set() if recovery_tags is None else set(recovery_tags)
+        if recovery_tags & suspicious_tags or not recovery_tags <= set(active):
+            raise ValueError("recovery requires a normal active tag")
+        eligible = [tag for tag in active if tag not in self.revoked and tag not in self.pending_trace]
+        newly_suspicious = (suspicious_tags & set(eligible)) - self.previous_suspicious
+        # A distribution shock freezes trusted history and reliability
+        # recovery only. It must NEVER defer either revocation path.
+        shock = bool(eligible and len(newly_suspicious) > 0.5 * len(eligible))
+        self.previous_suspicious = set(suspicious_tags)
+        for tag in eligible:
+            self.weights.setdefault(tag, 1.0)
+            self.evidence_counts.setdefault(tag, 0.0)
             if tag in suspicious_tags:
-                self.weights[tag] *= self.penalty_factor
-            else:
-                if self.weights[tag] < uniform_weight:
-                    self.weights[tag] = min(
-                        self.recovery_factor * self.weights[tag],
-                        uniform_weight,
-                    )
-
+                self.weights[tag] = max(1e-12, self.weights[tag] * self.penalty_factor)
+            elif tag in recovery_tags and not shock:
+                self.weights[tag] = min(1.0, self.weights[tag] * self.recovery_factor)
             if tag in count_increment_tags:
-                self.consecutive_suspicions[tag] = min(
-                    self.max_count,
-                    self.consecutive_suspicions[tag] + 1,
-                )
-            else:
-                # A normal round weakens rather than erases historical anomaly
-                # evidence, preventing one benign-looking update from clearing
-                # a persistent attack trajectory.
-                self.consecutive_suspicions[tag] //= 2
-
-            if self.consecutive_suspicions[tag] >= self.remove_after:
-                if tag not in self.pending_trace:
-                    self.pending_trace.add(tag)
-                    trace_requested.add(tag)
-                # The trigger-round update is rejected while D-KGC tracing is
-                # pending, but this is not yet a permanent revocation.
-                self.weights[tag] = 0.0
-
-        pre_normalization_weights = {
-            tag: self.weights.get(tag, 0.0) for tag in active
+                self.evidence_counts[tag] = min(
+                    float(self.remove_after), self.evidence_counts[tag] + 1.0)
+            elif tag not in suspicious_tags:
+                # Each observed normal round halves the suspicion value,
+                # independently of the stricter trusted-history/recovery gate.
+                # Missing observations or uncalibrated rejections are NOT normal.
+                self.evidence_counts[tag] *= 0.5
+        requested = {
+            tag for tag in eligible
+            if tag in immediate or (
+                tag in count_increment_tags and self.evidence_counts[tag] >= self.remove_after)
         }
-        self._renormalize(active)
-        return WeightUpdateResult(
-            weights=dict(self.weights),
-            pre_normalization_weights=pre_normalization_weights,
-            suspicious_tags=set(suspicious_tags),
-            count_increment_tags=set(count_increment_tags),
-            trace_requested_tags=trace_requested,
-        )
+        # No per-round quota or minimum-survivor exception: severe evidence
+        # bypasses C_tol; an update that crosses C_tol is also excluded now.
+        self.pending_trace.update(requested)
+        effective = {
+            tag: (0.0 if tag in self.pending_trace or tag in self.revoked
+                  else self.weights.get(tag, 1.0)) for tag in active
+        }
+        return WeightUpdateResult(effective, dict(self.weights), set(suspicious_tags),
+                                  set(count_increment_tags), requested, shock)
 
-    def confirm_revocation(self, tag: str) -> None:
-        """Permanently retire a tag only after Equation (7) was accepted."""
-
+    def confirm_revocation(self, tag):
         if tag not in self.pending_trace:
             raise ValueError("tag has no pending trace request")
         self.pending_trace.remove(tag)
         self.revoked.add(tag)
         self.weights[tag] = 0.0
 
-    def _renormalize(self, active_tags: list[str]) -> None:
-        eligible = [tag for tag in active_tags if tag not in self.revoked]
-        total = sum(self.weights.get(tag, 0.0) for tag in eligible)
-        if total > 0.0:
-            for tag in eligible:
-                self.weights[tag] /= total
-        for tag in self.revoked:
-            self.weights[tag] = 0.0
+
+def bounded_aggregation_coefficients(tags, nominal_weights, reliability,
+                                     decisions, weight_cap):
+    """Sample-proportional, capped, clipped coefficients, without renormalizing.
+
+    Missing mass means a smaller server step, not an invitation to amplify the
+    few survivors. All-zero input yields a zero step (never uniform fallback).
+    """
+    raw = {tag: nominal_weights[tag] * reliability.get(tag, 0.0)
+           if decisions[tag].accepted else 0.0 for tag in tags}
+    total = sum(raw.values())
+    if total <= 0:
+        return dict.fromkeys(tags, 0.0)
+    return {tag: min(raw[tag] / total, weight_cap * raw[tag])
+            * decisions[tag].clip_factor for tag in tags}

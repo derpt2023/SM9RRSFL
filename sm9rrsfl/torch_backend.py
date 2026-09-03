@@ -218,12 +218,12 @@ def _resident_dataset_tensors(torch, dataset, spec: ModelSpec, device) -> tuple[
             device=device,
         )
         attack_x_np = (
-            dataset.x_test
+            dataset.x_train[:0]
             if getattr(dataset, "x_attack", None) is None
             else dataset.x_attack
         )
         attack_y_np = (
-            dataset.y_test
+            dataset.y_train[:0]
             if getattr(dataset, "y_attack", None) is None
             else dataset.y_attack
         )
@@ -550,6 +550,8 @@ class TorchTrainingContext:
             raise ValueError("distance_weight must be finite and non-negative")
         if target_label < 0 or target_label >= self.spec.num_classes:
             raise ValueError("target_label is outside the model class range")
+        if self.x_attack.shape[0] == 0:
+            raise ValueError("alternating minimization requires a training-derived attack split")
 
         benign_delta, _ = self.local_train_delta_resident(
             global_vector,

@@ -11,39 +11,12 @@ from sm9rrsfl.fl import ExperimentConfig, run_experiment
 from sm9rrsfl.svd_detector import DetectionResult
 
 
-def _composite_detection_result(
-    *,
-    anomalous: bool,
-    **overrides,
-) -> DetectionResult:
-    """Build one complete third-revision detector decision for FL integration tests."""
-
-    values = {
-        "accepted": not anomalous,
-        "reason": "composite_threshold_any" if anomalous else "accepted",
-        "count_increment": anomalous,
-        "z_sigma": 5.0 if anomalous else 1.0,
-        "z_direction": 4.0 if anomalous else 1.0,
-        "sigma_delta": 0.4 if anomalous else 0.1,
-        "cosine_similarity": 0.75 if anomalous else 0.99,
-        "spectrum_adjacent_distance": 0.4 if anomalous else 0.1,
-        "subspace_adjacent_distance": 0.5 if anomalous else 0.1,
-        "spectrum_anchor_distance": 0.8 if anomalous else 0.1,
-        "subspace_anchor_distance": 0.9 if anomalous else 0.1,
-        "z_spectrum_adjacent": 4.0 if anomalous else 1.0,
-        "z_subspace_adjacent": 5.0 if anomalous else 1.0,
-        "z_spectrum_anchor": 6.0 if anomalous else 1.0,
-        "z_subspace_anchor": 7.0 if anomalous else 1.0,
-        "adjacent_score": 4.0 if anomalous else 1.0,
-        "anchor_score": 6.0 if anomalous else 1.0,
-        "cumulative_drift": 8.0 if anomalous else 0.0,
-        "spectral_gap": 0.7,
-        "direction_reliability": 0.5,
-        "adjacent_exceeded": anomalous,
-        "anchor_exceeded": anomalous,
-        "drift_exceeded": anomalous,
-        "trusted_history_size": 3,
-    }
+def _composite_detection_result(*, anomalous, **overrides):
+    values = dict(accepted=not anomalous, reason="strong_novelty" if anomalous else "normal",
+                  would_flag=anomalous, count_increment=anomalous,
+                  immediate_revocation=anomalous,
+                  novelty_score=8.0 if anomalous else 0.0,
+                  history_eligible=not anomalous, signed_score=8.0 if anomalous else 0.0)
     values.update(overrides)
     return DetectionResult(**values)
 
@@ -212,13 +185,12 @@ class FederatedLoopTest(unittest.TestCase):
             method="sm9rrs",
             malicious_ratio=0.25,
             num_clients=4,
-            rounds=4,
+            rounds=5,
             local_epochs=1,
             batch_size=16,
             attack="sign_flip",
             attack_start_round=0,
-            detector_window=2,
-            detector_decision_rule="any",
+            detector_window=3,
             crypto_mode="simulated",
             early_stop=False,
             seed=13,
@@ -242,10 +214,10 @@ class FederatedLoopTest(unittest.TestCase):
 
         with self.assertRaises(SimulatedInterruption):
             run_experiment(dataset, config, checkpoint_callback=stop_after_first_round)
-        self.assertEqual(saved["state"]["detector"].decision_rule, "any")
+        self.assertEqual(saved["state"]["detector"].window_size, 3)
         self.assertEqual(
             {
-                state.last_observed.round_id
+                state.last_round
                 for state in saved["state"]["detector"]._states.values()
             },
             {1},
@@ -260,26 +232,27 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertEqual(resumed.diagnostics, uninterrupted.diagnostics)
         self.assertEqual(
             [record.attack_active for record in resumed.records],
-            [False, False, False, False, True],
+            [False, False, False, False, False, True],
         )
-        self.assertEqual(resumed.summary_dict()["effective_attack_start_round"], 4)
+        self.assertEqual(resumed.summary_dict()["effective_attack_start_round"], 5)
         malicious = set(resumed.malicious_clients)
         self.assertTrue(malicious)
         for diagnostic in resumed.diagnostics:
             self.assertEqual(
                 diagnostic.attack_active,
-                diagnostic.client_id in malicious and diagnostic.round >= 4,
+                diagnostic.client_id in malicious and diagnostic.round >= 5,
             )
 
     def test_alternating_minimization_runs_inside_local_training(self):
         from sm9rrsfl import fl as fl_module
 
         dataset = make_synthetic_mnist_like(
-            train_samples=40,
+            train_samples=400,
             test_samples=100,
             seed=131,
         )
-        source_label = int(dataset.y_test[0])
+        dataset = stratified_training_three_way_split(dataset, seed=131).main_dataset
+        source_label = int(dataset.y_attack[0])
         target_label = (source_label + 1) % dataset.num_classes
         config = ExperimentConfig(
             method="fedavg",
@@ -410,212 +383,143 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertEqual(result.blacklisted_clients, tuple())
         self.assertEqual(result.records[-1].accepted_updates, 4)
 
-    def test_failed_trace_is_retryable_and_keeps_ctol_updates_rejected(self):
-        from sm9rrsfl import fl as fl_module
+    def test_failed_trace_is_retryable_for_both_revocation_paths(self):
+        from sm9rrsfl import fl as f
+        dataset = make_synthetic_mnist_like(train_samples=60, test_samples=20, seed=121)
+        for severe in (False, True):
+            with self.subTest(severe=severe):
+                config = ExperimentConfig(method="sm9rrs", malicious_ratio=0., num_clients=3,
+                                          rounds=1, crypto_mode="simulated",
+                                          suspicion_remove_after=5 if severe else 1,
+                                          early_stop=False, seed=121)
+                decisions = [_composite_detection_result(
+                                anomalous=True, accepted=not severe, immediate_revocation=severe,
+                                reason="strong_novelty" if severe else "suspicious"),
+                             _composite_detection_result(anomalous=False),
+                             _composite_detection_result(anomalous=False)]
+                checkpoints = []
+                with mock.patch.object(f.LongitudinalSVDDetector, "evaluate", side_effect=decisions), \
+                     mock.patch.object(f.LongitudinalSVDDetector, "commit", return_value=False), \
+                     mock.patch.object(f.ASVerifier, "verify_trace_result", return_value=False), \
+                     self.assertRaisesRegex(RuntimeError, "trace remains pending"):
+                    run_experiment(dataset, config, checkpoint_callback=checkpoints.append)
+                state = checkpoints[-1]
+                self.assertEqual(state["records"][-1].rejected_updates, 1)
+                self.assertEqual(len(state["weight_manager"].pending_trace), 1)
+                self.assertFalse(state["blacklisted"])
+                self.assertEqual(len(state["crypto_state"].pending_audits), 1)
+                self.assertFalse(state["crypto_state"].pending_audits[0].evidence.model_update.flags.writeable)
+                resumed = run_experiment(dataset, config, resume_state=state)
+                self.assertEqual(len(resumed.blacklisted_clients), 1)
+                self.assertEqual(resumed.records[-1].blacklisted_clients, 1)
+                self.assertTrue(resumed.diagnostics[0].revoked)
+                self.assertFalse(resumed.diagnostics[0].trace_pending)
 
-        dataset = make_synthetic_mnist_like(train_samples=40, test_samples=20, seed=121)
-        config = ExperimentConfig(
-            method="sm9rrs",
-            malicious_ratio=0.0,
-            num_clients=2,
-            rounds=1,
-            local_epochs=1,
-            batch_size=16,
-            crypto_mode="simulated",
-            suspicion_remove_after=1,
-            early_stop=False,
-            seed=121,
-        )
+    def test_batch_revocation_retries_failed_certificate_then_closes_last_identity(self):
+        from sm9rrsfl import fl as f
+        dataset = make_synthetic_mnist_like(train_samples=60, test_samples=20, seed=128)
+        config = ExperimentConfig(num_clients=3, malicious_ratio=0., rounds=4, eval_interval=3,
+                                  suspicion_remove_after=5, crypto_mode="simulated", early_stop=False)
+        original = f.ASVerifier.verify_trace_result
+        calls = []
+
+        def fail_first(verifier, evidence, trace_result):
+            calls.append(evidence)
+            return False if len(calls) == 1 else original(verifier, evidence, trace_result)
+
         checkpoints = []
-        with (
-            mock.patch.object(
-                fl_module.LongitudinalSVDDetector,
-                "evaluate",
-                return_value=_composite_detection_result(anomalous=True),
-            ),
-            mock.patch.object(
-                fl_module,
-                "_trace_and_archive",
-                side_effect=ValueError("temporary trace failure"),
-            ),
-            self.assertRaisesRegex(RuntimeError, "trace remains pending"),
-        ):
-            run_experiment(
-                dataset,
-                config,
-                checkpoint_callback=checkpoints.append,
-            )
+        with mock.patch.object(f.LongitudinalSVDDetector, "evaluate",
+                               return_value=_composite_detection_result(anomalous=True)), \
+             mock.patch.object(f.LongitudinalSVDDetector, "commit", return_value=False), \
+             mock.patch.object(f.ASVerifier, "verify_trace_result", autospec=True, side_effect=fail_first), \
+             self.assertRaisesRegex(RuntimeError, "trace remains pending"):
+            run_experiment(dataset, config, checkpoint_callback=checkpoints.append)
+        state = checkpoints[-1]
+        self.assertEqual(state["completed_round"], 1)
+        self.assertEqual(state["records"][-1].round, 1)
+        self.assertEqual(state["records"][-1].accepted_updates, 0)
+        self.assertEqual(len(state["blacklisted"]), 2)
+        self.assertEqual(len(state["crypto_state"].pending_audits), 1)
+        resumed = run_experiment(dataset, config, resume_state=state)
+        self.assertEqual(resumed.stopped_round, 1)
+        self.assertEqual(resumed.records[-1].blacklisted_clients, 3)
+        self.assertEqual(resumed.records[-1].false_positive_revocations, 3)
+        self.assertTrue(all(d.revoked and not d.trace_pending for d in resumed.diagnostics))
 
-        failed_state = checkpoints[-1]
-        self.assertEqual(failed_state["completed_round"], 1)
-        self.assertEqual(failed_state["records"][-1].accepted_updates, 0)
-        self.assertEqual(failed_state["records"][-1].rejected_updates, 2)
-        manager = failed_state["weight_manager"]
-        self.assertEqual(len(manager.pending_trace), 2)
-        self.assertEqual(sum(manager.weights.values()), 0.0)
-        pending = failed_state["crypto_state"].pending_audits
-        self.assertEqual(len(pending), 2)
-        self.assertTrue(
-            all(not item.evidence.model_update.flags.writeable for item in pending)
-        )
-
-        resumed_checkpoints = []
-        resumed = run_experiment(
-            dataset,
-            config,
-            resume_state=failed_state,
-            checkpoint_callback=resumed_checkpoints.append,
-        )
-        self.assertEqual(len(resumed.blacklisted_clients), 2)
-        terminal = resumed_checkpoints[-1]["crypto_state"]
-        self.assertIn(dataset.name, terminal.finalized_task_ids)
-        self.assertEqual(terminal.pending_audits, ())
-
-    def test_revoking_last_member_closes_task_instead_of_reusing_old_ring(self):
-        from sm9rrsfl import fl as fl_module
-
+    def test_mass_severe_detection_revokes_all_and_finalizes_without_stale_records(self):
+        from sm9rrsfl import fl as f
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=122)
         checkpoints = []
-        with mock.patch.object(
-            fl_module.LongitudinalSVDDetector,
-            "evaluate",
-            return_value=_composite_detection_result(anomalous=True),
-        ):
-            result = run_experiment(
-                dataset,
-                ExperimentConfig(
-                    method="sm9rrs",
-                    malicious_ratio=0.0,
-                    num_clients=1,
-                    rounds=1,
-                    local_epochs=1,
-                    batch_size=16,
-                    crypto_mode="simulated",
-                    suspicion_remove_after=1,
-                    early_stop=False,
-                    seed=122,
-                ),
-                checkpoint_callback=checkpoints.append,
-            )
+        config = ExperimentConfig(num_clients=2, malicious_ratio=0, rounds=4, crypto_mode="simulated",
+                                  suspicion_remove_after=5, eval_interval=3, early_stop=False)
+        with mock.patch.object(f.LongitudinalSVDDetector, "evaluate",
+                               return_value=_composite_detection_result(anomalous=True)), \
+             mock.patch.object(f.LongitudinalSVDDetector, "commit", return_value=False):
+            result = run_experiment(dataset, config, checkpoint_callback=checkpoints.append)
+        self.assertEqual(len(result.blacklisted_clients), 2)
+        self.assertEqual(result.stopped_round, 1)
+        self.assertEqual(result.records[-1].accepted_updates, 0)
+        self.assertEqual(result.records[-1].false_positive_revocations, 2)
+        self.assertTrue(all(d.immediate_revocation and d.revoked and d.count_after == 1.
+                            for d in result.diagnostics))
+        self.assertIn(dataset.name, checkpoints[-1]["crypto_state"].finalized_task_ids)
+        resumed = run_experiment(dataset, config, resume_state=checkpoints[-1])
+        self.assertEqual(resumed.records, result.records)
+        self.assertEqual(resumed.diagnostics, result.diagnostics)
+        self.assertEqual(resumed.blacklisted_clients, result.blacklisted_clients)
 
-        self.assertEqual(result.blacklisted_clients, ("client-0",))
-        terminal = checkpoints[-1]["crypto_state"]
-        self.assertIn(dataset.name, terminal.finalized_task_ids)
-        self.assertNotIn(dataset.name, {task.task_id for task in terminal.tasks})
-
-    def test_composite_suspicion_updates_count_weight_and_v3_diagnostics(self):
-        from sm9rrsfl import fl as fl_module
-
+    def test_mild_suspicion_aggregates_but_never_enters_history(self):
+        from sm9rrsfl import fl as f
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=123)
-        with mock.patch.object(
-            fl_module.LongitudinalSVDDetector,
-            "evaluate",
-            return_value=_composite_detection_result(
-                anomalous=True,
-                z_sigma=6.0,
-                z_direction=2.5,
-                z_spectrum_adjacent=4.5,
-                z_subspace_adjacent=2.0,
-                z_spectrum_anchor=5.5,
-                z_subspace_anchor=3.0,
-                adjacent_score=4.5,
-                anchor_score=5.5,
-                cumulative_drift=9.0,
-            ),
-        ):
-            result = run_experiment(
-                dataset,
-                ExperimentConfig(
-                    method="sm9rrs",
-                    malicious_ratio=0.0,
-                    num_clients=1,
-                    rounds=1,
-                    local_epochs=1,
-                    batch_size=16,
-                    crypto_mode="simulated",
-                    suspicion_remove_after=2,
-                    early_stop=False,
-                    seed=123,
-                ),
-            )
+        decision = _composite_detection_result(anomalous=True, accepted=True, immediate_revocation=False,
+                                               reason="suspicious")
+        with mock.patch.object(f.LongitudinalSVDDetector, "evaluate", return_value=decision), \
+             mock.patch.object(f.LongitudinalSVDDetector, "commit", return_value=False):
+            result = run_experiment(dataset, ExperimentConfig(
+                num_clients=1, malicious_ratio=0, rounds=1, crypto_mode="simulated", early_stop=False))
+        d = result.diagnostics[0]
+        self.assertTrue(d.aggregation_accepted)
+        self.assertFalse(d.history_admitted)
+        self.assertEqual(d.count_after, 1.)
+        self.assertAlmostEqual(d.aggregation_weight, .2)
+        self.assertAlmostEqual(d.weight_after_penalty_recovery, .1)
 
-        self.assertEqual(result.blacklisted_clients, tuple())
-        self.assertEqual(result.records[-1].accepted_updates, 1)
-        self.assertEqual(result.records[-1].rejected_updates, 0)
-        self.assertEqual(len(result.diagnostics), 1)
-        diagnostic = result.diagnostics[0]
-        self.assertEqual(diagnostic.decision_reason, "composite_threshold_any")
-        self.assertEqual(diagnostic.z_sigma, 6.0)
-        self.assertEqual(diagnostic.z_direction, 2.5)
-        self.assertTrue(diagnostic.sigma_exceeded)
-        self.assertFalse(diagnostic.direction_exceeded)
-        self.assertTrue(diagnostic.suspicious)
-        self.assertTrue(diagnostic.count_increment)
-        self.assertEqual(diagnostic.count_after, 1)
-        self.assertAlmostEqual(
-            diagnostic.weight_after_penalty_recovery,
-            0.5,
-        )
-        # A single remaining client is normalized back to aggregate weight 1;
-        # retaining the pre-normalization value makes this visible.
-        self.assertAlmostEqual(diagnostic.aggregation_weight, 1.0)
-        self.assertAlmostEqual(diagnostic.spectrum_adjacent_distance, 0.4)
-        self.assertAlmostEqual(diagnostic.subspace_adjacent_distance, 0.5)
-        self.assertAlmostEqual(diagnostic.spectrum_anchor_distance, 0.8)
-        self.assertAlmostEqual(diagnostic.subspace_anchor_distance, 0.9)
-        self.assertAlmostEqual(diagnostic.z_spectrum_adjacent, 4.5)
-        self.assertAlmostEqual(diagnostic.z_subspace_adjacent, 2.0)
-        self.assertAlmostEqual(diagnostic.z_spectrum_anchor, 5.5)
-        self.assertAlmostEqual(diagnostic.z_subspace_anchor, 3.0)
-        self.assertAlmostEqual(diagnostic.adjacent_score, 4.5)
-        self.assertAlmostEqual(diagnostic.anchor_score, 5.5)
-        self.assertAlmostEqual(diagnostic.cumulative_drift, 9.0)
-        self.assertAlmostEqual(diagnostic.spectral_gap, 0.7)
-        self.assertAlmostEqual(diagnostic.direction_reliability, 0.5)
-        self.assertTrue(diagnostic.adjacent_exceeded)
-        self.assertTrue(diagnostic.anchor_exceeded)
-        self.assertTrue(diagnostic.drift_exceeded)
-        self.assertEqual(diagnostic.trusted_history_size, 3)
-        self.assertFalse(diagnostic.attack_active)
+    def test_normal_round_halves_suspicion_without_granting_reliability_recovery(self):
+        from sm9rrsfl import fl as f
+        dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=126)
+        decisions = [_composite_detection_result(anomalous=True, accepted=True, immediate_revocation=False,
+                                                reason="suspicious"),
+                     _composite_detection_result(anomalous=False, history_eligible=False)]
+        with mock.patch.object(f.LongitudinalSVDDetector, "evaluate", side_effect=decisions), \
+             mock.patch.object(f.LongitudinalSVDDetector, "commit", return_value=False):
+            result = run_experiment(dataset, ExperimentConfig(
+                num_clients=1, malicious_ratio=0, rounds=2, crypto_mode="simulated", early_stop=False))
+        first, second = result.diagnostics
+        self.assertEqual(second.count_before, 1.)
+        self.assertEqual(second.count_after, .5)
+        self.assertEqual(second.weight_after_penalty_recovery, first.weight_after_penalty_recovery)
 
-    def test_normal_round_reports_floor_halved_count_evidence(self):
-        from sm9rrsfl import fl as fl_module
-
-        dataset = make_synthetic_mnist_like(
-            train_samples=20,
-            test_samples=10,
-            seed=126,
-        )
-        decisions = [
-            _composite_detection_result(anomalous=True),
-            _composite_detection_result(anomalous=False),
-        ]
-        with mock.patch.object(
-            fl_module.LongitudinalSVDDetector,
-            "evaluate",
-            side_effect=decisions,
-        ):
-            result = run_experiment(
-                dataset,
-                ExperimentConfig(
-                    method="sm9rrs",
-                    malicious_ratio=0.0,
-                    num_clients=1,
-                    rounds=2,
-                    local_epochs=1,
-                    batch_size=16,
-                    crypto_mode="simulated",
-                    suspicion_remove_after=3,
-                    early_stop=False,
-                    seed=126,
-                ),
-            )
-
-        first, normal = result.diagnostics
-        self.assertEqual(first.count_before, 0)
-        self.assertEqual(first.count_after, 1)
-        self.assertEqual(normal.count_before, 1)
-        self.assertEqual(normal.count_after, 0)
+    def test_ctol_round_excludes_mild_update_and_revokes_without_extra_delay(self):
+        from sm9rrsfl import fl as f
+        dataset = make_synthetic_mnist_like(train_samples=40, test_samples=20, seed=127)
+        mild = _composite_detection_result(anomalous=True, accepted=True, immediate_revocation=False,
+                                          reason="suspicious", novelty_score=2.5)
+        normal = _composite_detection_result(anomalous=False)
+        decisions = [mild, normal, normal, normal, mild, normal, mild, normal, mild, normal]
+        with mock.patch.object(f.LongitudinalSVDDetector, "evaluate", side_effect=decisions), \
+             mock.patch.object(f.LongitudinalSVDDetector, "commit", return_value=False):
+            result = run_experiment(dataset, ExperimentConfig(
+                num_clients=2, malicious_ratio=0, rounds=5, suspicion_remove_after=3,
+                crypto_mode="simulated", early_stop=False))
+        client = result.diagnostics[0].client_id
+        rows = [d for d in result.diagnostics if d.client_id == client]
+        self.assertEqual([d.count_after for d in rows], [1., .5, 1.5, 2.5, 3.])
+        self.assertTrue(all(d.aggregation_accepted for d in rows[:-1]))
+        self.assertTrue(rows[-1].trace_requested)
+        self.assertTrue(rows[-1].revoked)
+        self.assertFalse(rows[-1].immediate_revocation)
+        self.assertEqual(rows[-1].aggregation_weight, 0.)
+        self.assertEqual(len(result.blacklisted_clients), 1)
 
     def test_vert_uses_two_bootstrap_rounds_then_filters(self):
         dataset = make_synthetic_mnist_like(
