@@ -45,11 +45,12 @@ class SuspicionWeightManagerTest(unittest.TestCase):
         self.assertEqual(m.weights["a"], .1)
         self.assertEqual(m.evidence_counts["a"], .5)
         m.update(["a", "b"], set(), set(), recovery_tags={"a"})
-        self.assertEqual(m.weights["a"], .125)
+        self.assertAlmostEqual(m.weights["a"], .28)
         self.assertEqual(m.evidence_counts["a"], .25)
         for _ in range(30):
             m.update(["a", "b"], set(), set(), recovery_tags={"a"})
-        self.assertEqual(m.weights["a"], 1.)
+        self.assertGreater(m.weights["a"], .999)
+        self.assertLessEqual(m.weights["a"], 1.)
         self.assertEqual(m.evidence_counts["a"], .25 * 0.5 ** 30)
 
     def test_nonconsecutive_suspicion_preserves_fractional_decay_before_ctol(self):
@@ -142,7 +143,7 @@ class SuspicionWeightManagerTest(unittest.TestCase):
         coeffs = bounded_aggregation_coefficients(tags, dict.fromkeys(tags, .5),
                     dict.fromkeys(tags, .1),
                     dict.fromkeys(tags, DetectionResult(True, "mild", True)), 2.)
-        self.assertAlmostEqual(sum(coeffs.values()), .2)
+        self.assertEqual(sum(coeffs.values()), 0.)
 
     def test_clean_sample_weighted_fedavg_and_zero_fallback(self):
         tags = ["a", "b"]

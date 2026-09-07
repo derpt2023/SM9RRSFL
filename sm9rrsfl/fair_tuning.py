@@ -22,7 +22,8 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from .calibration_policy import objective_weight_grid, weighted_score
+from .calibration_policy import objective_weight_grid, weighted_score, TRAINING_HEALTH_CONSTRAINTS
+from .performance_target import PerformanceTarget, evaluate_target, scenario_key, select_towards_target
 from .config_runner import ConfigError, parameters_to_argv
 from .datasets import ImageDataset, load_image_dataset, stratified_training_three_way_split
 from .ours_policy import OURS_PARAMETER_NAMES
@@ -106,6 +107,7 @@ TUNING_KEYS = {
     "max_clean_accuracy_drop",
     "objective",
     "method_spaces",
+    "performance_target",
 }
 OBJECTIVE_DEFAULTS = {
     "clean_accuracy_weight": 0.25,
@@ -138,6 +140,7 @@ class FairTuningConfig:
     ratio_schedule: dict[str, Any] | None
     auto_ours: bool
     candidates: dict[str, tuple[dict[str, Any], ...]]
+    performance_target: PerformanceTarget | None = None
 
 
 @dataclass(frozen=True)
@@ -403,6 +406,10 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
                 ) from exc
         candidates[method] = method_candidates
 
+    try:
+        performance_target = PerformanceTarget.parse(tuning.get("performance_target"))
+    except ValueError as exc:
+        raise FairTuningError(str(exc)) from exc
     return FairTuningConfig(
         source=source,
         name=str(payload.get("name") or source.stem),
@@ -431,6 +438,7 @@ def load_fair_tuning_config(path: str | Path) -> FairTuningConfig:
         ),
         auto_ours=auto_ours,
         candidates=candidates,
+        performance_target=performance_target,
     )
 
 
@@ -594,6 +602,8 @@ def _clean_candidate_valid(
     if not integrity or not clean:
         return False
     for result in clean:
+        if _training_health_reasons(result):
+            return False
         reference = clean_accuracy_reference.get(_clean_scenario_key(result))
         if reference is None:
             return False
@@ -603,6 +613,34 @@ def _clean_candidate_valid(
         if reference - accuracy > max_clean_accuracy_drop + 1.0e-12:
             return False
     return True
+
+
+def _training_health_reasons(result):
+    """Offline-only gates; client truth NEVER enters online detection.
+
+    Permanent removal is different from Krum's per-round selection. The mass
+    starvation gate uses Ours' non-renormalized coefficients only; other
+    methods' per-client FedAvg deficits do not measure their total step.
+    These fixed development limits are recorded with every tuning report.
+    """
+    limits = TRAINING_HEALTH_CONSTRAINTS
+    reasons = set()
+    honest = result.config.num_clients - len(result.malicious_clients)
+    starvation = 0
+    for row in result.records:
+        if row.round <= 0:
+            continue
+        if row.blacklisted_clients >= result.config.num_clients:
+            reasons.add("all_clients_revoked")
+        if honest > 0 and row.false_positive_revocations >= honest:
+            reasons.add("all_honest_revoked")
+        if result.config.malicious_ratio == 0 and row.false_positive_revocations > limits["max_clean_false_revocation_rate"] * honest:
+            reasons.add("clean_false_revocation_rate")
+        if result.config.method == "sm9rrs":
+            starvation = starvation + 1 if row.honest_weight_loss >= limits["ours_starvation_honest_weight_loss"] else 0
+            if starvation >= limits["ours_starvation_consecutive_rounds"]:
+                reasons.add("honest_weight_starvation")
+    return tuple(sorted(reasons))
 
 
 def score_trial(
@@ -734,6 +772,9 @@ def score_trial(
         invalid_reasons.append("matched_fedavg_clean_reference")
     if clean_accuracy_gate_applied and not clean_accuracy_within_limit:
         invalid_reasons.append("clean_accuracy_drop")
+    health_reasons = sorted({reason for result in results
+                             for reason in _training_health_reasons(result)})
+    invalid_reasons.extend(health_reasons)
     valid = (
         integrity_valid
         and accuracy_metrics_present
@@ -741,6 +782,7 @@ def score_trial(
         and weight_metrics_present
         and early_mass_metrics_present
         and clean_accuracy_valid
+        and not health_reasons
     )
     score = weighted_score(
         {
@@ -1483,6 +1525,10 @@ def _scenario_audit(result):
         "history_frozen_rounds": len({d.round for d in diagnostics if d.history_frozen}),
         "immediate_revocation_requests": sum(d.trace_requested and d.immediate_revocation for d in diagnostics),
         "cumulative_revocation_requests": sum(d.trace_requested and not d.immediate_revocation for d in diagnostics),
+        "training_health_reasons": ",".join(_training_health_reasons(result)),
+        "postwarmup_history_admissions": sum(d.history_admitted for d in diagnostics
+                                             if d.round > result.config.detector_window),
+        "quarantined_updates": sum(d.suspicious and not d.aggregation_accepted for d in diagnostics),
     }
 
 
@@ -1691,6 +1737,17 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
     _write_csv(output_dir / "tuning_trials.csv", [trial.row() for trial in trial_scores])
     _write_csv(output_dir / "validation_results.csv", validation_rows)
     selected = select_best_trials(trial_scores)
+    expected_validation = {
+        (task.config.partition, task.config.dirichlet_alpha, task.config.num_clients,
+         task.config.malicious_ratio, task.config.seed)
+        for task in validation_tasks
+    }
+    selected, target_selection = select_towards_target(
+        trial_scores, selected, results_by_candidate, spec.performance_target,
+        expected_scenarios=expected_validation,
+    )
+    _write_json(output_dir / "performance_target_validation.json", target_selection)
+    print("performance_target_validation=" + target_selection["status"], flush=True)
     best_payload = {
         "schema_version": TUNING_SCHEMA_VERSION,
         "dataset": args.dataset,
@@ -1703,6 +1760,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         },
         "selection_stability": {
             method: {
+                "score_margin_scope": "independent_score_ranking_before_performance_target",
                 "valid_candidates": sum(t.valid and t.method == method for t in trial_scores),
                 "score_margin": (
                     sorted((t.score for t in trial_scores if t.valid and t.method == method), reverse=True)[0]
@@ -1720,6 +1778,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         "objective": spec.objective,
         "objective_mode": spec.objective_mode,
         "objective_learning": objective_learning,
+        "performance_target_selection": target_selection,
         "formal_ratios": list(spec.formal_ratios),
         "calibration_ratios": list(spec.calibration_ratios),
         "ratio_schedule": spec.ratio_schedule,
@@ -1729,6 +1788,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         "min_round_completion_rate": spec.min_round_completion_rate,
         "max_nonfinite_updates": spec.max_nonfinite_updates,
         "hard_constraints": {
+            "training_health": TRAINING_HEALTH_CONSTRAINTS,
             "max_clean_accuracy_drop": spec.max_clean_accuracy_drop,
             "min_round_completion_rate": spec.min_round_completion_rate,
             "max_nonfinite_updates": spec.max_nonfinite_updates,
@@ -1834,6 +1894,28 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         final_executions.sort(key=lambda item: _tuning_task_sort_key(item[0]))
         final_results = [result for _task, result in final_executions]
         best_payload["final_fingerprint"] = final_fingerprint
+        if spec.performance_target is not None:
+            final_target = evaluate_target(
+                [r for r in final_results if r.config.method == "sm9rrs"],
+                [r for r in final_results if r.config.method == "vert"],
+                spec.performance_target,
+                expected_scenarios={
+                    (t.config.partition, t.config.dirichlet_alpha, t.config.num_clients,
+                     t.config.malicious_ratio, t.config.seed) for t in final_tasks
+                },
+            )
+            health = [{"method": r.config.method, "scenario": list(scenario_key(r)),
+                       "reasons": list(_training_health_reasons(r))}
+                      for r in final_results if r.config.method in ("sm9rrs", "vert")
+                      and _training_health_reasons(r)]
+            final_target["health_failures"] = health
+            if health:
+                final_target["status"] = "unmet"
+            final_target["selection_used_final_data"] = False
+            final_target["parameters_reselected"] = False
+            _write_json(final_dir / "performance_target.json", final_target)
+            best_payload["final_performance_target_status"] = final_target["status"]
+            print("performance_target_final=" + final_target["status"], flush=True)
         _write_final_aggregate(final_dir / "aggregate.csv", final_results)
         if not args.no_visualizations:
             # Generate one dashboard per seed.  Combining repeated seeds in the
@@ -1998,6 +2080,7 @@ def main(argv: list[str] | None = None) -> None:
         "hard_constraints="
         + json.dumps(
             {
+                "training_health": TRAINING_HEALTH_CONSTRAINTS,
                 "max_clean_accuracy_drop": spec.max_clean_accuracy_drop,
                 "min_round_completion_rate": (
                     resolved_args.calibration_min_round_completion_rate
@@ -2018,6 +2101,9 @@ def main(argv: list[str] | None = None) -> None:
         f"final_jobs={spec.final_jobs}",
         flush=True,
     )
+    print("performance_target=" + json.dumps(
+        vars(spec.performance_target) if spec.performance_target is not None else None,
+        sort_keys=True), flush=True)
     if args.dry_run:
         return
     try:

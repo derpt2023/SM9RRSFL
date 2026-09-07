@@ -1,13 +1,12 @@
 {
   "schema_version": 3,
-  "name": "mnist-v6-aggressive-revocation-auto-calibrated",
-  "description": "MNIST six-method study with SVD normal-state K-means, immediate severe revocation, C_tol suspicion with normal-round halving, automatically calibrated parameters and bounded aggregation.",
+  "name": "mnist-v7-quarantine-auto-calibrated",
+  "description": "MNIST normal-state v3: same-round quarantine of every suspicious update; certificate-gated severe/C_tol revocation; block radii, adaptive trusted history, independent recovery, health-gated calibration.",
   "parameters": {
     "dataset": "mnist",
     "download": true,
     "data_dir": "data/mnist",
-    "output_dir": "outputs/mnist_v6_aggressive_revocation_20260903",
-
+    "output_dir": "outputs/mnist_v7_quarantine_20260906",
     "methods": [
       "sm9rrs",
       "vert",
@@ -16,19 +15,19 @@
       "ding13",
       "fedavg"
     ],
-
-    "ratio_range": [0.0, 0.8, 5],
-
+    "ratio_range": [
+      0.0,
+      0.8,
+      5
+    ],
     "partitions": [
       "iid",
       "dirichlet"
     ],
-
     "dirichlet_alpha": 0.5,
     "client_counts": [
       100
     ],
-
     "rounds": 50,
     "train_samples": 50000,
     "test_samples": 10000,
@@ -37,7 +36,6 @@
     "lr": 0.05,
     "lr_decay": 0.99,
     "target_error": 0.12,
-
     "attack": "alternating_minimization",
     "attack_boost": 15.0,
     "attack_epochs": 1,
@@ -47,33 +45,27 @@
     "attack_target_label": 7,
     "attack_target_count": 128,
     "attack_start_round": 12,
-
     "K": 7,
     "ours_parameter_mode": "auto",
     "calibration_candidate_budget": 12,
     "calibration_min_round_completion_rate": 1.0,
     "calibration_max_nonfinite_updates": 0,
-
-    "vert_history_window": 7,
+    "vert_history_window": 5,
     "vert_projection_dim": 128,
-    "vert_predict_epochs": 5,
+    "vert_predict_epochs": 20,
     "vert_predict_lr": 0.001,
     "vert_top_k": 0,
     "vert_use_ratio_prior": false,
-
     "alignins_sparsity": 0.3,
     "alignins_tda_radius": 1.0,
     "alignins_mpsa_radius": 1.0,
-
     "crypto_mode": "sm9",
     "dkg_threshold": 2,
     "dkg_nodes": 3,
     "sm9_workers": "auto",
-
     "compute_backend": "auto",
     "device": "auto",
     "jobs": "auto",
-
     "eval_interval": 1,
     "early_stop": false,
     "resume": true,

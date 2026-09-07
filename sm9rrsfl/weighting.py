@@ -56,7 +56,7 @@ class SuspicionWeightManager:
             if tag in suspicious_tags:
                 self.weights[tag] = max(1e-12, self.weights[tag] * self.penalty_factor)
             elif tag in recovery_tags and not shock:
-                self.weights[tag] = min(1.0, self.weights[tag] * self.recovery_factor)
+                self.weights[tag] += (1.0 - self.weights[tag]) * (1.0 - 1.0 / self.recovery_factor)
             if tag in count_increment_tags:
                 self.evidence_counts[tag] = min(
                     float(self.remove_after), self.evidence_counts[tag] + 1.0)
@@ -96,7 +96,7 @@ def bounded_aggregation_coefficients(tags, nominal_weights, reliability,
     few survivors. All-zero input yields a zero step (never uniform fallback).
     """
     raw = {tag: nominal_weights[tag] * reliability.get(tag, 0.0)
-           if decisions[tag].accepted else 0.0 for tag in tags}
+           if decisions[tag].accepted and not decisions[tag].would_flag else 0.0 for tag in tags}
     total = sum(raw.values())
     if total <= 0:
         return dict.fromkeys(tags, 0.0)

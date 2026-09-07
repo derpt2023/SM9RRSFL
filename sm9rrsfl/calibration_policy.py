@@ -18,6 +18,13 @@ DEFAULT_MIN_ROUND_COMPLETION_RATE = 1.0
 DEFAULT_MAX_NONFINITE_UPDATES = 0
 DEFAULT_OBJECTIVE_WEIGHT_FLOOR = 0.05
 DEFAULT_OBJECTIVE_WEIGHT_STEP = 0.05
+TRAINING_HEALTH_CONSTRAINTS = {
+    "max_clean_false_revocation_rate": 0.10,
+    "reject_any_all_clients_revoked": True,
+    "reject_any_all_honest_revoked": True,
+    "ours_starvation_honest_weight_loss": 0.99,
+    "ours_starvation_consecutive_rounds": 5,
+}
 
 OBJECTIVE_WEIGHT_NAMES = (
     "clean_accuracy_weight",

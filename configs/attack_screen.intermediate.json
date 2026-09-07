@@ -1,0 +1,83 @@
+{
+  "output_dir": "outputs/mnist_v7_attack_screen_intermediate_20260906",
+  "train_samples": 10000,
+  "split_seed": 20260906,
+  "cpu_threads": 1,
+  "screen_seeds": [
+    84
+  ],
+  "confirmation_seeds": [
+    85,
+    86
+  ],
+  "partitions": [
+    "iid",
+    "dirichlet"
+  ],
+  "ratios": [
+    0.8
+  ],
+  "training": {
+    "num_clients": 20,
+    "rounds": 50,
+    "detector_window": 7,
+    "attack_start_round": 12,
+    "attack_target_count": 32,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 1,
+    "attack_boost": 15.0,
+    "lr_decay": 0.99,
+    "early_stop": false,
+    "compute_backend": "torch",
+    "device": "cpu",
+    "crypto_mode": "simulated"
+  },
+  "attacks": {
+    "boost5": {
+      "attack_boost": 5.0,
+      "attack_stealth_steps": 1,
+      "attack_distance_weight": 0.0001
+    },
+    "boost8": {
+      "attack_boost": 8.0,
+      "attack_stealth_steps": 1,
+      "attack_distance_weight": 0.0001
+    }
+  },
+  "candidates": {
+    "sm9rrs": {
+      "quarantine": {
+        "detector_distance_threshold": 3.0,
+        "detector_reject_threshold": 6.0,
+        "detector_drift_allowance": 2.5,
+        "detector_history_threshold": 2.0,
+        "detector_reference_budget": 3.5,
+        "suspicion_remove_after": 3
+      },
+      "immediate": {
+        "detector_distance_threshold": 3.0,
+        "detector_reject_threshold": 6.0,
+        "detector_drift_allowance": 2.5,
+        "detector_history_threshold": 2.0,
+        "detector_reference_budget": 3.5,
+        "suspicion_remove_after": 1
+      }
+    },
+    "vert": {
+      "v4": {
+        "vert_history_window": 5,
+        "vert_predict_epochs": 5,
+        "vert_predict_lr": 0.001
+      },
+      "v8": {
+        "vert_history_window": 7,
+        "vert_predict_epochs": 5,
+        "vert_predict_lr": 0.001
+      }
+    },
+    "fedavg": {
+      "reference": {}
+    }
+  },
+  "jobs": 2
+}

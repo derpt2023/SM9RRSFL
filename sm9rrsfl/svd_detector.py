@@ -30,6 +30,8 @@ class DetectionResult:
     trusted_history_size: int = 0
     normal_cluster_count: int = 0
     immediate_revocation: bool = False
+    recovery_eligible: bool = False
+    norm_score: float = 0.0
 
 
 @dataclass
@@ -48,11 +50,12 @@ class _TagState:
     norm_limit: float = 0.0
     drift: float = 0.0
     clean_streak: int = 0
+    recovery_streak: int = 0
     last_round: int = 0
     pending: tuple | None = None
 
 
-def _fit_normal(features, clusters):
+def _fit_normal(features, clusters, groups=None, reference=None, previous=None):
     """Deterministic farthest-point K-means, <=2 modes for short histories.
 
     At least three observations per mode; a singleton cannot legitimize a
@@ -60,8 +63,10 @@ def _fit_normal(features, clusters):
     statistical false-positive guarantee.
     """
     x = np.asarray(features, dtype=np.float64)
-    location = np.median(x, axis=0)
-    scale = np.maximum(1.4826 * np.median(np.abs(x - location), axis=0), 0.15)
+    location = np.median(x, axis=0) if reference is None else reference.location.copy()
+    scale = (np.maximum(1.4826 * np.median(np.abs(x - location), axis=0), 0.15)
+             if reference is None else reference.scale.copy())
+    groups = groups or (slice(0, x.shape[1]),)
     z = (x - location) / scale
     count = min(clusters, max(1, len(x) // 3))
     centers = [z[np.argmin(np.sum(z * z, axis=1))]]
@@ -81,12 +86,24 @@ def _fit_normal(features, clusters):
             centers = updated
             break
         centers = updated
-    distances = np.sqrt(np.mean((z[:, None] - centers) ** 2, axis=2))
-    labels = np.argmin(distances, axis=1)
-    radii = np.asarray([
-        max(1.0, float(np.max(distances[labels == j, j], initial=0)))
-        for j in range(len(centers))
-    ])
+    if previous is not None:
+        # Fixed clean coordinates prevent a rolling window from collapsing its
+        # scales. Limit each admitted observation's movement to 0.25 clean
+        # block radii; the immutable anchor separately bounds total drift.
+        for j, center in enumerate(centers):
+            old = previous.centers[np.argmin(np.mean((previous.centers - center) ** 2, axis=1))]
+            movement = max(np.sqrt(np.mean((center[g] - old[g]) ** 2)) /
+                           max(1., float(reference.radii[:, k].max()))
+                           for k, g in enumerate(groups))
+            centers[j] = old + (center - old) * min(1., .25 / max(movement, 1e-12))
+    distances = np.stack([
+        np.sqrt(np.mean((z[:, None, g] - centers[None, :, g]) ** 2, axis=2))
+        for g in groups], axis=2)
+    labels = np.argmin(distances.max(axis=2), axis=1)
+    radii = np.asarray([np.maximum(1., distances[labels == j, j].max(axis=0, initial=0.))
+                        for j in range(len(centers))])
+    if reference is not None:
+        radii = np.maximum(radii, reference.radii.max(axis=0))
     return _NormalModel(location, scale, centers, radii)
 
 
@@ -166,16 +183,21 @@ class LongitudinalSVDDetector:
         spectral = np.concatenate([[np.log(max(norm, 1e-30))], spectrum, projector.ravel()])
         feature = np.concatenate([spectral, sketch, classes])
         a, b = len(spectral), len(spectral) + len(sketch)
-        self._groups = (slice(0, a), slice(a, b), slice(b, len(feature)))
+        # Norm gets an independent block: one amplitude coordinate must not
+        # be diluted by a hundred projector entries.
+        self._groups = (slice(1, a), slice(a, b), slice(b, len(feature)), slice(0, 1))
         return feature, norm
 
-    def _scores(self, model, feature):
+    def _scores(self, model, feature, *, norm_score=None):
         z = (feature - model.location) / model.scale
         differences = z[None] - model.centers
         group_distances = np.column_stack([
-            np.sqrt(np.mean(differences[:, group] ** 2, axis=1)) / model.radii
-            for group in self._groups
+            np.sqrt(np.mean(differences[:, group] ** 2, axis=1)) / model.radii[:, k]
+            for k, group in enumerate(self._groups)
         ])
+        # Decreasing gradient norms during convergence are not norm attacks.
+        group_distances[:, -1] = (np.maximum(differences[:, 0], 0.) / model.radii[:, -1]
+                                 if norm_score is None else norm_score)
         # Use one normal mode for ALL evidence blocks, not a different mode
         # per block (which could manufacture an unobserved composite state).
         selected = int(np.argmin(group_distances.max(axis=1)))
@@ -197,23 +219,37 @@ class LongitudinalSVDDetector:
         elif state.anchor is None:
             decision = DetectionResult(False, "insufficient_clean_history", True)
         else:
-            live = self._scores(state.normal, feature)
-            anchor = self._scores(state.anchor, feature)
+            # A live center tracks convergence toward small gradients. A
+            # later benign rebound must not become a spurious amplitude
+            # attack; only growth above the immutable clean maximum counts.
+            norm_scale = state.anchor.scale[0] * float(state.anchor.radii[:, -1].max())
+            norm_score = max(0., np.log(max(norm, 1e-30))
+                             - np.log(max(state.norm_limit, 1e-30))) / norm_scale
+            live = self._scores(state.normal, feature, norm_score=norm_score)
+            anchor = self._scores(state.anchor, feature, norm_score=norm_score)
             score = max(float(live.max()), float(anchor.max()) / p.detector_reference_budget)
+            # Accumulate excess over a calibrated normal envelope, not the
+            # raw distance from an early-training center.
             state.drift = max(0.0, p.detector_drift_memory * state.drift
-                              + min(score, p.detector_reject_threshold) - p.detector_drift_allowance)
+                              + min(score, p.detector_reject_threshold)
+                              - p.detector_drift_allowance)
             flagged = score > p.detector_distance_threshold or state.drift > p.detector_drift_threshold
             strong = score > p.detector_reject_threshold
             # Aggressive policy: every suspicious observation counts; a
             # severe deviation requests same-round certificate-gated removal,
             # without waiting for C_tol or a separate corroboration condition.
             clip = min(1.0, state.norm_limit * p.detector_clip_factor / max(norm, 1e-30))
-            safe = (not flagged and clip == 1.0 and score <= 0.5 * p.detector_distance_threshold
-                    and float(anchor.max()) <= 1.0 and state.drift <= p.detector_drift_allowance)
+            safe = (not flagged and clip == 1.0 and score <= p.detector_history_threshold
+                    and float(anchor.max()) <= p.detector_reference_budget
+                    and state.drift <= p.detector_drift_allowance)
             state.clean_streak = state.clean_streak + 1 if safe else 0
             eligible = safe and state.clean_streak >= p.detector_history_confirm
+            recoverable = (not flagged and clip == 1.0
+                           and score <= p.detector_drift_allowance
+                           and state.drift <= p.detector_drift_allowance)
+            state.recovery_streak = state.recovery_streak + 1 if recoverable else 0
             decision = DetectionResult(
-                accepted=not strong,
+                accepted=not flagged,
                 reason="strong_novelty" if strong else "suspicious" if flagged else "normal",
                 would_flag=flagged, count_increment=flagged,
                 novelty_score=score, anchor_score=float(anchor.max()),
@@ -221,7 +257,9 @@ class LongitudinalSVDDetector:
                 cumulative_drift=state.drift, clip_factor=clip,
                 history_eligible=eligible, trusted_history_size=len(state.history),
                 normal_cluster_count=len(state.normal.centers),
-                immediate_revocation=strong)
+                immediate_revocation=strong,
+                recovery_eligible=state.recovery_streak >= p.detector_recovery_confirm,
+                norm_score=float(live[3]))
         state.pending = (current, feature, norm, decision)
         return decision
 
@@ -239,10 +277,11 @@ class LongitudinalSVDDetector:
             if state.anchor is None:
                 state.norm_limit = max(state.norm_limit, norm)
                 if current == self.window_size and len(state.history) >= 3:
-                    state.anchor = _fit_normal(state.history, self.policy.detector_normal_clusters)
+                    state.anchor = _fit_normal(state.history, self.policy.detector_normal_clusters, self._groups)
                     state.normal = state.anchor
             elif len(state.history) >= 3:
-                state.normal = _fit_normal(state.history, self.policy.detector_normal_clusters)
+                state.normal = _fit_normal(state.history, self.policy.detector_normal_clusters,
+                                          self._groups, state.anchor, state.normal)
             # Anchor, scaling budget and norm limit NEVER learn from attack-era
             # observations, even if those observations are allowed to aggregate.
         elif not admit_history:

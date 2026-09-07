@@ -1,12 +1,12 @@
 {
   "schema_version": 3,
   "name": "MNIST unified fair grid search",
-  "description": "Scheme B: calibrate aggressive Ours (immediate severe revocation, C_tol suspicion with normal-round halving), VERT and AlignIns with the same 12-candidate budget on disjoint calibration ratios, learn shared Score weights, then freeze parameters for formal ratios and independent final seeds.",
+  "description": "MNIST normal-state v3: same-round quarantine of every suspicious update; certificate-gated severe/C_tol revocation; block radii, adaptive trusted history, independent recovery, health-gated calibration.",
   "shared_parameters": {
     "dataset": "mnist",
     "data_dir": "data/mnist",
     "download": true,
-    "output_dir": "outputs/mnist_v6_aggressive_revocation_fair_tuning",
+    "output_dir": "outputs/mnist_v7_target_fair_tuning",
     "methods": [
       "sm9rrs",
       "vert",
@@ -15,9 +15,18 @@
       "ding13",
       "fedavg"
     ],
-    "ratio_range": [0.0, 0.8, 5],
-    "client_counts": [100],
-    "partitions": ["iid", "dirichlet"],
+    "ratio_range": [
+      0.0,
+      0.8,
+      5
+    ],
+    "client_counts": [
+      100
+    ],
+    "partitions": [
+      "iid",
+      "dirichlet"
+    ],
     "dirichlet_alpha": 0.5,
     "rounds": 50,
     "train_samples": 50000,
@@ -58,24 +67,59 @@
     "algorithm": "grid",
     "validation_fraction": 0.05,
     "split_seed": 20260810,
-    "validation_seeds": [41, 42, 43],
-    "final_seeds": [141, 142, 143],
+    "validation_seeds": [
+      71,
+      72,
+      73
+    ],
+    "final_seeds": [
+      241,
+      242,
+      243
+    ],
     "trials_per_tunable_method": 12,
-    "max_clean_accuracy_drop": 0.05,
+    "max_clean_accuracy_drop": 0.03,
+    "performance_target": {
+      "accuracy_gap": 0.02,
+      "asr_gap": 0.01,
+      "max_asr": 0.05,
+      "max_peak_asr": 0.2,
+      "tail_rounds": 10
+    },
     "run_final_evaluation": true,
     "final_jobs": "auto",
     "objective": "auto",
     "method_spaces": {
       "sm9rrs": "auto",
       "vert": {
-        "vert_history_window": [5, 7, 10],
-        "vert_predict_epochs": [3, 5],
-        "vert_predict_lr": [0.0005, 0.001]
+        "vert_history_window": [
+          5,
+          7,
+          10
+        ],
+        "vert_predict_epochs": [
+          5,
+          20
+        ],
+        "vert_predict_lr": [
+          0.0005,
+          0.001
+        ]
       },
       "alignins": {
-        "alignins_sparsity": [0.1, 0.3, 0.5],
-        "alignins_tda_radius": [0.5, 1.0],
-        "alignins_mpsa_radius": [0.5, 1.0]
+        "alignins_sparsity": [
+          0.1,
+          0.3,
+          0.5
+        ],
+        "alignins_tda_radius": [
+          0.5,
+          1.0
+        ],
+        "alignins_mpsa_radius": [
+          0.5,
+          1.0
+        ]
       },
       "krum": {},
       "ding13": {},

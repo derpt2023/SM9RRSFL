@@ -61,6 +61,8 @@ class NormalStateWorkflowTest(unittest.TestCase):
         raw = make_synthetic_mnist_like(train_samples=400, test_samples=80, seed=42)
         data = stratified_training_three_way_split(raw, seed=20260810).calibration_dataset
         parameters = bounded_candidates(1)[0]
+        parameters.update(detector_distance_threshold=.02, detector_reject_threshold=.04,
+                          detector_history_threshold=.01, detector_drift_allowance=.01)
         config = ExperimentConfig(
             num_clients=10, rounds=6, detector_window=3, malicious_ratio=0.,
             attack="alternating_minimization", attack_start_round=5, attack_target_count=1,

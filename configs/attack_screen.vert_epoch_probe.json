@@ -1,0 +1,53 @@
+{
+  "output_dir": "outputs/mnist_v7_vert_epoch_probe_20260907",
+  "train_samples": 10000,
+  "split_seed": 20260906,
+  "cpu_threads": 1,
+  "screen_seeds": [
+    82,
+    83
+  ],
+  "confirmation_seeds": [],
+  "partitions": [
+    "iid",
+    "dirichlet"
+  ],
+  "ratios": [
+    0.4
+  ],
+  "training": {
+    "num_clients": 20,
+    "rounds": 50,
+    "detector_window": 7,
+    "attack_start_round": 12,
+    "attack_target_count": 32,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 1,
+    "attack_boost": 15.0,
+    "lr_decay": 0.99,
+    "early_stop": false,
+    "compute_backend": "torch",
+    "device": "cpu",
+    "crypto_mode": "simulated"
+  },
+  "attacks": {
+    "boost3_stealth3": {
+      "attack_boost": 3.0,
+      "attack_stealth_steps": 3,
+      "attack_distance_weight": 0.001
+    }
+  },
+  "candidates": {
+    "vert": {
+      "v20": {
+        "vert_history_window": 5,
+        "vert_predict_epochs": 20,
+        "vert_predict_lr": 0.001
+      }
+    },
+    "fedavg": {
+      "reference": {}
+    }
+  },
+  "jobs": 2
+}

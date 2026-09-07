@@ -17,9 +17,10 @@ import numpy as np
 
 from .datasets import stratified_training_three_way_split
 from .ours_policy import OursParameters, bounded_candidates
+from .calibration_policy import TRAINING_HEALTH_CONSTRAINTS
 
-CALIBRATION_SCHEMA_VERSION = 4
-CALIBRATION_ALGORITHM_VERSION = "ours-normal-states-v2-aggressive-revocation"
+CALIBRATION_SCHEMA_VERSION = 5
+CALIBRATION_ALGORITHM_VERSION = "ours-normal-states-v3-quarantine"
 
 
 class OursCalibrationError(RuntimeError):
@@ -167,6 +168,7 @@ def resolve_or_run_ours_calibration(dataset, args, output_dir, run_fn=None, *,
         "dataset": dataset_digest, "split": metadata, "candidates": candidates,
         "base_configs": [asdict(c) for c in bases], "ratios": ratios,
         "seeds": seeds, "deferred": deferred, "constraints": constraints,
+        "training_health": TRAINING_HEALTH_CONSTRAINTS,
     }
     fingerprint = _digest(protocol)
     output = Path(output_dir)
@@ -247,7 +249,7 @@ def resolve_or_run_ours_calibration(dataset, args, output_dir, run_fn=None, *,
         {"calibration_ratios": ratios, "formal_ratios": tuple(args.ratios),
          "partitions": sorted({c.partition for c in bases}),
          "client_counts": sorted({c.num_clients for c in bases})},
-        constraints, objective, learning, selected, rows)
+        {**constraints, "training_health": TRAINING_HEALTH_CONSTRAINTS}, objective, learning, selected, rows)
     artifact = replace(artifact, artifact_fingerprint=_artifact_digest(artifact.to_dict()))
     _write_json(artifact_path, artifact.to_dict())
     _write_json(output / "ours_calibration.json", artifact.to_dict())

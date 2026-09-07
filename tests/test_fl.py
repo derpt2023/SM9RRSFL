@@ -468,7 +468,7 @@ class FederatedLoopTest(unittest.TestCase):
         self.assertEqual(resumed.diagnostics, result.diagnostics)
         self.assertEqual(resumed.blacklisted_clients, result.blacklisted_clients)
 
-    def test_mild_suspicion_aggregates_but_never_enters_history(self):
+    def test_mild_suspicion_is_quarantined_before_ctol(self):
         from sm9rrsfl import fl as f
         dataset = make_synthetic_mnist_like(train_samples=20, test_samples=10, seed=123)
         decision = _composite_detection_result(anomalous=True, accepted=True, immediate_revocation=False,
@@ -478,11 +478,12 @@ class FederatedLoopTest(unittest.TestCase):
             result = run_experiment(dataset, ExperimentConfig(
                 num_clients=1, malicious_ratio=0, rounds=1, crypto_mode="simulated", early_stop=False))
         d = result.diagnostics[0]
-        self.assertTrue(d.aggregation_accepted)
+        self.assertFalse(d.aggregation_accepted)
+        self.assertFalse(d.revoked)
         self.assertFalse(d.history_admitted)
         self.assertEqual(d.count_after, 1.)
-        self.assertAlmostEqual(d.aggregation_weight, .2)
-        self.assertAlmostEqual(d.weight_after_penalty_recovery, .1)
+        self.assertEqual(d.aggregation_weight, 0.)
+        self.assertAlmostEqual(d.weight_after_penalty_recovery, .5)
 
     def test_normal_round_halves_suspicion_without_granting_reliability_recovery(self):
         from sm9rrsfl import fl as f
@@ -514,7 +515,8 @@ class FederatedLoopTest(unittest.TestCase):
         client = result.diagnostics[0].client_id
         rows = [d for d in result.diagnostics if d.client_id == client]
         self.assertEqual([d.count_after for d in rows], [1., .5, 1.5, 2.5, 3.])
-        self.assertTrue(all(d.aggregation_accepted for d in rows[:-1]))
+        self.assertTrue(all(not d.revoked for d in rows[:-1]))
+        self.assertEqual([d.aggregation_accepted for d in rows], [False, True, False, False, False])
         self.assertTrue(rows[-1].trace_requested)
         self.assertTrue(rows[-1].revoked)
         self.assertFalse(rows[-1].immediate_revocation)

@@ -12,7 +12,8 @@ class NormalStateDetectorTest(unittest.TestCase):
     def setUp(self):
         self.x = np.random.default_rng(11).normal(size=1030)
         self.detector = LongitudinalSVDDetector(
-            window_size=7, expected_update_size=1030, matrix_offset=0, matrix_shape=(100, 10))
+            window_size=7, expected_update_size=1030, matrix_offset=0, matrix_shape=(100, 10),
+            policy=replace(OursParameters(), detector_history_confirm=3))
 
     def warmup(self, tag="a"):
         for r in range(1, 8):
@@ -41,9 +42,9 @@ class NormalStateDetectorTest(unittest.TestCase):
 
     def test_mild_deviation_counts_without_immediate_revocation(self):
         self.warmup()
-        with mock.patch.object(self.detector, "_scores", return_value=np.array([2.5, 0., 0.])):
+        with mock.patch.object(self.detector, "_scores", return_value=np.array([3., 0., 0., 0.])):
             d = self.detector.evaluate("a", self.x, round_id=8)
-        self.assertTrue(d.accepted)
+        self.assertFalse(d.accepted)
         self.assertTrue(d.would_flag)
         self.assertTrue(d.count_increment)
         self.assertFalse(d.immediate_revocation)
@@ -51,7 +52,7 @@ class NormalStateDetectorTest(unittest.TestCase):
 
     def test_severe_spectral_only_deviation_no_longer_requires_corroboration(self):
         self.warmup()
-        with mock.patch.object(self.detector, "_scores", return_value=np.array([5., 0., 0.])):
+        with mock.patch.object(self.detector, "_scores", return_value=np.array([6., 0., 0., 0.])):
             d = self.detector.evaluate("a", self.x, round_id=8)
         self.assertFalse(d.accepted)
         self.assertTrue(d.immediate_revocation)
@@ -61,23 +62,23 @@ class NormalStateDetectorTest(unittest.TestCase):
 
     def test_accumulated_drift_counts_as_suspicious_not_immediate(self):
         self.warmup()
-        self.detector._states["a"].drift = 10.
+        self.detector._states["a"].drift = 20.
         d = self.detector.evaluate("a", self.x, round_id=8)
         self.assertTrue(d.would_flag)
         self.assertTrue(d.count_increment)
-        self.assertTrue(d.accepted)
+        self.assertFalse(d.accepted)
         self.assertFalse(d.immediate_revocation)
 
     def test_warning_and_reject_boundaries_use_strict_exceedance(self):
-        for score, flagged in ((2., False), (4., True)):
+        for score, flagged in ((2.5, False), (5., True)):
             with self.subTest(score=score):
                 self.setUp()
                 self.warmup()
-                with mock.patch.object(self.detector, "_scores", return_value=np.array([score, 0., 0.])):
+                with mock.patch.object(self.detector, "_scores", return_value=np.array([score, 0., 0., 0.])):
                     d = self.detector.evaluate("a", self.x, round_id=8)
                 self.assertEqual(d.count_increment, flagged)
                 self.assertFalse(d.immediate_revocation)
-                self.assertTrue(d.accepted)
+                self.assertEqual(d.accepted, not flagged)
 
     def test_all_kmeans_clusters_are_normal_states(self):
         model = _fit_normal([[-2., 0.]] * 4 + [[2., 0.]] * 4, 2)
@@ -131,6 +132,7 @@ class NormalStateDetectorTest(unittest.TestCase):
 
     def test_clipped_but_accepted_updates_cannot_enter_trusted_history(self):
         self.warmup()
+        self.detector.policy = replace(self.detector.policy, detector_distance_threshold=10., detector_reject_threshold=20., detector_drift_allowance=10.)
         before = pickle.dumps(self.detector._states["a"].history)
         for r in range(8, 13):
             d = self.detector.evaluate("a", self.x * 2.1, round_id=r)

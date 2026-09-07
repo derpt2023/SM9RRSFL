@@ -133,6 +133,8 @@ class ClientDiagnosticRecord:
     trusted_history_size: int
     normal_cluster_count: int
     attack_active: bool
+    recovery_eligible: bool = False
+    norm_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -894,7 +896,7 @@ def run_experiment(
                     count_increment_tags,
                     recovery_tags={
                         tag for tag in update_clients
-                        if sm9_result.decisions_by_tag[tag].history_eligible
+                        if sm9_result.decisions_by_tag[tag].recovery_eligible
                         and tag not in suspicious_tags
                     },
                     immediate_revocation_tags={
@@ -1011,6 +1013,8 @@ def run_experiment(
                         immediate_revocation=decision.immediate_revocation,
                         trusted_history_size=decision.trusted_history_size,
                         normal_cluster_count=decision.normal_cluster_count,
+                        recovery_eligible=decision.recovery_eligible,
+                        norm_score=decision.norm_score,
                         attack_active=(identity in malicious_set and
                                        round_id >= attack_start and config.attack != "none"),
                     ))

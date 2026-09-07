@@ -696,8 +696,8 @@ class ExperimentOutputDirTest(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     parse_args([option, "3"])
 
-    def test_checkpoint_schema_is_v15_for_aggressive_revocation(self):
-        self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 15)
+    def test_checkpoint_schema_is_v16_for_quarantine(self):
+        self.assertEqual(CHECKPOINT_SCHEMA_VERSION, 16)
 
     def test_failed_revocation_forces_durable_checkpoint_between_periodic_saves(self):
         from sm9rrsfl import fl as f

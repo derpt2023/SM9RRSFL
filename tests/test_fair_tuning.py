@@ -80,7 +80,8 @@ class FairTuningTest(unittest.TestCase):
         self.assertEqual(spec.calibration_ratios, (0.0, 0.1, 0.3, 0.5, 0.7))
         self.assertEqual(spec.objective_mode, "learned_leave_one_attacked_ratio_out")
         self.assertTrue(set(spec.validation_seeds).isdisjoint(spec.final_seeds))
-        self.assertAlmostEqual(spec.max_clean_accuracy_drop, 0.05)
+        self.assertAlmostEqual(spec.max_clean_accuracy_drop, 0.03)
+        self.assertAlmostEqual(spec.performance_target.max_asr, 0.05)
         self.assertEqual(spec.final_jobs, "auto")
         self.assertEqual(
             {
@@ -218,7 +219,7 @@ class FairTuningTest(unittest.TestCase):
         )
         payload["tuning"]["method_spaces"]["sm9rrs"] = {
             "detector_decision_rule": ["any"],
-            "detector_reject_threshold": [2.5, 3.0],
+            "detector_reject_threshold": [5.0, 6.0],
         }
         payload["shared_parameters"]["ours_parameter_mode"] = "fixed"
         with tempfile.TemporaryDirectory() as tmp:
@@ -238,7 +239,7 @@ class FairTuningTest(unittest.TestCase):
         _set_four_candidate_tunable_spaces(base_payload)
         base_payload["tuning"]["method_spaces"]["sm9rrs"] = {
             "detector_window": [7, 10],
-            "detector_reject_threshold": [2.5, 3.0],
+            "detector_reject_threshold": [5.0, 6.0],
         }
 
         invalid_cases = (

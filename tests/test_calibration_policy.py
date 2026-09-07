@@ -65,8 +65,8 @@ class CalibrationPolicyTest(unittest.TestCase):
         candidates = bounded_candidates(12)
         self.assertEqual(len(candidates), 12)
         self.assertEqual({c["detector_subspace_dim"] for c in candidates}, {1, 2, 3})
-        self.assertEqual({c["suspicion_remove_after"] for c in candidates}, {2, 3, 5})
-        self.assertEqual(len({c["detector_drift_memory"] for c in candidates}), 3)
+        self.assertEqual({c["suspicion_remove_after"] for c in candidates}, {1, 2, 3, 5})
+        self.assertEqual(len({c["detector_drift_memory"] for c in candidates}), 2)
         self.assertEqual(len(bounded_candidates(36)), 36)
         with self.assertRaises(ValueError):
             bounded_candidates(10000)

@@ -1,0 +1,89 @@
+{
+  "output_dir": "outputs/mnist_v7_search_C2_20260907",
+  "train_samples": 10000,
+  "split_seed": 20260906,
+  "cpu_threads": 1,
+  "screen_seeds": [
+    114
+  ],
+  "confirmation_seeds": [
+    115,
+    116
+  ],
+  "partitions": [
+    "iid",
+    "dirichlet"
+  ],
+  "ratios": [
+    0.4,
+    0.8
+  ],
+  "training": {
+    "num_clients": 20,
+    "rounds": 50,
+    "detector_window": 7,
+    "attack_start_round": 12,
+    "attack_target_count": 32,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 1,
+    "attack_boost": 15.0,
+    "lr_decay": 0.99,
+    "early_stop": false,
+    "compute_backend": "torch",
+    "device": "cpu",
+    "crypto_mode": "simulated"
+  },
+  "attacks": {
+    "boost3_s3": {
+      "attack_boost": 3.0,
+      "attack_stealth_steps": 3,
+      "attack_distance_weight": 0.001
+    },
+    "boost4_s2": {
+      "attack_boost": 4.0,
+      "attack_stealth_steps": 2,
+      "attack_distance_weight": 0.001
+    },
+    "boost4_s3": {
+      "attack_boost": 4.0,
+      "attack_stealth_steps": 3,
+      "attack_distance_weight": 0.001
+    }
+  },
+  "candidates": {
+    "sm9rrs": {
+      "c2": {
+        "detector_distance_threshold": 3.0,
+        "detector_reject_threshold": 6.0,
+        "detector_drift_allowance": 2.5,
+        "detector_history_threshold": 2.0,
+        "detector_reference_budget": 3.5,
+        "suspicion_remove_after": 2
+      },
+      "c3_severe45": {
+        "detector_distance_threshold": 3.0,
+        "detector_reject_threshold": 4.5,
+        "detector_drift_allowance": 2.5,
+        "detector_history_threshold": 2.0,
+        "detector_reference_budget": 3.5,
+        "suspicion_remove_after": 3
+      }
+    },
+    "vert": {
+      "v5": {
+        "vert_history_window": 5,
+        "vert_predict_epochs": 5,
+        "vert_predict_lr": 0.001
+      },
+      "v20": {
+        "vert_history_window": 5,
+        "vert_predict_epochs": 20,
+        "vert_predict_lr": 0.001
+      }
+    },
+    "fedavg": {
+      "reference": {}
+    }
+  },
+  "jobs": 2
+}

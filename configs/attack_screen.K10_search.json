@@ -1,0 +1,89 @@
+{
+  "output_dir": "outputs/mnist_v7_search_K10_20260907",
+  "train_samples": 10000,
+  "split_seed": 20260906,
+  "cpu_threads": 1,
+  "screen_seeds": [
+    104
+  ],
+  "confirmation_seeds": [
+    105,
+    106
+  ],
+  "partitions": [
+    "iid",
+    "dirichlet"
+  ],
+  "ratios": [
+    0.4,
+    0.8
+  ],
+  "training": {
+    "num_clients": 20,
+    "rounds": 50,
+    "detector_window": 10,
+    "attack_start_round": 12,
+    "attack_target_count": 32,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 1,
+    "attack_boost": 15.0,
+    "lr_decay": 0.99,
+    "early_stop": false,
+    "compute_backend": "torch",
+    "device": "cpu",
+    "crypto_mode": "simulated"
+  },
+  "attacks": {
+    "boost2_s3": {
+      "attack_boost": 2.0,
+      "attack_stealth_steps": 3,
+      "attack_distance_weight": 0.001
+    },
+    "boost3_s5": {
+      "attack_boost": 3.0,
+      "attack_stealth_steps": 5,
+      "attack_distance_weight": 0.001
+    },
+    "boost3_s3": {
+      "attack_boost": 3.0,
+      "attack_stealth_steps": 3,
+      "attack_distance_weight": 0.001
+    }
+  },
+  "candidates": {
+    "sm9rrs": {
+      "confirmed": {
+        "detector_distance_threshold": 3.5,
+        "detector_reject_threshold": 7.0,
+        "detector_drift_allowance": 3.0,
+        "detector_history_threshold": 2.5,
+        "detector_reference_budget": 3.5,
+        "suspicion_remove_after": 3
+      },
+      "immediate": {
+        "detector_distance_threshold": 3.5,
+        "detector_reject_threshold": 7.0,
+        "detector_drift_allowance": 3.0,
+        "detector_history_threshold": 2.5,
+        "detector_reference_budget": 3.5,
+        "suspicion_remove_after": 1
+      }
+    },
+    "vert": {
+      "v5": {
+        "vert_history_window": 5,
+        "vert_predict_epochs": 5,
+        "vert_predict_lr": 0.001
+      },
+      "v10": {
+        "vert_history_window": 10,
+        "vert_predict_epochs": 5,
+        "vert_predict_lr": 0.0005
+      }
+    },
+    "fedavg": {
+      "reference": {}
+    }
+  },
+  "jobs": 2
+}
