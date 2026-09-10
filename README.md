@@ -127,7 +127,7 @@ python -u run_experiments_from_config.py
 
 这些数值是显式研究目标，不是成功保证。该二次选择是**针对VERT的目标选参**，不能再将最终Ours选择描述为纯方法中立Score；VERT和其他基线不会因此被削弱或重选。三个可调方法仍各12个候选。设 `performance_target: null` 可关闭二次选择，仅用原公共Score。目标在训练留出阶段选择后冻结，正式测试只做只读达标审计，不重选参数。
 
-启动入口不变，仍修改 `configs/fair_tuning.example.json` 后运行 `run_fair_tuning_from_config.py`。查看 `performance_target_validation.json` 的 `status` 判断校准是否达标；正式结果看 `final_evaluation/performance_target.json`。`best_parameters.json` 和 `tuning_manifest.json` 保存独立选择、目标选择与所用阈值。`unmet` 不会自动删除结果或跳过正式比较；缺失指标、训练失败、无健康候选等原有硬错误仍会报错。
+启动入口不变，仍修改 `configs/fair_tuning.example.json` 后运行 `run_fair_tuning_from_config.py`。查看 `performance_target_validation.json` 的 `status` 判断校准是否达标；正式结果看 `final_evaluation/performance_target.json`。`best_parameters.json` 和 `tuning_manifest.json` 保存独立选择、目标选择与所用阈值。`unmet` 不会自动删除结果或跳过正式比较；Ours/VERT 无健康候选仍停止。其他方法若仅算法健康/干净效用不合格，则保留失败标签继续六方案比较；结果不完整或指标不可用仍不能放行。详见 [TAD失败后的续跑与兼容性说明](docs/TAD失败后的续跑与兼容性说明-2026-09-10.md)。
 
 本次100客户端、单开发种子、非IID、boost15补测满足上述接近目标；它不是多种子正式结论。配置含义、全部实测数值及启动说明见 [性能目标选参与启动说明](docs/性能目标选参与启动说明-2026-09-07.md)。
 
@@ -171,7 +171,9 @@ python -u run_experiments_from_config.py
 - 硬门槛：通信轮完成率（默认1）、非有限更新数量（默认0），以及可调方法相对同分区/Dirichlet α/客户端数/seed 的FedAvg干净最终准确率下降（当前方案B配置≤0.03，旧配置缺省值仍为0.05）。Krum/TAD/FedAvg是固定对照，干净结果差仍应报告，不因此删掉该对照。高ASR影响Score，并使新增性能目标审计记录 `unmet`；单纯目标未达不隐藏整项研究结果。
 - 新增固定健康门槛：任意轮（含最后一轮）全员或全部诚实者永久撤销、干净场景累计误撤销率 >10%，以及 Ours 连续 5 轮诚实系数损失 >=99% 均使候选失效。最后一项只适用于 Ours 未重新归一化的系数，不把 Krum 的逐客户端权重缺口误当全局步长。阈值是公开的开发选择，不是鲁棒性定理。客户端真值仅在离线评价使用。
 - 不设置前三攻击轮召回率硬门槛；初期恶意聚合质量、最差准确率和峰值 ASR 另行报告。
-- 缺失 ASR、未完成或 NaN/Inf 不冒充正常结果；没有合格候选时明确停止，不自动放宽阈值。先看已写出的 `candidate_feasibility.csv` 和 `validation_results.csv`。同一新版本验证已完成后可复用其断点，不必重训已有配置。
+- 缺失 ASR、未完成或 NaN/Inf 不冒充正常结果；Ours/VERT 没有合格候选时明确停止。AlignIns/Krum/TAD/FedAvg 优先选健康候选；若全部候选仅违反健康/干净效用门槛，则按同一 Score 选出完整、有限的失败对照继续，保持 `valid=False`。固定TAD仍只有1候选，不因此新增调参或修改算法。先看已写出的 `candidate_feasibility.csv` 和 `validation_results.csv`；不删除失败场景。
+- 自动权重学习仍优先使用三个可调方法。联合留一比例拟合不可行时，先只用 Ours/VERT 重试；仍不可行则使用预先声明的默认权重。每次回退记录原因与参与方法；随后对 Ours/VERT 的全部验证场景继续执行原健康门槛。回退不使用正式测试数据，也不减少任何方法的候选训练预算。
+- `best_parameters.json` 的 `selection_policy` 说明进入下一阶段的规则；失败对照带 `selection_status=comparison_only_failed`、`validation_valid=false` 和 `invalid_reasons`，`validation_score=null`。`comparison_selection_score` 仅解释失败对照之间的排序，不代表健康通过。正式 `aggregate.csv` 增加健康失败次数/原因，`scenario_audit.csv` 保留每次运行的诊断。
 - `best_parameters.json` 报告 Score 定义、选择余量、各场景结果离散程度、权重选择模式数。若 `weights_identifiable=false`，代表多组权重选中了同样的候选，不能把那组数字解释为唯一学出的“真实权重”。
 
 硬门槛接口：公共 CLI `--min-round-completion`、`--max-nonfinite-updates`（JSON 对应 `calibration_min_round_completion_rate`、`calibration_max_nonfinite_updates`）；方案 B 的干净下降限制为 `tuning.max_clean_accuracy_drop`。删除的 `--ASR`/前三轮召回率等旧接口不可再用。
@@ -218,7 +220,18 @@ python -u -m sm9rrsfl.experiments --dataset synthetic --crypto-mode simulated \
   --compute-backend numpy --jobs 1 --output-dir outputs/normal_state_smoke
 ```
 
-切换 CIFAR-10：复制方案 B 配置，修改 dataset、data_dir、output_dir 及公共训练超参数；不要修改各方法的数据/优化器口径。MNIST 使用 compact CNN；CIFAR-10 使用 Conv-Conv-FC-FC-Logits CNN 和按通道标准化。应先检查相同公共参数下的干净 FedAvg 收敛，再开启整个调参网格。K、总轮数、lr、batch 等属于实验条件，自动检测参数不能弥补欠训练的基础模型。
+已经提供独立的 CIFAR-10 配置，MNIST 继续使用原 `configs/fair_tuning.example.json`。CIFAR 六方案只需修改 `configs/fair_tuning.cifar10.json`，启动器相同：
+
+```bash
+python -u run_fair_tuning_from_config.py --config configs/fair_tuning.cifar10.json --dry-run
+python -u run_fair_tuning_from_config.py --config configs/fair_tuning.cifar10.json
+```
+
+CIFAR 配置为 100 客户端、100 轮、每轮本地 1 epoch、batch 50、K20、第25轮攻击；三个可调方法各6候选，共630次验证和180次正式训练。目标为准确率落后VERT不超过0.5个百分点、ASR高于VERT不超过1个百分点，并检查绝对ASR与峰值；目标未达到仍报告 `unmet`。这不是已验证的双指标保证。
+
+可先用 `python -u run_attack_screen.py --config configs/attack_screen.cifar10.json --clean-only` 检查训练留出的干净 FedAvg 收敛；去掉 `--clean-only` 才是可选的 Ours/VERT 攻击参数探索。这个探索脚本默认串行、模拟密码，正式六方案使用自动GPU调度与SM9。已占满资源的 MNIST 作业完成后再启动 CIFAR，或明确分配独立空闲GPU。
+
+完整数据划分、CIFAR候选网格、实测限制与启动步骤见 [CIFAR-10六方案实验说明](docs/CIFAR-10六方案实验说明-2026-09-07.md)。MNIST 使用 compact CNN；CIFAR-10 使用 Conv-Conv-FC-FC-Logits CNN 和按通道标准化。K、总轮数、lr、batch 等属于公共实验条件，六种方法保持一致。
 
 ## 输出、同步与代码位置
 
@@ -329,6 +342,8 @@ TAD 指本文复现的 Trajectory Anomaly Detection 方法，对应文献 [13]�
 Ding Z, Wang W, Li X, et al. Identifying alternately poisoning attacks in federated learning online using trajectory anomaly detection method. Scientific Reports, 2024, 14: 20269. 论文链接：[Nature Scientific Reports](https://www.nature.com/articles/s41598-024-70375-w)。
 
 本文献方法在每轮联邦学习中记录客户端模型参数轨迹，对参数代表矩阵提取奇异值，并用相邻轮次奇异值差分构造轨迹特征；随后使用 Isolation Forest 判断异常客户端，对异常客户端降低聚合权重，对恢复正常的客户端提升权重，连续异常客户端被移除。项目中的实现位于 `sm9rrsfl/ding13_detector.py`。
+
+2026-09-10原论文复核发现，现有TAD在输入使用增量、固定异常比例配额、权重归一化及移除判据方面存在差异或论文歧义，不能称为严格原文复现。论文第10页承认半数恶意节点、特别是大量串通时可能面临困难，但没有证明50%是失效阈值。详见 [TAD原论文与实现复核](docs/TAD原论文与实现复核-2026-09-10.md)。本次仅修复选参阶段的失败对照放行和报告，未改TAD算法，因此不使旧结果变成新的论文复现实验。
 
 Ding 等人在实验部分说明其投毒方法基于参考文献 [8]，并对攻击作交替式修改，但正文没有给出独立的攻击目标函数、伪代码或完整超参数。因此，本项目不声称恢复了未公开的 Ding 攻击源码；攻击端按其引用的 Bhagoji 等人交替最小化目标结构实现，并采用官方代码 `distance-constrained/self-reference` 配置中的距离锚点、交替比例与关键默认系数，作为 Ding 检测实验所针对的交替投毒攻击基础。模型、数据集和优化器仍沿用本项目实验配置，因此这不是原仓库运行环境的逐比特复现：
 

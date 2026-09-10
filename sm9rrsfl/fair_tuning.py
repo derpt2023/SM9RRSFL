@@ -65,6 +65,20 @@ ALL_METHODS = (
     "fedavg",
 )
 TUNABLE_METHODS = ("sm9rrs", "vert", "alignins")
+# Progression policy, independent of the training/checkpoint schema. All six
+# methods still run; a failed comparison is not a healthy selected defense.
+REQUIRED_VALID_METHODS = ("sm9rrs", "vert")
+COMPARISON_FAILURE_REASONS = frozenset({
+    "clean_accuracy_drop", "all_clients_revoked", "all_honest_revoked",
+    "clean_false_revocation_rate", "honest_weight_starvation",
+})
+SELECTION_POLICY = {
+    "required_valid_methods": list(REQUIRED_VALID_METHODS),
+    "comparison_failure_reasons": sorted(COMPARISON_FAILURE_REASONS),
+    "comparison_fallback": "highest common Score among complete, finite failed comparisons",
+    "execution_and_metric_gates": "required for every method",
+    "failed_comparisons_remain_invalid": True,
+}
 METHOD_TUNABLE_PARAMETERS = {
     "sm9rrs": frozenset(OURS_PARAMETER_NAMES + ("detector_window",)),
     "vert": frozenset(
@@ -821,6 +835,52 @@ def _learn_unified_objective_weights(
     spec: FairTuningConfig,
     results_by_candidate: dict[str, list[ExperimentResult]],
 ) -> tuple[dict[str, float], dict[str, Any]]:
+    """Preserve the joint fit when feasible, with explicit validation fallbacks.
+
+    An optional comparator must not veto all weight vectors. Retry the same
+    fit on the required methods; if even cross-ratio transfer is infeasible,
+    use the predeclared weights. Final candidate health gates still apply to
+    Ours/VERT on ALL validation scenarios. No test data enter either fallback.
+    """
+    methods = tuple(method for method in TUNABLE_METHODS if spec.candidates.get(method))
+    # This helper also serves standalone Ours calibration. Preserve its
+    # original strict behavior; the new progression policy is for six-method
+    # comparisons containing both required defenses only.
+    if not set(REQUIRED_VALID_METHODS).issubset(methods):
+        return _fit_unified_objective_weights(spec, results_by_candidate, methods=methods)
+    required = tuple(method for method in methods if method in REQUIRED_VALID_METHODS)
+    scopes = [methods] + ([required] if required != methods else [])
+    failed_attempts = []
+    for scope in scopes:
+        try:
+            weights, report = _fit_unified_objective_weights(
+                spec, results_by_candidate, methods=scope,
+            )
+        except FairTuningError as exc:
+            failed_attempts.append({"scope": list(scope), "reason": str(exc)})
+            continue
+        if failed_attempts:
+            report["failed_attempts"] = failed_attempts
+            report["excluded_methods"] = sorted(set(methods) - set(scope))
+            report["scope_fallback"] = "required_valid_methods"
+        return weights, report
+    return dict(OBJECTIVE_DEFAULTS), {
+        "algorithm": "leave_one_attacked_ratio_out",
+        "status": "fallback_infeasible_cross_ratio_fit",
+        "failed_attempts": failed_attempts,
+        "scope": list(required),
+        "folds": [],
+        "fallback_weights": "predeclared OBJECTIVE_DEFAULTS",
+        "required_candidate_gates": "unchanged; checked on all validation scenarios",
+    }
+
+
+def _fit_unified_objective_weights(
+    spec: FairTuningConfig,
+    results_by_candidate: dict[str, list[ExperimentResult]],
+    *,
+    methods: tuple[str, ...],
+) -> tuple[dict[str, float], dict[str, Any]]:
     """Learn one method-neutral Score by leave-one-ratio-out transfer.
 
     For every held-out attacked calibration ratio, each tunable method selects
@@ -829,7 +889,6 @@ def _learn_unified_objective_weights(
     high clean/robust accuracy, and low honest-client aggregation-weight loss.
     """
 
-    methods = tuple(method for method in TUNABLE_METHODS if spec.candidates.get(method))
     # Cache the sufficient metrics once per fold/candidate. Weight search only
     # does four-term dot products, not 969 full rescans of all round records.
     metric_cache = {}
@@ -1027,10 +1086,43 @@ def _learn_unified_objective_weights(
     }
 
 
-def select_best_trials(trials: list[TrialScore]) -> dict[str, TrialScore]:
+def _comparison_trial_usable(trial: TrialScore) -> bool:
+    """Only algorithm/utility failures may be retained, never damaged data."""
+    return (
+        trial.method not in REQUIRED_VALID_METHODS
+        and bool(trial.invalid_reasons)
+        and set(trial.invalid_reasons) <= COMPARISON_FAILURE_REASONS
+        and trial.all_runs_completed
+        and trial.nonfinite_updates == 0
+        and all(np.isfinite(value) for value in (
+            trial.clean_accuracy, trial.robust_accuracy, trial.attack_success_rate,
+            trial.honest_weight_loss, trial.worst_attack_success_rate,
+            trial.worst_early_malicious_weight_mass, trial.worst_clean_accuracy_drop,
+        ))
+    )
+
+
+def _selection_score(trial: TrialScore, objective: dict[str, float]) -> float:
+    if trial.valid:
+        return trial.score
+    return weighted_score({
+        "clean_accuracy": trial.clean_accuracy,
+        "robust_accuracy": trial.robust_accuracy,
+        "attack_success_rate": trial.attack_success_rate,
+        "honest_weight_loss": trial.honest_weight_loss,
+    }, objective)
+
+
+def select_best_trials(
+    trials: list[TrialScore], *, objective: dict[str, float] | None = None,
+) -> dict[str, TrialScore]:
+    objective = OBJECTIVE_DEFAULTS if objective is None else objective
     selected: dict[str, TrialScore] = {}
     for method in ALL_METHODS:
         method_trials = [trial for trial in trials if trial.method == method and trial.valid]
+        if not method_trials and method not in REQUIRED_VALID_METHODS:
+            method_trials = [trial for trial in trials
+                             if trial.method == method and _comparison_trial_usable(trial)]
         if not method_trials:
             rejected = [trial for trial in trials if trial.method == method]
             details = "; ".join(
@@ -1039,14 +1131,16 @@ def select_best_trials(trials: list[TrialScore]) -> dict[str, TrialScore]:
                 for trial in rejected
             )
             raise FairTuningError(
-                f"no valid candidate remains for {method}; fix the shared attack/training "
-                "configuration or the method grid instead of selecting a run that "
-                "violates execution-integrity, metric-availability, or matched-FedAvg "
-                f"clean-accuracy constraints. invalid_candidates: {details}"
+                f"no valid candidate remains for {method}; Ours/VERT require all "
+                "health and clean-accuracy gates. Other methods may continue only "
+                "as explicitly failed comparisons with complete, finite metrics "
+                "and matched FedAvg controls. Fix incomplete or nonfinite results "
+                f"before resuming. invalid_candidates: {details}"
             )
         selected[method] = max(
             method_trials,
-            key=lambda trial: (trial.score, -trial.worst_attack_success_rate, trial.candidate_id),
+            key=lambda trial: (_selection_score(trial, objective),
+                               -trial.worst_attack_success_rate, trial.candidate_id),
         )
     return selected
 
@@ -1699,6 +1793,9 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
             + json.dumps(learned_objective, sort_keys=True),
             flush=True,
         )
+        print("objective_learning_status=" + objective_learning["status"]
+              + " scope_fallback=" + objective_learning.get("scope_fallback", "none"),
+              flush=True)
     else:
         objective_learning = {
             "algorithm": "fixed",
@@ -1736,7 +1833,12 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
 
     _write_csv(output_dir / "tuning_trials.csv", [trial.row() for trial in trial_scores])
     _write_csv(output_dir / "validation_results.csv", validation_rows)
-    selected = select_best_trials(trial_scores)
+    selected = select_best_trials(trial_scores, objective=spec.objective)
+    for method, trial in selected.items():
+        if not trial.valid:
+            print(f"comparison_only_failed={method} candidate={trial.candidate_id} "
+                  f"reasons={','.join(trial.invalid_reasons)} valid=False "
+                  "continuing_final_evaluation_with_failure_label=true", flush=True)
     expected_validation = {
         (task.config.partition, task.config.dirichlet_alpha, task.config.num_clients,
          task.config.malicious_ratio, task.config.seed)
@@ -1778,6 +1880,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         "objective": spec.objective,
         "objective_mode": spec.objective_mode,
         "objective_learning": objective_learning,
+        "selection_policy": SELECTION_POLICY,
         "performance_target_selection": target_selection,
         "formal_ratios": list(spec.formal_ratios),
         "calibration_ratios": list(spec.calibration_ratios),
@@ -1801,7 +1904,16 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
             method: {
                 "candidate_id": trial.candidate_id,
                 "parameters": trial.parameters,
-                "validation_score": trial.score,
+                "validation_score": trial.score if trial.valid else None,
+                "validation_valid": trial.valid,
+                "selection_status": "valid" if trial.valid else "comparison_only_failed",
+                "required_valid_method": method in REQUIRED_VALID_METHODS,
+                "invalid_reasons": list(trial.invalid_reasons),
+                # The utility ranks failed controls only if no healthy
+                # candidate exists. It does not turn their -inf gate into a pass.
+                "comparison_selection_score": (
+                    _selection_score(trial, spec.objective) if not trial.valid else None
+                ),
                 "validation_constraints": {
                     "worst_clean_accuracy_drop": trial.worst_clean_accuracy_drop,
                     "all_runs_completed": trial.all_runs_completed,
@@ -1894,6 +2006,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
         final_executions.sort(key=lambda item: _tuning_task_sort_key(item[0]))
         final_results = [result for _task, result in final_executions]
         best_payload["final_fingerprint"] = final_fingerprint
+        _write_csv(final_dir / "scenario_audit.csv", _validation_rows(final_executions))
         if spec.performance_target is not None:
             final_target = evaluate_target(
                 [r for r in final_results if r.config.method == "sm9rrs"],
@@ -1986,6 +2099,14 @@ def _write_final_aggregate(path: Path, results: list[ExperimentResult]) -> None:
                     item.stage_timings.crypto_wall_seconds for item in items
                 ),
                 "nonfinite_updates_total": sum(item.nonfinite_updates for item in items),
+                "training_health_failed_runs": sum(bool(_training_health_reasons(item))
+                                                   for item in items),
+                "training_health_reasons": ",".join(sorted({
+                    reason for item in items for reason in _training_health_reasons(item)
+                })),
+                "incomplete_runs": sum(not _execution_integrity(
+                    [item], min_round_completion_rate=1.0, max_nonfinite_updates=0,
+                )[1] for item in items),
             }
         )
     _write_csv(path, rows)
@@ -2104,6 +2225,7 @@ def main(argv: list[str] | None = None) -> None:
     print("performance_target=" + json.dumps(
         vars(spec.performance_target) if spec.performance_target is not None else None,
         sort_keys=True), flush=True)
+    print("selection_policy=" + json.dumps(SELECTION_POLICY, sort_keys=True), flush=True)
     if args.dry_run:
         return
     try:

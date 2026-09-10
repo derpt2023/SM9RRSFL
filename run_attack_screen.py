@@ -17,7 +17,7 @@ from pathlib import Path
 from statistics import fmean
 import time
 
-from sm9rrsfl.datasets import load_mnist, stratified_training_three_way_split
+from sm9rrsfl.datasets import load_image_dataset, stratified_training_three_way_split
 from sm9rrsfl.fl import ExperimentConfig, run_experiment
 from sm9rrsfl.ours_calibration import CALIBRATION_ALGORITHM_VERSION, split_metadata
 from sm9rrsfl.ours_policy import OursParameters
@@ -30,13 +30,39 @@ def write_json(path, value):
     tmp.replace(path)
 
 
+def load_screen_data(spec):
+    dataset = spec.get('dataset', 'mnist')
+    if dataset not in ('mnist', 'cifar10'):
+        raise ValueError('screen dataset must be mnist or cifar10')
+    if dataset == 'cifar10':
+        required = {'rounds', 'local_epochs', 'batch_size', 'lr', 'lr_decay',
+                    'attack_epochs', 'attack_start_round', 'detector_window'}
+        missing = required - set(spec['training'])
+        if missing:
+            raise ValueError('CIFAR screen requires explicit training settings: ' + ', '.join(sorted(missing)))
+        for method, space in spec.get('candidates', {}).items():
+            for parameters in space.values():
+                config = ExperimentConfig(**{**spec['training'], **parameters, 'method': method})
+                OursParameters.from_object(config).validate()
+    return load_image_dataset(dataset, spec.get('data_dir', 'data/' + dataset),
+        download=spec.get('download', False), train_limit=spec['train_samples'],
+        test_limit=100, seed=spec['split_seed'])
+
+
 def _initialize_worker(spec):
     global _WORKER_DATA
     import torch
     torch.set_num_threads(spec.get('cpu_threads', 1))
-    original = load_mnist('data/mnist', train_limit=spec['train_samples'], test_limit=100,
-                          seed=spec['split_seed'])
-    _WORKER_DATA = stratified_training_three_way_split(original, seed=spec['split_seed']).calibration_dataset
+    original = load_screen_data(spec)
+    _WORKER_DATA = split_screen_data(original, spec).calibration_dataset
+
+
+def split_screen_data(data, spec):
+    fraction = float(spec.get('validation_fraction', .05))
+    if not 0 < fraction < .95:
+        raise ValueError('validation_fraction must be in (0, .95)')
+    return stratified_training_three_way_split(data, seed=spec['split_seed'],
+        train_fraction=.95 - fraction, calibration_fraction=fraction, attack_fraction=.05)
 
 
 def _execute(task, validation=None):
@@ -177,7 +203,11 @@ def main():
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument('--config')
     inputs.add_argument('--report-dir', help='Rebuild confirmation audit from existing runs, without training')
+    parser.add_argument('--clean-only', action='store_true',
+                        help='Run only clean FedAvg on the same training holdout before an expensive screen')
     args = parser.parse_args()
+    if args.clean_only and args.report_dir:
+        parser.error('--clean-only requires --config')
     if args.report_dir:
         out = Path(args.report_dir)
         selected = json.loads((out / 'selection.json').read_text())['selected']
@@ -187,15 +217,24 @@ def main():
         audit, comparisons = confirmation_report(rows, selected, spec)
         write_json(out / 'confirmation_audit.json', audit)
         write_json(out / 'comparison.json', comparisons)
+        if spec.get('performance_target'):
+            from screen_performance import screen_performance_target
+            _, target = screen_performance_target(out, spec, 'confirmation', selected)
+            write_json(out / 'performance_target_confirmation.json', target)
         print('Reports rebuilt without training:', out)
         return
     spec = json.loads(Path(args.config).read_text())
+    if spec.get('performance_target') is not None:
+        from sm9rrsfl.performance_target import PerformanceTarget
+        PerformanceTarget.parse(spec['performance_target'])
+    if args.clean_only:
+        spec = {**spec, 'attacks': {}, 'ratios': [], 'confirmation_seeds': [],
+                'candidates': {'fedavg': {'reference': {}}}, 'clean_preflight_only': True}
     out = Path(spec['output_dir']); out.mkdir(parents=True, exist_ok=True)
     import torch
     torch.set_num_threads(spec.get('cpu_threads', 1))
-    data = load_mnist('data/mnist', train_limit=spec['train_samples'], test_limit=100,
-                      seed=spec['split_seed'])
-    split = stratified_training_three_way_split(data, seed=spec['split_seed'])
+    data = load_screen_data(spec)
+    split = split_screen_data(data, spec)
     validation = split.calibration_dataset
     manifest = {'algorithm': CALIBRATION_ALGORITHM_VERSION, 'spec': spec,
                 'split': split_metadata(split, spec['split_seed']),
@@ -205,6 +244,9 @@ def main():
                 'runner_digest': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 'source_digest': hashlib.sha256(b''.join(p.read_bytes() for p in
                     sorted(Path('sm9rrsfl').glob('*.py')))).hexdigest()}
+    if spec.get('performance_target'):
+        manifest['target_runner_digest'] = hashlib.sha256(Path('screen_performance.py').read_bytes()).hexdigest()
+        manifest['selection'] += '; freeze VERT, then select Ours against the declared target across all profiles'
     key = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()[:16]
     out = out / key; out.mkdir(exist_ok=True)
     write_json(out / 'manifest.json', manifest)
@@ -254,7 +296,15 @@ def main():
                             for ratio in spec['ratios']:
                                 run('screen', method, name, profile, ratio, part, seed)
     flush()
+    if args.clean_only:
+        write_json(out / 'clean_preflight.json', {'official_test_used': False, 'runs': rows})
+        print('Clean training-holdout preflight:', out, flush=True)
+        return
     selected, scores = select_candidates(rows, candidates)
+    if spec.get('performance_target'):
+        from screen_performance import screen_performance_target
+        selected, target = screen_performance_target(out, spec, 'screen', selected, scores=scores, choose=True)
+        write_json(out / 'performance_target_screen.json', target)
     write_json(out / 'selection.json', dict(selected=selected, scores=scores,
                parameters={m: candidates[m][n] for m, n in selected.items()}))
     if len(selected) != 2:
@@ -272,6 +322,10 @@ def main():
     audit, comparisons = confirmation_report(rows, selected, spec)
     write_json(out / 'confirmation_audit.json', audit)
     write_json(out / 'comparison.json', comparisons)
+    if spec.get('performance_target'):
+        from screen_performance import screen_performance_target
+        _, target = screen_performance_target(out, spec, 'confirmation', selected)
+        write_json(out / 'performance_target_confirmation.json', target)
     print('Results:', out, flush=True)
 
 
