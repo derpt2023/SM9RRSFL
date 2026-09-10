@@ -1634,7 +1634,7 @@ class ProgressReporter:
             self._refresh_thread.join(timeout=max(1.0, self.refresh_interval * 2.0))
         if self.enabled and self.total:
             with self._lock:
-                self.current = "complete"
+                self.current = "complete" if self.completed >= self.total else "interrupted"
                 self._write(self._progress_message(), final=True)
 
     def _refresh_loop(self) -> None:
@@ -2215,9 +2215,15 @@ def run_measured_experiment(
     checkpoint_dir: Path | None = None,
     run_fingerprint: str | None = None,
     retain_success_checkpoint: bool = False,
+    checkpoint_identity_config: ExperimentConfig | None = None,
 ) -> ExperimentResult:
+    # Tuning may move a task to another CUDA device while retaining the
+    # original checkpoint filename and run fingerprint. The checkpoint loader
+    # independently verifies every non-runtime configuration field.
+    checkpoint_identity = checkpoint_identity_config or config
     checkpoint_path = (
-        _checkpoint_path(Path(checkpoint_dir), config) if checkpoint_dir is not None else None
+        _checkpoint_path(Path(checkpoint_dir), checkpoint_identity)
+        if checkpoint_dir is not None else None
     )
     if checkpoint_path is not None:
         resume_state, previous_runtime, previous_peak = _load_round_checkpoint(
@@ -2237,7 +2243,7 @@ def run_measured_experiment(
         if not retain_success_checkpoint:
             finalize_config_checkpoint(
                 checkpoint_dir,
-                config,
+                checkpoint_identity,
                 run_fingerprint,
             )
         return terminal_result
@@ -2338,7 +2344,7 @@ def run_measured_experiment(
     else:
         finalize_config_checkpoint(
             checkpoint_dir,
-            config,
+            checkpoint_identity,
             run_fingerprint,
         )
     return final_result
@@ -2429,7 +2435,8 @@ def _mark_failure_resolved(
         return
     if (
         payload.get("run_fingerprint") != run_fingerprint
-        or payload.get("config") != asdict(config)
+        or not isinstance(payload.get("config"), dict)
+        or _checkpoint_semantic_config(payload["config"]) != _checkpoint_semantic_config(config)
         or payload.get("resolved") is True
     ):
         return

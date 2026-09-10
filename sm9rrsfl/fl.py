@@ -616,8 +616,17 @@ def run_experiment(
             sm9_weight_manager = resume_state["weight_manager"]
         elif config.method == "ding13":
             ding13_detector = resume_state["ding13_detector"]
+            ding13_detector.compute_backend = config.compute_backend
+            ding13_detector.device = config.device
         elif config.method == "vert":
             vert_defense = resume_state["vert_defense"]
+            if (vert_defense.device != config.device
+                    or vert_defense.compute_backend != config.compute_backend):
+                # Keep learned histories/projections; discard only lazy tensor
+                # caches tied to the old device, just as pickle restoration does.
+                state = vert_defense.__getstate__()
+                state.update(device=config.device, compute_backend=config.compute_backend)
+                vert_defense.__setstate__(state)
 
     if config.method == "sm9rrs" and not task_exhausted:
         assert (

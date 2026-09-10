@@ -129,6 +129,8 @@ python -u run_experiments_from_config.py
 
 启动入口不变，仍修改 `configs/fair_tuning.example.json` 后运行 `run_fair_tuning_from_config.py`。查看 `performance_target_validation.json` 的 `status` 判断校准是否达标；正式结果看 `final_evaluation/performance_target.json`。`best_parameters.json` 和 `tuning_manifest.json` 保存独立选择、目标选择与所用阈值。`unmet` 不会自动删除结果或跳过正式比较；Ours/VERT 无健康候选仍停止。其他方法若仅算法健康/干净效用不合格，则保留失败标签继续六方案比较；结果不完整或指标不可用仍不能放行。详见 [TAD失败后的续跑与兼容性说明](docs/TAD失败后的续跑与兼容性说明-2026-09-10.md)。
 
+2026-09-10：统一调参现已支持更换CUDA卡号/密码线程数后复用原验证与正式缓存，恢复时重新绑定VERT/TAD的设备；CUDA任务每卡最多一个，派发前复查显存，OOM最多额外重试一次，并保留其他工作线程的完成结果。训练、攻击、评估批大小及配置均不变。补丁文件清单、限制GPU的启动命令和恢复数量检查见 [AI Station换卡续跑与OOM恢复](docs/AIStation换卡续跑与OOM恢复-2026-09-10.md)。
+
 本次100客户端、单开发种子、非IID、boost15补测满足上述接近目标；它不是多种子正式结论。配置含义、全部实测数值及启动说明见 [性能目标选参与启动说明](docs/性能目标选参与启动说明-2026-09-07.md)。
 
 ## Ours 一轮实际如何工作

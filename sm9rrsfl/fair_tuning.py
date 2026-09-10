@@ -27,7 +27,7 @@ from .performance_target import PerformanceTarget, evaluate_target, scenario_key
 from .config_runner import ConfigError, parameters_to_argv
 from .datasets import ImageDataset, load_image_dataset, stratified_training_three_way_split
 from .ours_policy import OURS_PARAMETER_NAMES
-from .execution import completed_pairs, device_affine_futures
+from .execution import completed_pairs
 from .experiments import (
     ProgressReporter,
     _cuda_capacity_error,
@@ -40,7 +40,6 @@ from .experiments import (
     confirm_matching_checkpoints,
     cuda_devices_with_capacity,
     finalize_config_checkpoint,
-    load_completed_results_snapshot,
     parallel_executor_kind,
     parse_args,
     print_resource_plan,
@@ -53,6 +52,8 @@ from .experiments import (
 from .fl import ExperimentConfig, ExperimentResult
 from .model import describe_compute_backend
 from .visualization import generate_visualizations
+from .tuning_resume import locate_tuning_state, runtime_config_key
+from .cuda_execution import run_cuda_tasks
 
 
 TUNING_SCHEMA_VERSION = 3
@@ -216,6 +217,8 @@ class TuningExperimentTask:
     candidate_id: str
     method: str
     config: ExperimentConfig
+    # Execution metadata only; deliberately absent from the tuning manifest.
+    checkpoint_config: ExperimentConfig | None = None
 
 
 _TUNING_WORKER_DATASET: ImageDataset | None = None
@@ -1282,6 +1285,7 @@ def execute_tuning_tasks(
     progress_total: int | None = None,
     progress_completed: int = 0,
     on_complete: Callable[[TuningExperimentTask, ExperimentResult], None] | None = None,
+    cuda_devices: tuple[str, ...] | None = None,
 ) -> list[tuple[TuningExperimentTask, ExperimentResult]]:
     """Execute independent configs with the main runner's executor semantics."""
 
@@ -1293,13 +1297,42 @@ def execute_tuning_tasks(
         mode=progress_mode,
     )
     completed: list[tuple[TuningExperimentTask, ExperimentResult]] = []
-    executor_kind = parallel_executor_kind(backend_description, jobs)
+    executor_kind = ("thread" if backend_description == "torch:cuda"
+                     else parallel_executor_kind(backend_description, jobs))
     print(
         f"tuning_phase={tasks[0].phase if tasks else 'empty'} "
         f"configurations={len(tasks)} jobs={jobs} executor={executor_kind}",
         flush=True,
     )
     try:
+        if backend_description == "torch:cuda":
+            progress.start_parallel(jobs, len(tasks))
+
+            def commit_cuda(task, result):
+                completed.append((task, result))
+                if on_complete is not None:
+                    on_complete(task, result)
+                finalize_config_checkpoint(checkpoint_dir, task.checkpoint_config or task.config,
+                                           run_fingerprint)
+                progress.finish_config(task.config)
+
+            def cuda_event(kind, task, **details):
+                row = {"event": kind, "timestamp_utc": datetime.now(timezone.utc).isoformat(), **details}
+                if task is not None:
+                    row.update(candidate_id=task.candidate_id, config=asdict(task.config))
+                print("cuda_recovery=" + json.dumps(row, sort_keys=True), flush=True)
+                if checkpoint_dir is not None:
+                    path = checkpoint_dir.parent / "cuda_recovery.jsonl"
+                    with path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+            run_cuda_tasks(
+                tasks, devices=cuda_devices or tuple(sorted({t.config.device for t in tasks})),
+                jobs=jobs, required_mb=_estimated_cuda_worker_memory_mb(dataset, [t.config for t in tasks]),
+                run=lambda task: _run_tuning_task_in_thread(dataset, task, checkpoint_dir, run_fingerprint),
+                commit=commit_cuda, event=cuda_event,
+            )
+            return completed
         if jobs <= 1:
             for task in tasks:
                 progress.start_config(task.config)
@@ -1309,13 +1342,14 @@ def execute_tuning_tasks(
                     checkpoint_dir=checkpoint_dir,
                     run_fingerprint=run_fingerprint,
                     retain_success_checkpoint=checkpoint_dir is not None,
+                    checkpoint_identity_config=task.checkpoint_config,
                 )
                 completed.append((task, result))
                 if on_complete is not None:
                     on_complete(task, result)
                 finalize_config_checkpoint(
                     checkpoint_dir,
-                    task.config,
+                    task.checkpoint_config or task.config,
                     run_fingerprint,
                 )
                 progress.finish_config(task.config)
@@ -1326,12 +1360,7 @@ def execute_tuning_tasks(
             with ThreadPoolExecutor(max_workers=jobs) as executor:
                 submit = lambda pool, task: pool.submit(
                     _run_tuning_task_in_thread, dataset, task, checkpoint_dir, run_fingerprint)
-                if backend_description == "torch:cuda":
-                    futures = device_affine_futures(
-                        executor, tasks, submit=submit,
-                        device_key=lambda t: t.config.device, jobs=jobs)
-                else:
-                    futures = {submit(executor, task): task for task in tasks}
+                futures = {submit(executor, task): task for task in tasks}
                 _consume_tuning_futures(
                     futures,
                     completed,
@@ -1413,6 +1442,7 @@ def _run_tuning_task_in_worker(task: TuningExperimentTask) -> ExperimentResult:
         checkpoint_dir=_TUNING_WORKER_CHECKPOINT_DIR,
         run_fingerprint=_TUNING_WORKER_RUN_FINGERPRINT,
         retain_success_checkpoint=_TUNING_WORKER_CHECKPOINT_DIR is not None,
+        checkpoint_identity_config=task.checkpoint_config,
     )
 
 
@@ -1428,6 +1458,7 @@ def _run_tuning_task_in_thread(
         checkpoint_dir=checkpoint_dir,
         run_fingerprint=run_fingerprint,
         retain_success_checkpoint=checkpoint_dir is not None,
+        checkpoint_identity_config=task.checkpoint_config,
     )
 
 
@@ -1447,7 +1478,7 @@ def _consume_tuning_futures(
             on_complete(task, result)
         finalize_config_checkpoint(
             checkpoint_dir,
-            task.config,
+            task.checkpoint_config or task.config,
             run_fingerprint,
         )
         progress.finish_config(task.config)
@@ -1483,13 +1514,14 @@ def execute_resumable_tuning_phase(
     phase = tasks[0].phase
     if any(task.phase != phase for task in tasks):
         raise FairTuningError("one resumable tuning phase cannot mix phase names")
-    task_by_config: dict[ExperimentConfig, TuningExperimentTask] = {}
+    task_by_config: dict[str, TuningExperimentTask] = {}
     for task in tasks:
-        if task.config in task_by_config:
+        key = runtime_config_key(task.config)
+        if key in task_by_config:
             raise FairTuningError(
                 "tuning tasks must resolve to unique experiment configurations"
             )
-        task_by_config[task.config] = task
+        task_by_config[key] = task
 
     manifest = build_run_manifest(args, dataset, [task.config for task in tasks])
     manifest["tuning_phase"] = phase
@@ -1509,24 +1541,45 @@ def execute_resumable_tuning_phase(
     manifest["fingerprint"] = fingerprint
 
     state_dir = output_dir / ".tuning_state" / phase / fingerprint
-    checkpoint_dir = state_dir / ".checkpoints" if args.resume else None
     recovered_results: list[ExperimentResult] = []
     if args.resume:
+        requested_fingerprint = fingerprint
+        state_dir, stored_manifest, recovered_results = locate_tuning_state(output_dir, manifest)
+        fingerprint = stored_manifest["fingerprint"]
         state_dir.mkdir(parents=True, exist_ok=True)
-        write_run_manifest(state_dir, manifest)
-        recovered_results = load_completed_results_snapshot(state_dir) or []
+        # Preserve the original manifest: its fingerprint and runtime fields
+        # describe the existing checkpoints and completed measurements.
+        write_run_manifest(state_dir, stored_manifest)
+        identities = {runtime_config_key(c): ExperimentConfig(**c)
+                      for c in stored_manifest["configs"]}
+        tasks = [replace(task, checkpoint_config=identities[runtime_config_key(task.config)])
+                 for task in tasks]
+        task_by_config = {runtime_config_key(t.config): t for t in tasks}
+        _write_json(state_dir / "resume_runtime.json", {
+            "requested_fingerprint": requested_fingerprint,
+            "retained_fingerprint": fingerprint,
+            "runtime_fields_ignored_for_matching": ["CUDA device index", "sm9_workers"],
+            "requested_devices": sorted({t.config.device for t in tasks}),
+            "requested_sm9_workers": sorted({t.config.sm9_workers for t in tasks}),
+            "completed_result_devices": sorted({r.config.device for r in recovered_results}),
+        })
+        if requested_fingerprint != fingerprint:
+            print(f"tuning_phase={phase} compatible_runtime_cache={state_dir} "
+                  "training_protocol_unchanged=true", flush=True)
+    checkpoint_dir = state_dir / ".checkpoints" if args.resume else None
 
-    recovered_by_config: dict[ExperimentConfig, ExperimentResult] = {}
+    recovered_by_config: dict[str, ExperimentResult] = {}
     for result in recovered_results:
-        if result.config in task_by_config:
-            recovered_by_config[result.config] = result
+        key = runtime_config_key(result.config)
+        if key in task_by_config:
+            recovered_by_config[key] = result
     executions = [
         (task_by_config[config], result)
         for config, result in recovered_by_config.items()
     ]
     executions.sort(key=lambda item: _tuning_task_sort_key(item[0]))
     completed_configs = set(recovered_by_config)
-    pending_tasks = [task for task in tasks if task.config not in completed_configs]
+    pending_tasks = [task for task in tasks if runtime_config_key(task.config) not in completed_configs]
 
     if executions:
         print(
@@ -1534,12 +1587,14 @@ def execute_resumable_tuning_phase(
             flush=True,
         )
     if checkpoint_dir is not None:
-        for config in completed_configs:
-            finalize_config_checkpoint(checkpoint_dir, config, fingerprint)
+        for key in completed_configs:
+            task = task_by_config[key]
+            finalize_config_checkpoint(checkpoint_dir, task.checkpoint_config or task.config, fingerprint)
         confirm_matching_checkpoints(
             checkpoint_dir,
-            [task.config for task in pending_tasks],
+            [task.checkpoint_config or task.config for task in pending_tasks],
             fingerprint,
+            interactive=False,
         )
 
     if on_snapshot is not None:
@@ -1554,19 +1609,25 @@ def execute_resumable_tuning_phase(
             on_snapshot(executions, fingerprint, "running")
 
     if pending_tasks:
-        execute_tuning_tasks(
-            dataset,
-            pending_tasks,
-            jobs=min(jobs, len(pending_tasks)),
-            backend_description=backend_description,
-            progress_enabled=progress_enabled,
-            progress_mode=progress_mode,
-            checkpoint_dir=checkpoint_dir,
-            run_fingerprint=fingerprint if checkpoint_dir is not None else None,
-            progress_total=len(tasks),
-            progress_completed=len(executions),
-            on_complete=commit,
-        )
+        try:
+            execute_tuning_tasks(
+                dataset,
+                pending_tasks,
+                jobs=min(jobs, len(pending_tasks)),
+                backend_description=backend_description,
+                progress_enabled=progress_enabled,
+                progress_mode=progress_mode,
+                checkpoint_dir=checkpoint_dir,
+                run_fingerprint=fingerprint if checkpoint_dir is not None else None,
+                progress_total=len(tasks),
+                progress_completed=len(executions),
+                on_complete=commit,
+                cuda_devices=tuple(sorted({t.config.device for t in tasks})),
+            )
+        except BaseException:
+            if on_snapshot is not None:
+                on_snapshot(executions, fingerprint, "interrupted")
+            raise
     if on_snapshot is not None:
         on_snapshot(executions, fingerprint, "complete")
     return executions, fingerprint

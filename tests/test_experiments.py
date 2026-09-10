@@ -1338,7 +1338,8 @@ class ExperimentOutputDirTest(unittest.TestCase):
         output = stream.getvalue()
         self.assertIn("1/2", output)
         self.assertIn("eta=", output)
-        self.assertIn("complete", output)
+        self.assertIn("interrupted", output)
+        self.assertNotIn(" complete", output)
 
     def test_progress_reporter_supports_named_non_config_units(self):
         stream = io.StringIO()
