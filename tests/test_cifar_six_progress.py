@@ -16,7 +16,8 @@ import run_cifar_six_with_progress as progress
 
 def gpu(index, name="4090D", memory=24):
     return {"logical_device": f"cuda:{index}", "name": name,
-            "compute_capability": [8, 9], "total_memory_bytes": memory}
+            "compute_capability": [8, 9], "total_memory_bytes": memory * 1024 ** 3,
+            "initialization_ok": True, "free_memory_bytes": memory * 1024 ** 3}
 
 
 class ProgressTests(unittest.TestCase):
@@ -25,9 +26,13 @@ class ProgressTests(unittest.TestCase):
                          {"cuda:0": "visible GPU 6", "cuda:1": "visible GPU 7"})
         self.assertIn("unavailable", progress.physical_mapping(["cuda:1"], "7")["cuda:1"])
         cards = [gpu(0, "A100"), gpu(1), gpu(2)]
-        self.assertEqual(progress.select_devices(cards, ["auto"]), (["cuda:1", "cuda:2"], ["cuda:0"]))
-        self.assertEqual(progress.select_devices(cards, ["auto"], gpu(5, "A100")),
-                         (["cuda:0"], ["cuda:1", "cuda:2"]))
+        chosen, skipped = progress.select_devices(cards, ["auto"])
+        self.assertEqual(chosen, ["cuda:1", "cuda:2"])
+        self.assertEqual([row["logical_device"] for row in skipped], ["cuda:0"])
+        self.assertIn("incompatible", skipped[0]["reason"])
+        chosen, skipped = progress.select_devices(cards, ["auto"], gpu(5, "A100"))
+        self.assertEqual(chosen, ["cuda:0"])
+        self.assertEqual([row["logical_device"] for row in skipped], ["cuda:1", "cuda:2"])
         self.assertEqual(progress.select_devices(cards, ["cuda:2"]), (["cuda:2"], []))
         for devices, recorded in [(["cuda:0", "cuda:1"], None), (["cuda:9"], None),
                                   (["cuda:1", "cuda:1"], None), (["cuda:1"], gpu(0, "A100")),
@@ -36,14 +41,19 @@ class ProgressTests(unittest.TestCase):
                 progress.select_devices(cards, devices, recorded)
 
     def test_auto_discovers_cuda_not_nvidia_smi_count(self):
-        fake = mock.Mock(returncode=0, stdout='GPU_PROBE_JSON '+json.dumps([gpu(0)]), stderr='')
-        with mock.patch.object(progress.subprocess, "run", return_value=fake) as call:
+        enum = mock.Mock(returncode=0, stdout='GPU_PROBE_JSON 1', stderr='')
+        fake = mock.Mock(returncode=0, stdout='GPU_PROBE_JSON '+json.dumps(gpu(0)), stderr='')
+        with mock.patch.object(progress.subprocess, "run", side_effect=[enum, fake]) as call:
             self.assertEqual(progress.discover_gpus(Path(".")), [gpu(0)])
-        command = call.call_args.args[0]
+        self.assertEqual(call.call_count, 2)
+        command = call.call_args_list[0].args[0]
         self.assertEqual(command[:2], [sys.executable, "-c"])
         self.assertIn("torch.cuda.device_count()", command[2])
-        fake.stdout = "GPU_PROBE_JSON []"
-        with mock.patch.object(progress.subprocess, "run", return_value=fake), self.assertRaises(ValueError):
+        self.assertNotIn("set_device", command[2])
+        self.assertIn("torch.cuda.set_device(index)", call.call_args.args[0][2])
+        self.assertIn("torch.cuda.mem_get_info(index)", call.call_args.args[0][2])
+        enum.stdout = "GPU_PROBE_JSON 0"
+        with mock.patch.object(progress.subprocess, "run", return_value=enum), self.assertRaises(ValueError):
             progress.discover_gpus(Path("."))
 
     def test_cli_auto_explicit_forwarding_and_progress_mode(self):
@@ -228,6 +238,96 @@ class ProgressTests(unittest.TestCase):
             self.assertEqual(code, 130)
             self.assertTrue(stopped.exists())
             self.assertTrue(exited.exists())
+
+
+class ConcurrentOutputTests(unittest.TestCase):
+    def test_adjacent_rounds_update_every_task_without_console_leak(self):
+        state = progress.Progress([f"cuda:{i}" for i in range(8)])
+        joined = "".join(f"[validation_task{i}] ROUND validation_task{i} round=25 accuracy=0.5 nonfinite=0"
+                         for i in range(8)) + "\n"
+        events = list(progress.output_events(joined))
+        self.assertEqual(len(events), 8)
+        self.assertTrue(all(not state.consume(event) for event in events))
+        self.assertEqual({t["round"] for t in state.tasks.values()}, {25})
+        self.assertEqual(len(state.tasks), 8)
+        self.assertEqual(list(progress.output_events("\n")), [])
+
+    def test_start_progress_concatenation_preserves_cuda_mapping(self):
+        state = progress.Progress(["cuda:3"])
+        line = "START validation_vert-v8-005_iid_ratio0_seed701 device=cuda:3PROGRESS 0/84 rough_remaining_seconds=unknown"
+        for event in progress.output_events(line):
+            state.consume(event)
+        self.assertEqual(set(state.lanes), {"cuda:3"})
+        task = state.lanes["cuda:3"]
+        self.assertEqual(state.task_devices[task], "cuda:3")
+        state.consume(f"[{task}] Traceback (most recent call last):")
+        self.assertFalse(state.lanes)
+        self.assertIn(task, state.failed)
+
+    def test_round_adjacent_to_traceback_does_not_hide_failure(self):
+        state = progress.Progress(["cuda:0", "cuda:1"])
+        line = ("[validation_a] ROUND validation_a round=5 accuracy=0.4 nonfinite=0"
+                "[validation_b] RuntimeError: CUDA error: out of memory")
+        shown = [event for event in progress.output_events(line) if state.consume(event)]
+        self.assertEqual(shown, ["[validation_b] RuntimeError: CUDA error: out of memory"])
+        self.assertEqual(state.tasks["validation_a"]["round"], 5)
+
+    def test_real_parallel_print_records_are_all_parsed(self):
+        import subprocess
+        code = ("from concurrent.futures import ThreadPoolExecutor\nfrom threading import Barrier\n"
+                "barrier=Barrier(8)\n"
+                "def emit(i):\n"
+                " for rd in range(20):\n"
+                "  barrier.wait()\n"
+                "  print(f'[validation_task{i}] ROUND validation_task{i} round={rd} accuracy=0.5 nonfinite=0', flush=True)\n"
+                "with ThreadPoolExecutor(8) as pool: list(pool.map(emit, range(8)))\n")
+        raw = subprocess.check_output([sys.executable, "-u", "-c", code], text=True)
+        state = progress.Progress([f"cuda:{i}" for i in range(8)])
+        events = [event for line in raw.splitlines() for event in progress.output_events(line)]
+        self.assertEqual(len(events), 160)
+        self.assertTrue(all(not state.consume(event) for event in events))
+        self.assertEqual(len(state.tasks), 8)
+        self.assertTrue(all(task["round"] == 19 for task in state.tasks.values()))
+
+    @unittest.skipUnless(os.name == "posix", "process group signals need POSIX")
+    def test_cuda_oom_stops_controller_before_more_tasks_and_reports_card(self):
+        with tempfile.TemporaryDirectory() as directory:
+            later = Path(directory) / "should_not_launch"
+            code = ("import time\nfrom pathlib import Path\n"
+                    "print('START validation_a device=cuda:3', flush=True)\n"
+                    "print('[validation_a] Traceback (most recent call last):', flush=True)\n"
+                    "print('[validation_a] RuntimeError: CUDA error: out of memory', flush=True)\n"
+                    "time.sleep(10)\n"
+                    f"Path({str(later)!r}).touch()\n")
+            rejected = set()
+            out = io.StringIO()
+            result = progress.monitor([sys.executable, "-u", "-c", code], ["cuda:3"],
+                                      stream=out, oom_devices=rejected)
+            self.assertEqual(result, 75)
+            self.assertEqual(rejected, {"cuda:3"})
+            self.assertIn("RESOURCE_OOM", out.getvalue())
+            self.assertIn("RuntimeError: CUDA error: out of memory", out.getvalue())
+            self.assertFalse(later.exists())
+
+    @unittest.skipUnless(os.name == "posix", "process group signals need POSIX")
+    def test_oom_stop_has_deadline_and_reports_formal_phase(self):
+        code = ("import signal,time\n"
+                "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "print('FINAL_RUNS 180 parameters_frozen=true', flush=True)\n"
+                "print('START final_a device=cuda:1', flush=True)\n"
+                "print('[final_a] RuntimeError: CUDA error: out of memory', flush=True)\n"
+                "time.sleep(5)\n")
+        rejected, phase = set(), {}
+        out = io.StringIO()
+        with mock.patch.object(progress, "RESOURCE_TERM_AFTER", .05), \
+                mock.patch.object(progress, "RESOURCE_KILL_AFTER", .5):
+            result = progress.monitor([sys.executable, "-u", "-c", code], ["cuda:1"], stream=out,
+                                      oom_devices=rejected, phase_state=phase)
+        self.assertEqual(result, 75)
+        self.assertEqual(rejected, {"cuda:1"})
+        self.assertEqual(phase, {"phase": "final"})
+        self.assertIn("sending SIGKILL", out.getvalue())
 
 
 if __name__ == "__main__":
