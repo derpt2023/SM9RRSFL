@@ -251,6 +251,28 @@ python -u run_cifar_six_with_progress.py \
 
 相同命令支持断点续跑，输出位于 `outputs/cifar10_six_original_v2/`。协议、Ours健康门槛、未评估参考和复现边界见 本地文档《CIFAR六方案从零重训》（`docs/CIFAR六方案从零重训-2026-09-15.md`，不随 Git 同步）。MNIST继续使用原入口。
 
+#### 验证通过后提示 `final_plan.json` 身份冲突
+
+`VALIDATION_STATUS qualified_for_final` 表示 Ours 满足推进条件，不表示所有基线候选健康。若随后提示 `immutable experiment identity changed: .../final_plan.json`，本次正式阶段尚未启动；已有正式计划与这次验证推导出的计划不同。旧运行可能在部分验证任务资源失败时使用备用候选，补齐验证后选择发生变化，具体差异须读取计划确认。不能删除旧计划或绕过身份检查后直接混用结果。
+
+`prepare_cifar_final_recovery.py` 默认只读审计，核对源码、配置、任务与快照身份，并用原规则重新计算候选选择。提供 `--apply` 时，在全新的输出目录复制经核验的验证缓存和环境记录，记录来源与计划差异；旧输出及全部旧正式产物保留。新目录不复制正式计划或正式结果，正式阶段按当前验证选择重新开始，验证无需重训。
+
+本次进程已退出、代码经 GitHub 更新后，可执行：
+
+```bash
+python -u prepare_cifar_final_recovery.py \
+  --source outputs/cifar10_six_original_v2 \
+  --destination outputs/cifar10_six_original_v2_recovered \
+  --apply && \
+env -u CUDA_VISIBLE_DEVICES CUDA_DEVICE_ORDER=PCI_BUS_ID \
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_original_v2.json \
+  --output outputs/cifar10_six_original_v2_recovered \
+  --phase final --devices auto --progress-mode live
+```
+
+目标目录必须尚不存在；恢复创建成功后再中断训练，只需执行第二条训练命令续跑，不能再次向同一目录执行准备操作。审计发现来源损坏、身份不一致、验证仍待运行或 Ours 未通过健康检查时会拒绝准备，不通过复制绕过原验证政策。恢复依据固定验证规则，不根据旧正式结果选择参数；旧正式结果与本次新计划的结果应分别报告，保留 `recovery_manifest.json` 的来源记录。
+
 ### CIFAR-10 旧v7协议（保留用于追溯）
 
 旧 CIFAR 配置为 `configs/fair_tuning.cifar10.json`，MNIST 配置为 `configs/fair_tuning.example.json`：

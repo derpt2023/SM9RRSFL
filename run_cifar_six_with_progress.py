@@ -32,12 +32,12 @@ ROUND = re.compile(r"^ROUND (\S+) round=(\d+) accuracy=(\S+) nonfinite=(\d+)$")
 START = re.compile(r"^START (\S+) device=(cuda:\d+)$")
 PHASE = re.compile(r"^(VALIDATION|FINAL)_RUNS (\d+)(?: rounds=(\d+))?")
 EVENT_BOUNDARY = re.compile(
-    r"\[(?:validation|final)_[^\s\]]+\] "
+    r"(?=\[(?:validation|final)_[^\s\]]+\] "
     r"|START (?:validation|final)_\S+ device=cuda:\d+"
     r"|PROGRESS \d+/\d+ rough_remaining_seconds="
     r"|ALREADY_COMPLETED (?:validation|final)_\S+"
     r"|(?:VALIDATION|FINAL)_(?:RUNS \d+|STATUS \S+)"
-    r"|FINAL_NOT_STARTED:"
+    r"|FINAL_NOT_STARTED:)"
 )
 CUDA_OOM = re.compile(r"(?:RuntimeError|OutOfMemoryError):.*(?:CUDA.*out of memory|out of memory.*CUDA)", re.I)
 
@@ -48,6 +48,8 @@ def output_events(original):
     The original controller prints from one thread per GPU. A print's text and
     newline are separate writes, so a pipe line can contain multiple records.
     Keep the original bytes in the raw log; only split the display/parser input.
+    Look ahead without consuming: a greedy task token must not swallow the
+    next ALREADY_COMPLETED or START marker before the scanner can see it.
     """
     line = original.rstrip("\r\n")
     starts = sorted({0, *(match.start() for match in EVENT_BOUNDARY.finditer(line))})
@@ -96,6 +98,7 @@ class Progress:
         self.output = None
         self.phase, self.total, self.default_rounds = "initializing", 0, 100
         self.tasks, self.lanes, self.task_devices = {}, {}, {}
+        self.planned_task_ids = None
         self.completed, self.failed = set(), set()
         self.failure_count = 0
         self.started = self.rate_started = now()
@@ -108,9 +111,15 @@ class Progress:
         return self.tasks.setdefault(task_id, {"round": 0, "total": self.default_rounds,
                                               "accuracy": None, "nonfinite": None})
 
+    def accepts_task(self, task_id):
+        if self.planned_task_ids is not None:
+            return task_id in self.planned_task_ids
+        return re.fullmatch(r"[A-Za-z0-9_.:-]+", task_id) is not None
+
     def begin_phase(self, phase, total, rounds=100):
         self.phase, self.total, self.default_rounds = phase, total, rounds
         self.tasks, self.lanes, self.task_devices = {}, {}, {}
+        self.planned_task_ids = None
         self.completed, self.failed, self.seen_round = set(), set(), set()
         self.failure_count = self.new_rounds = 0
         self.started = self.rate_started = self.now()
@@ -119,6 +128,8 @@ class Progress:
         if self.output is None:
             return
         plan = read_json(self.output / f"{phase}_plan.json")
+        if plan.get("tasks"):
+            self.planned_task_ids = {row["task_id"] for row in plan["tasks"]}
         for row in plan.get("tasks", []):
             task_id = row["task_id"]
             task = self.task(task_id)
@@ -141,6 +152,8 @@ class Progress:
         # this invocation; the original runner is about to retry those tasks.
 
     def finish_task(self, task_id):
+        if not self.accepts_task(task_id):
+            return
         self.completed.add(task_id)
         self.failed.discard(task_id)
         self.task(task_id)["round"] = self.task(task_id)["total"]
@@ -178,6 +191,8 @@ class Progress:
         match = START.match(line)
         if match:
             task_id, device = match.groups()
+            if not self.accepts_task(task_id):
+                return True
             prior = self.lanes.get(device)
             if prior and prior != task_id and prior not in self.completed:
                 self.failed.add(prior)
@@ -187,12 +202,14 @@ class Progress:
             self.failed.discard(task_id)
             return True
         resume = RESUME.search(line)
-        if worker and resume:
+        if worker and resume and self.accepts_task(worker):
             self.task(worker)["round"] = int(resume[1])
             self.seen_round.add(worker)
         match = ROUND.match(line)
         if match:
             task_id, rd, accuracy, nonfinite = match.groups()
+            if not self.accepts_task(task_id):
+                return True
             task = self.task(task_id)
             rd = min(task["total"], int(rd))
             # The first observed round may be a restored checkpoint. Establish
@@ -215,7 +232,7 @@ class Progress:
         if line.startswith(("VALIDATION_STATUS ", "FINAL_STATUS ", "FINAL_NOT_STARTED:")):
             self.status = line
             self.reconcile_phase()
-        if worker and line.startswith("Traceback (most recent call last):"):
+        if worker and self.accepts_task(worker) and line.startswith("Traceback (most recent call last):"):
             self.failed.add(worker)
             for device, task_id in list(self.lanes.items()):
                 if task_id == worker:

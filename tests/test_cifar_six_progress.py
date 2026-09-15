@@ -241,6 +241,41 @@ class ProgressTests(unittest.TestCase):
 
 
 class ConcurrentOutputTests(unittest.TestCase):
+    def test_adjacent_cached_completions_do_not_inflate_plan_or_lose_start(self):
+        a = "validation_sm9rrs-v8-001_dirichlet_ratio0_seed701"
+        b = "validation_sm9rrs-v8-001_iid_ratio0_seed701"
+        c = "validation_sm9rrs-v8-002_dirichlet_ratio0_seed701"
+        d = "validation_sm9rrs-v8-003_dirichlet_ratio0_seed701"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            names = [a, b, c, d] + [f"validation_other{i}" for i in range(80)]
+            (output / "validation_plan.json").write_text(json.dumps({
+                "tasks": [{"task_id": name, "config": {"rounds": 100}} for name in names]}))
+            state = progress.Progress(["cuda:0"])
+            state.consume(f"SIX_METHOD_OUTPUT {output}")
+            state.consume("VALIDATION_RUNS 84 rounds=100 devices=cuda:0")
+            lines = [f"ALREADY_COMPLETED {a}ALREADY_COMPLETED {b}",
+                     f"ALREADY_COMPLETED {c}START {d} device=cuda:0"]
+            events = [event for line in lines for event in progress.output_events(line)]
+            self.assertEqual(len(events), 4)
+            for event in events:
+                state.consume(event)
+            self.assertEqual(state.completed, {a, b, c})
+            self.assertEqual(state.lanes, {"cuda:0": d})
+            self.assertEqual(len(state.tasks), 84)
+            self.assertIn("rounds=300/8400", state.lines()[0])
+            # A corrupt or unknown protocol token is visible as a message,
+            # never added as an extra scheduled experiment.
+            for event in ["COMPLETED validation_unknown", "START validation_unknown device=cuda:0",
+                          "ROUND validation_unknown round=50 accuracy=0.5 nonfinite=0",
+                          "[validation_unknown] resuming from_completed_round=50",
+                          "[validation_unknown] Traceback (most recent call last):"]:
+                state.consume(event)
+            self.assertEqual(len(state.tasks), 84)
+            self.assertEqual(state.completed, {a, b, c})
+            self.assertEqual(state.lanes, {"cuda:0": d})
+            self.assertNotIn("validation_unknown", state.failed)
+
     def test_adjacent_rounds_update_every_task_without_console_leak(self):
         state = progress.Progress([f"cuda:{i}" for i in range(8)])
         joined = "".join(f"[validation_task{i}] ROUND validation_task{i} round=25 accuracy=0.5 nonfinite=0"
