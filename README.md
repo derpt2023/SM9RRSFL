@@ -222,7 +222,23 @@ python -u -m sm9rrsfl.experiments --dataset synthetic --crypto-mode simulated \
   --compute-backend numpy --jobs 1 --output-dir outputs/normal_state_smoke
 ```
 
-已经提供独立的 CIFAR-10 配置，MNIST 继续使用原 `configs/fair_tuning.example.json`。CIFAR 六方案只需修改 `configs/fair_tuning.cifar10.json`，启动器相同：
+### CIFAR-10 新六方案入口（2026-09-15）
+
+从零重训请使用独立配置 `configs/cifar10_six_stable_v1.json`，不需要旧的630组实验结果：
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=7 \
+python -u run_cifar_six_from_scratch.py \
+  --config configs/cifar10_six_stable_v1.json --devices cuda:0
+```
+
+新入口先运行84组、每组100轮的六方案验证；所有方法有健康候选、攻击有效且Ours对全部五个基线满足Accuracy/ASR目标后，再自动运行180组正式评估。每个任务独立保存错误，某个VERT任务失败不会中止其他验证任务；无合格VERT时不伪造六方比较结论。所有方法共用严格FP32及有限性步长回溯，另修复VERT有限大数余弦溢出。这是新的数值实验协议，需重新训练并披露改动，不能混用旧结果；尚不保证完整CUDA实验健康或Ours达标。
+
+相同命令可断点续跑；查看 `outputs/cifar10_six_stable_v1/validation_summary.json` 与条件生成的 `final_summary.json`。独立配置、候选、门槛、改动及复现边界见 [CIFAR六方案从零重训](docs/CIFAR六方案从零重训-2026-09-15.md)。MNIST继续使用原入口。
+
+### CIFAR-10 旧v7协议（保留用于追溯）
+
+旧 CIFAR 配置为 `configs/fair_tuning.cifar10.json`，MNIST 配置为 `configs/fair_tuning.example.json`：
 
 ```bash
 python -u run_fair_tuning_from_config.py --config configs/fair_tuning.cifar10.json --dry-run
