@@ -1,5 +1,7 @@
 # SM9-RRS-FL 实验复现
 
+文档同步约定：仅根目录 `README.md` 随 Git 同步；其余 Markdown 为本地工作文档。下文标注的本地参考不包含在 Git 克隆中，运行所需说明以本 README 和仓库配置为准。
+
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。支持 MNIST/CIFAR-10、IID/Dirichlet Non-IID、NumPy/PyTorch，以及真实 SM9 或快速仿真密码模式。
 
 ## 2026-09-06：正常状态 v3 与当轮隔离
@@ -127,11 +129,11 @@ python -u run_experiments_from_config.py
 
 这些数值是显式研究目标，不是成功保证。该二次选择是**针对VERT的目标选参**，不能再将最终Ours选择描述为纯方法中立Score；VERT和其他基线不会因此被削弱或重选。三个可调方法仍各12个候选。设 `performance_target: null` 可关闭二次选择，仅用原公共Score。目标在训练留出阶段选择后冻结，正式测试只做只读达标审计，不重选参数。
 
-启动入口不变，仍修改 `configs/fair_tuning.example.json` 后运行 `run_fair_tuning_from_config.py`。查看 `performance_target_validation.json` 的 `status` 判断校准是否达标；正式结果看 `final_evaluation/performance_target.json`。`best_parameters.json` 和 `tuning_manifest.json` 保存独立选择、目标选择与所用阈值。`unmet` 不会自动删除结果或跳过正式比较；Ours/VERT 无健康候选仍停止。其他方法若仅算法健康/干净效用不合格，则保留失败标签继续六方案比较；结果不完整或指标不可用仍不能放行。详见 [TAD失败后的续跑与兼容性说明](docs/TAD失败后的续跑与兼容性说明-2026-09-10.md)。
+启动入口不变，仍修改 `configs/fair_tuning.example.json` 后运行 `run_fair_tuning_from_config.py`。查看 `performance_target_validation.json` 的 `status` 判断校准是否达标；正式结果看 `final_evaluation/performance_target.json`。`best_parameters.json` 和 `tuning_manifest.json` 保存独立选择、目标选择与所用阈值。`unmet` 不会自动删除结果或跳过正式比较；Ours/VERT 无健康候选仍停止。其他方法若仅算法健康/干净效用不合格，则保留失败标签继续六方案比较；结果不完整或指标不可用仍不能放行。详见 本地文档《TAD失败后的续跑与兼容性说明》（`docs/TAD失败后的续跑与兼容性说明-2026-09-10.md`，不随 Git 同步）。
 
-2026-09-10：统一调参现已支持更换CUDA卡号/密码线程数后复用原验证与正式缓存，恢复时重新绑定VERT/TAD的设备；CUDA任务每卡最多一个，派发前复查显存，OOM最多额外重试一次，并保留其他工作线程的完成结果。训练、攻击、评估批大小及配置均不变。补丁文件清单、限制GPU的启动命令和恢复数量检查见 [AI Station换卡续跑与OOM恢复](docs/AIStation换卡续跑与OOM恢复-2026-09-10.md)。
+2026-09-10：统一调参现已支持更换CUDA卡号/密码线程数后复用原验证与正式缓存，恢复时重新绑定VERT/TAD的设备；CUDA任务每卡最多一个，派发前复查显存，OOM最多额外重试一次，并保留其他工作线程的完成结果。训练、攻击、评估批大小及配置均不变。补丁文件清单、限制GPU的启动命令和恢复数量检查见 本地文档《AI Station换卡续跑与OOM恢复》（`docs/AIStation换卡续跑与OOM恢复-2026-09-10.md`，不随 Git 同步）。
 
-本次100客户端、单开发种子、非IID、boost15补测满足上述接近目标；它不是多种子正式结论。配置含义、全部实测数值及启动说明见 [性能目标选参与启动说明](docs/性能目标选参与启动说明-2026-09-07.md)。
+本次100客户端、单开发种子、非IID、boost15补测满足上述接近目标；它不是多种子正式结论。配置含义、全部实测数值及启动说明见 本地文档《性能目标选参与启动说明》（`docs/性能目标选参与启动说明-2026-09-07.md`，不随 Git 同步）。
 
 ## Ours 一轮实际如何工作
 
@@ -229,16 +231,21 @@ python -u -m sm9rrsfl.experiments --dataset synthetic --crypto-mode simulated \
 从零重训使用独立配置 `configs/cifar10_six_original_v2.json`，不依赖旧630组结果：
 
 ```bash
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=7 \
-python -u run_cifar_six_from_scratch.py \
-  --config configs/cifar10_six_original_v2.json --devices cuda:0
+env -u CUDA_VISIBLE_DEVICES CUDA_DEVICE_ORDER=PCI_BUS_ID \
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_original_v2.json \
+  --devices auto --progress-mode live
 ```
+
+`--devices auto` 自动发现容器内可见的 CUDA 卡，每卡同时运行一组独立实验；已有输出只选取与记录的型号、计算能力和显存容量兼容的卡。上述 `env -u` 解除先前手动设置的 `CUDA_VISIBLE_DEVICES=7` 限制，不改变容器的 GPU 分配。启动时打印实际选卡清单；动态进度显示当前阶段完成组数、轮次进度、耗时、预计剩余时间及各卡状态。终端重定向到普通日志时可用 `--progress-mode log`。
+
+这层显示包装调用原 `run_cifar_six_from_scratch.py`，不改训练源码、配置或断点身份。原单卡任务切换到多卡时，先 `Ctrl+C` 并等待进程退出，再拉取更新、运行上述命令；完整任务复用，未完成任务从最近成功保存的轮次恢复。若仅使用指定卡，可设置 `CUDA_VISIBLE_DEVICES=6,7` 并继续使用 `--devices auto`。
 
 先运行84组、每组100轮验证；只有Ours验证健康才控制是否自动进入180组正式评估。ASR相差1个百分点等性能目标只用于报告，不再阻断。基线没有健康候选时使用预先声明的固定备用候选，并明确保留验证失败；单任务异常不取消其他任务。六方案结果可以包含数值失败行，不能把缺失指标伪装成正常准确率或ASR。
 
 本入口保留原训练/攻击优化器和基线实现，不启用上一版的步长回退、VERT数值修复或强制确定性覆盖。Ours原策略与弱告警隔离变体按配置显式比较。NaN是该实现及环境下的实验现象，不能单独证明原论文算法普遍不健壮。
 
-相同命令支持断点续跑，输出位于 `outputs/cifar10_six_original_v2/`。协议、Ours健康门槛、未评估参考和复现边界见 [CIFAR六方案从零重训](docs/CIFAR六方案从零重训-2026-09-15.md)。MNIST继续使用原入口。
+相同命令支持断点续跑，输出位于 `outputs/cifar10_six_original_v2/`。协议、Ours健康门槛、未评估参考和复现边界见 本地文档《CIFAR六方案从零重训》（`docs/CIFAR六方案从零重训-2026-09-15.md`，不随 Git 同步）。MNIST继续使用原入口。
 
 ### CIFAR-10 旧v7协议（保留用于追溯）
 
@@ -253,7 +260,7 @@ CIFAR 配置为 100 客户端、100 轮、每轮本地 1 epoch、batch 50、K20�
 
 可先用 `python -u run_attack_screen.py --config configs/attack_screen.cifar10.json --clean-only` 检查训练留出的干净 FedAvg 收敛；去掉 `--clean-only` 才是可选的 Ours/VERT 攻击参数探索。这个探索脚本默认串行、模拟密码，正式六方案使用自动GPU调度与SM9。已占满资源的 MNIST 作业完成后再启动 CIFAR，或明确分配独立空闲GPU。
 
-完整数据划分、CIFAR候选网格、实测限制与启动步骤见 [CIFAR-10六方案实验说明](docs/CIFAR-10六方案实验说明-2026-09-07.md)。MNIST 使用 compact CNN；CIFAR-10 使用 Conv-Conv-FC-FC-Logits CNN 和按通道标准化。K、总轮数、lr、batch 等属于公共实验条件，六种方法保持一致。
+完整数据划分、CIFAR候选网格、实测限制与启动步骤见 本地文档《CIFAR-10六方案实验说明》（`docs/CIFAR-10六方案实验说明-2026-09-07.md`，不随 Git 同步）。MNIST 使用 compact CNN；CIFAR-10 使用 Conv-Conv-FC-FC-Logits CNN 和按通道标准化。K、总轮数、lr、batch 等属于公共实验条件，六种方法保持一致。
 
 ## 输出、同步与代码位置
 
@@ -365,7 +372,7 @@ Ding Z, Wang W, Li X, et al. Identifying alternately poisoning attacks in federa
 
 本文献方法在每轮联邦学习中记录客户端模型参数轨迹，对参数代表矩阵提取奇异值，并用相邻轮次奇异值差分构造轨迹特征；随后使用 Isolation Forest 判断异常客户端，对异常客户端降低聚合权重，对恢复正常的客户端提升权重，连续异常客户端被移除。项目中的实现位于 `sm9rrsfl/ding13_detector.py`。
 
-2026-09-10原论文复核发现，现有TAD在输入使用增量、固定异常比例配额、权重归一化及移除判据方面存在差异或论文歧义，不能称为严格原文复现。论文第10页承认半数恶意节点、特别是大量串通时可能面临困难，但没有证明50%是失效阈值。详见 [TAD原论文与实现复核](docs/TAD原论文与实现复核-2026-09-10.md)。本次仅修复选参阶段的失败对照放行和报告，未改TAD算法，因此不使旧结果变成新的论文复现实验。
+2026-09-10原论文复核发现，现有TAD在输入使用增量、固定异常比例配额、权重归一化及移除判据方面存在差异或论文歧义，不能称为严格原文复现。论文第10页承认半数恶意节点、特别是大量串通时可能面临困难，但没有证明50%是失效阈值。详见 本地文档《TAD原论文与实现复核》（`docs/TAD原论文与实现复核-2026-09-10.md`，不随 Git 同步）。本次仅修复选参阶段的失败对照放行和报告，未改TAD算法，因此不使旧结果变成新的论文复现实验。
 
 Ding 等人在实验部分说明其投毒方法基于参考文献 [8]，并对攻击作交替式修改，但正文没有给出独立的攻击目标函数、伪代码或完整超参数。因此，本项目不声称恢复了未公开的 Ding 攻击源码；攻击端按其引用的 Bhagoji 等人交替最小化目标结构实现，并采用官方代码 `distance-constrained/self-reference` 配置中的距离锚点、交替比例与关键默认系数，作为 Ding 检测实验所针对的交替投毒攻击基础。模型、数据集和优化器仍沿用本项目实验配置，因此这不是原仓库运行环境的逐比特复现：
 
@@ -401,9 +408,9 @@ python -u run_attack_screen.py --config configs/attack_screen.full.json
 中等强度补充探索：`configs/attack_screen.intermediate.json` 使用 boost=5/8、stealth_steps=1、distance_weight=.0001、80% 恶意，探索 seed=84，确认 seed=85/86。`configs/attack_screen.100client_probe.json` 是 50,000 样本、100 客户端、Dirichlet、40% 恶意、单 seed 的规模核查，CPU/模拟密码，不是独立正式实验。
 
 
-本轮实测见 [实验改进与参数筛选-2026-09-06](docs/实验改进与参数筛选-2026-09-06.md)。共完成181个实验任务（含提前终止失败）及279项测试。部分20客户端弱攻击场景出现双指标数值优势，但C_tol=1的独立干净确认误撤销10%–20%，且有全员退出，未通过确认健康检查；100客户端C_tol=3抽查也没有复现优势。不能将这些结果概括为稳定超过VERT。`confirmation_audit.json`记录确认状态；`comparison.json`的`strictly_better_both`仅表示数值领先，`validated_better_both`还要求双方的完整确认场景通过健康和干净精度检查。使用`--report-dir 已有运行目录`可从原始实验JSON重建这两份报告，不重新训练。
+本轮实测见 本地文档《实验改进与参数筛选-2026-09-06》（`docs/实验改进与参数筛选-2026-09-06.md`，不随 Git 同步）。共完成181个实验任务（含提前终止失败）及279项测试。部分20客户端弱攻击场景出现双指标数值优势，但C_tol=1的独立干净确认误撤销10%–20%，且有全员退出，未通过确认健康检查；100客户端C_tol=3抽查也没有复现优势。不能将这些结果概括为稳定超过VERT。`confirmation_audit.json`记录确认状态；`comparison.json`的`strictly_better_both`仅表示数值领先，`validated_better_both`还要求双方的完整确认场景通过健康和干净精度检查。使用`--report-dir 已有运行目录`可从原始实验JSON重建这两份报告，不重新训练。
 
-2026-09-07 复核与新结果见 [代码复核与VERT参数探索](docs/代码复核与VERT参数探索-2026-09-07.md)。282项完整测试通过，筛选器新增缓存配置身份和完整确认矩阵检查，脚本本身加入指纹；无攻击期不会生成伪造的攻击尾段指标。固定原C_tol=1的100客户端对照仍领先原VERT配置，但干净误撤销7%–12%，未全部通过健康门槛。更关键的是，20客户端下将VERT预测训练从5增至20次后，原四个弱攻击运行ASR全部为0，Ours原双指标优势消失。后续方案B预测训练网格改为5/20次，仍为12候选；完整规模筛选也包含20次候选。新配置不代表正式实验已运行。
+2026-09-07 复核与新结果见 本地文档《代码复核与VERT参数探索》（`docs/代码复核与VERT参数探索-2026-09-07.md`，不随 Git 同步）。282项完整测试通过，筛选器新增缓存配置身份和完整确认矩阵检查，脚本本身加入指纹；无攻击期不会生成伪造的攻击尾段指标。固定原C_tol=1的100客户端对照仍领先原VERT配置，但干净误撤销7%–12%，未全部通过健康门槛。更关键的是，20客户端下将VERT预测训练从5增至20次后，原四个弱攻击运行ASR全部为0，Ours原双指标优势消失。后续方案B预测训练网格改为5/20次，仍为12候选；完整规模筛选也包含20次候选。新配置不代表正式实验已运行。
 
 补充实验可运行：
 
