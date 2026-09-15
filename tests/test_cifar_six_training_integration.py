@@ -18,7 +18,7 @@ from cifar_ours_development_policy import weak_quarantine_policy
 import run_cifar_six_from_scratch as runner
 from sm9rrsfl.datasets import ImageDataset
 from sm9rrsfl.fl import ExperimentConfig, run_experiment
-from sm9rrsfl.stable_training import stable_client_training
+from sm9rrsfl import torch_backend
 
 
 class SixMethodTrainingIntegrationTest(unittest.TestCase):
@@ -47,38 +47,36 @@ class SixMethodTrainingIntegrationTest(unittest.TestCase):
     def tearDownClass(cls):
         torch.set_num_threads(cls.old_threads)
 
-    def test_all_six_methods_train_under_the_same_guarded_optimizer(self):
+    def test_all_six_methods_train_under_the_original_optimizer(self):
         for method in ("sm9rrs", "vert", "alignins", "krum", "ding13", "fedavg"):
             with self.subTest(method=method):
                 config = replace(self.config, method=method)
                 checkpoints = []
-                with stable_client_training() as policy:
-                    result = run_experiment(self.dataset, config, checkpoint_callback=checkpoints.append)
+                result = run_experiment(self.dataset, config, checkpoint_callback=checkpoints.append)
                 self.assertEqual(result.stopped_round, 4)
                 self.assertEqual(result.nonfinite_updates, 0)
                 self.assertTrue(np.isfinite(checkpoints[-1]["params"]).all())
                 self.assertTrue(all(np.isfinite(row.accuracy) for row in result.records))
-                self.assertIn("attack_target", policy.summary()["by_phase"])
-                self.assertGreater(policy.summary()["totals"]["accepted_steps"], 0)
+                self.assertTrue(result.records[-1].attack_active)
 
-    def test_weak_policy_and_guarded_training_resume_from_the_same_round_state(self):
+    def test_weak_policy_and_original_training_resume_from_the_same_round_state(self):
         config = replace(self.config, method="sm9rrs")
         saved = {}
         def stop(state):
             if state["completed_round"] == 3:
                 saved["state"] = pickle.dumps(state)
                 raise InterruptedError("integration checkpoint")
-        with stable_client_training(), weak_quarantine_policy():
+        with weak_quarantine_policy():
             full = run_experiment(self.dataset, config)
-        with stable_client_training(), weak_quarantine_policy():
+        with weak_quarantine_policy():
             with self.assertRaises(InterruptedError):
                 run_experiment(self.dataset, config, checkpoint_callback=stop)
-        with stable_client_training(), weak_quarantine_policy():
+        with weak_quarantine_policy():
             resumed = run_experiment(self.dataset, config, resume_state=pickle.loads(saved["state"]))
         self.assertEqual(full.records, resumed.records)
         self.assertEqual(full.diagnostics, resumed.diagnostics)
 
-    def test_real_worker_commits_metrics_stats_and_reuses_completed_training(self):
+    def test_real_worker_keeps_optimizer_and_reuses_completed_training(self):
         config = replace(self.config, method="sm9rrs")
         task = {"task_id": "integration_worker", "phase": "validation", "method": "sm9rrs",
                 "candidate": {"candidate_id": "sm9rrs-v8-003", "variant": "weak_quarantine",
@@ -88,7 +86,7 @@ class SixMethodTrainingIntegrationTest(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             output = Path(temporary)
             runner.write_json(output / "manifest.json", {
-                "spec": {"numerics": {"max_backtracks": 12}}, "data_contract": {},
+                "spec": {"numerics": {"mode": "original_runtime_defaults"}}, "data_contract": {},
                 "source_sha256": runner.source_hashes(repo)})
             runner.write_json(output / "validation_plan.json", {"tasks": [task]})
             args = SimpleNamespace(output=output, phase="validation", worker=task["task_id"],
@@ -97,13 +95,13 @@ class SixMethodTrainingIntegrationTest(unittest.TestCase):
             with mock.patch.object(runner, "worker_environment", return_value={"environment": {}}), \
                     mock.patch.object(runner, "load_split", return_value=(split, {})), \
                     redirect_stdout(io.StringIO()):
+                original_context = torch_backend.TorchTrainingContext
                 runner.run_worker(args)
+                self.assertIs(torch_backend.TorchTrainingContext, original_context)
                 folder = output / "tasks" / task["task_id"]
                 result = runner.checked_completed(output, task)
                 self.assertEqual(result.stopped_round, config.rounds)
-                stats = json.loads((folder / "numerical_stats.json").read_text())
-                self.assertEqual(len(stats["attempts"]), 1)
-                self.assertGreater(stats["attempts"][0]["totals"]["accepted_steps"], 0)
+                self.assertFalse((folder / "numerical_stats.json").exists())
                 self.assertEqual(json.loads((folder / "metrics.json").read_text())["nonfinite_updates"], 0)
                 with mock.patch.object(runner.experiments, "run_measured_experiment",
                                        side_effect=AssertionError("completed training must be reused")):

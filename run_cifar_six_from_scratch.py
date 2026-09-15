@@ -3,9 +3,9 @@
 
 Validation never uses the official test set. A failed method is recorded and
 cannot stop other validation workers or masquerade as a qualifying reference.
-Formal evaluation starts only when all six validation selections are healthy,
-the fixed attack is effective against FedAvg, and Ours meets the declared
-Accuracy/ASR target against every one of the five independently selected peers.
+Formal evaluation starts when an Ours candidate passes the declared health
+checks. Baseline failures and descriptive Accuracy/ASR comparisons cannot veto
+that transition; unavailable baselines retain a predeclared fallback identity.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ from sm9rrsfl.datasets import load_image_dataset, stratified_training_three_way_
 from sm9rrsfl.fair_tuning import (ALL_METHODS, METHOD_TUNABLE_PARAMETERS,
                                  _matched_fedavg_clean_accuracy, _training_health_reasons,
                                  score_trial)
-from sm9rrsfl.numerics import configure_strict_numerics, numerical_environment
+from sm9rrsfl.numerics import numerical_environment
 from sm9rrsfl.ours_calibration import split_metadata
 from sm9rrsfl.performance_target import PerformanceTarget, evaluate_target, scenario_key
 
@@ -110,8 +110,8 @@ def immutable_json(path, payload):
 
 def load_spec(path):
     spec = json.loads(Path(path).read_text())
-    if spec.get("schema_version") != 1 or set(spec["candidates"]) != set(ALL_METHODS):
-        raise ValueError("schema_version=1 and exactly six methods are required")
+    if spec.get("schema_version") != 2 or set(spec["candidates"]) != set(ALL_METHODS):
+        raise ValueError("schema_version=2 and exactly six methods are required")
     data = spec["dataset"]
     if (data["name"] != "cifar10" or data["train_samples"] != 50000
             or data["test_samples"] != 10000 or data["validation_fraction"] != .05):
@@ -129,12 +129,19 @@ def load_spec(path):
             or base.batch_size != 50 or base.attack_target_count != 200
             or base.attack_source_label != 5 or base.attack_target_label != 7
             or base.attack_distance_weight != .0001 or base.dirichlet_alpha != .5):
-        raise ValueError("the v1 full-round, fixed shared training/attack protocol differs")
+        raise ValueError("the v2 full-round, fixed shared training/attack protocol differs")
     gates, numerics = spec["gates"], spec["numerics"]
     if gates["max_nonfinite_updates"] != 0 or gates["min_round_completion_rate"] != 1.:
         raise ValueError("complete rounds and zero nonfinite updates are mandatory")
-    if numerics != {"deterministic": True, "tf32": False, "max_backtracks": 12}:
-        raise ValueError("v1 requires strict FP32 with exactly 12 finite-step backtracks")
+    if numerics != {"mode": "original_runtime", "shared_backtracking": False}:
+        raise ValueError("v2 preserves original numerical execution without step backtracking")
+    if spec["promotion"] != {"required_healthy_methods": ["sm9rrs"],
+            "performance_target_is_gate": False, "attack_effectiveness_is_gate": False,
+            "missing_clean_reference": "report_unassessed_without_baseline_veto"}:
+        raise ValueError("v2 requires Ours-only health promotion and descriptive comparisons")
+    fallback = {m: cs[0]["candidate_id"] for m, cs in spec["candidates"].items() if m != "sm9rrs"}
+    if spec["fallback_candidates"] != fallback:
+        raise ValueError("baseline fallback must be fixed to each first declared candidate")
     objective = spec["objective"]
     expected_weights = {"clean_accuracy_weight", "robust_accuracy_weight",
                         "attack_success_weight", "honest_weight_loss_weight"}
@@ -160,7 +167,7 @@ def load_spec(path):
     ids = []
     for method, candidates in spec["candidates"].items():
         if len(candidates) != (6 if method in ("sm9rrs", "vert", "alignins") else 1):
-            raise ValueError("v1 uses six candidates per tunable method and one per fixed baseline")
+            raise ValueError("v2 uses six candidates per tunable method and one per fixed baseline")
         for candidate in candidates:
             ids.append(candidate["candidate_id"])
             if not re.fullmatch(method + r"-v8-\d{3}", candidate["candidate_id"]):
@@ -225,10 +232,12 @@ def attach_fingerprints(tasks, manifest):
 
 
 def build_manifest(spec, contract, repo):
-    manifest = {"schema_version": 1, "spec": spec, "data_contract": contract,
+    manifest = {"schema_version": 2, "spec": spec, "data_contract": contract,
                 "source_sha256": source_hashes(repo), "old_results_required": False,
                 "final_selection_uses_test_data": False,
-                "shared_numerical_optimizer_changed": True,
+                "shared_numerical_optimizer_changed": False,
+                "baseline_algorithms_modified_by_runner": False,
+                "promotion_requires": "ours_health_only",
                 "failure_policy": "retain per-task failures; do not qualify invalid candidates or abort unrelated validation runs"}
     manifest["fingerprint"] = digest(manifest)
     return manifest
@@ -316,82 +325,131 @@ def paired_all_baselines(ours, baselines, policy, expected):
             "mean_normalized_excess": fmean(c["mean_normalized_excess"] for c in comparisons.values())}
 
 
+def clean_utility_audit(runs, controls, maximum_drop):
+    """Report missing controls explicitly; only measured healthy controls can fail utility."""
+    rows = []
+    for run in runs:
+        if run.config.malicious_ratio != 0:
+            continue
+        key = (run.config.partition, run.config.dirichlet_alpha, run.config.num_clients, run.config.seed)
+        reference = controls.get(key)
+        value = float(run.final_accuracy)
+        drop = max(0., reference - value) if reference is not None and math.isfinite(value) else None
+        rows.append({"scenario": list(key), "reference_accuracy": reference,
+                     "candidate_accuracy": value, "drop": drop,
+                     "status": "unassessed" if drop is None else "passed" if drop <= maximum_drop + 1e-12 else "failed"})
+    return {"status": "failed" if any(r["status"] == "failed" for r in rows) else
+                       "passed" if rows and all(r["status"] == "passed" for r in rows) else "unassessed",
+            "maximum_drop": maximum_drop, "scenarios": rows,
+            "missing_reference_policy": "reported_unassessed_without_baseline_veto"}
+
+
 def select_validation(spec, results_by_candidate, tasks):
     expected_count = len(spec["validation"]["seeds"]) * len(spec["validation"]["scenarios"])
     expected = {(t["config"]["partition"], t["config"]["dirichlet_alpha"], t["config"]["num_clients"],
                  t["config"]["malicious_ratio"], t["config"]["seed"]) for t in tasks}
-    controls_error = None
     fedavg_id = spec["candidates"]["fedavg"][0]["candidate_id"]
+    healthy_controls = [r for r in results_by_candidate.get(fedavg_id, [])
+                        if r.config.malicious_ratio == 0 and metrics(r)["healthy"]]
+    controls_error = None
     try:
-        # The legacy helper's fixed ID is internal; v8 identities stay distinct
-        # from all historical candidates in this study's artifacts.
-        controls = _matched_fedavg_clean_accuracy({"fedavg-001": results_by_candidate.get(fedavg_id, [])})
+        controls = _matched_fedavg_clean_accuracy({"fedavg-001": healthy_controls})
     except ValueError as exc:
         controls, controls_error = {}, str(exc)
-    trials, rows, selected, method_status = {}, [], {}, {}
+    expected_clean = {(key[0], key[1], key[2], key[4]) for key in expected if key[3] == 0}
+    missing_controls = [list(key) for key in sorted(expected_clean - set(controls))]
+    trials, rows, selected, method_status, healthy_selected = {}, [], {}, {}, {}
     for method in ALL_METHODS:
         eligible = []
         for candidate in spec["candidates"][method]:
             cid = candidate["candidate_id"]
             runs = results_by_candidate.get(cid, [])
+            utility = clean_utility_audit(runs, controls, spec["gates"]["max_clean_accuracy_drop"])
             if len(runs) != expected_count or {scenario_key(r) for r in runs} != expected:
                 rows.append({"method": method, "candidate_id": cid, "valid": False,
-                             "invalid_reasons": "incomplete_candidate", "result_count": len(runs)})
+                             "invalid_reasons": "incomplete_candidate", "result_count": len(runs),
+                             "clean_utility": utility})
                 continue
+            # The same fixed Score ranks all eligible methods. Relative targets
+            # never select Ours or qualify an unhealthy baseline.
             trial = score_trial(method, cid, candidate["parameters"], runs, objective=spec["objective"],
-                                clean_accuracy_reference=controls,
-                                max_clean_accuracy_drop=spec["gates"]["max_clean_accuracy_drop"],
+                                clean_accuracy_reference=None,
                                 min_round_completion_rate=1., max_nonfinite_updates=0)
             trials[cid] = trial
             row = trial.row()
             row["variant"] = candidate["variant"]
-            extra = sorted({reason for r in runs for reason in metrics(r)["reasons"]})
-            if extra:
-                row["valid"] = False
-                row["invalid_reasons"] = ",".join(sorted(set(trial.invalid_reasons) | set(extra)))
+            row["clean_utility"] = utility
+            measured_drops = [item["drop"] for item in utility["scenarios"] if item["drop"] is not None]
+            row["worst_clean_accuracy_drop"] = max(measured_drops) if measured_drops and utility["status"] != "unassessed" else None
+            row["observed_worst_clean_accuracy_drop"] = max(measured_drops) if measured_drops else None
+            extra = {reason for r in runs for reason in metrics(r)["reasons"]}
+            if method in ("sm9rrs", "vert", "alignins") and utility["status"] == "failed":
+                extra.add("clean_accuracy_drop")
+            reasons = sorted(set(trial.invalid_reasons) | extra)
+            row["valid"] = trial.valid and not extra
+            row["invalid_reasons"] = ",".join(reasons)
+            row["score"] = trial.score if row["valid"] else None
+            # Legacy Score uses pessimistic sentinels when a metric is absent;
+            # artifact tables use null instead, alongside the original evidence.
+            if "accuracy_metrics" in reasons:
+                row["clean_accuracy"] = row["robust_accuracy"] = None
+            if "attack_metrics" in reasons:
+                row["attack_success_rate"] = row["worst_attack_success_rate"] = None
+            if "honest_weight_metrics" in reasons:
+                row["honest_weight_loss"] = None
             rows.append(row)
-            if trial.valid and not extra:
+            if row["valid"]:
                 eligible.append(trial)
         if eligible:
             best = max(eligible, key=lambda t: (t.score, -t.worst_attack_success_rate, t.candidate_id))
-            selected[method] = best.candidate_id
+            selected[method] = healthy_selected[method] = best.candidate_id
+            selection_status = "eligible_score_selection"
+        elif method != "sm9rrs":
+            selected[method] = spec["fallback_candidates"][method]
+            selection_status = "fixed_fallback_unqualified"
+        else:
+            selection_status = "no_eligible_ours_candidate"
         method_status[method] = {"status": "valid" if eligible else "no_eligible_candidate",
+                                 "selection_status": selection_status,
+                                 "comparison_available": bool(eligible),
                                  "selected_candidate": selected.get(method),
                                  "candidate_failures": {r["candidate_id"]: r["invalid_reasons"] for r in rows if r["method"] == method and not r["valid"]}}
-    baselines = {m: results_by_candidate[cid] for m, cid in selected.items() if m != "sm9rrs"}
+    baselines = {m: results_by_candidate[cid] for m, cid in healthy_selected.items() if m != "sm9rrs"}
     policy = PerformanceTarget.parse(spec["performance_target"])
-    candidates, choices = {}, []
-    for row in rows:
-        if row["method"] != "sm9rrs" or not row["valid"]:
-            continue
-        cid = row["candidate_id"]
-        audit = paired_all_baselines(results_by_candidate[cid], baselines, policy, expected)
-        candidates[cid] = audit
-        trial = trials[cid]
-        rank = (audit["status"] == "passed", audit["structurally_complete"],
-                -audit["worst_normalized_excess"], -audit["mean_normalized_excess"],
-                -trial.attack_success_rate, trial.robust_accuracy, trial.score, cid)
-        choices.append((rank, cid))
-    if choices:
-        selected["sm9rrs"] = max(choices)[1]
-        method_status["sm9rrs"]["selected_candidate"] = selected["sm9rrs"]
+    candidates = {row["candidate_id"]: paired_all_baselines(results_by_candidate[row["candidate_id"]], baselines, policy, expected)
+                  for row in rows if row["method"] == "sm9rrs" and row["valid"]}
+    for audit in candidates.values():
+        audit["role"] = "descriptive_only_not_selection_or_promotion"
     attack_rows = []
-    for run in baselines.get("fedavg", []):
-        if run.config.malicious_ratio > 0:
+    # Evaluate every healthy fixed FedAvg attacked run even if another FedAvg
+    # scenario failed. Missing runs are explicit, never treated as zero ASR.
+    for run in results_by_candidate.get(fedavg_id, []):
+        if run.config.malicious_ratio > 0 and metrics(run)["healthy"]:
             value = metrics(run)["attack_mean_asr"]
             attack_rows.append({"scenario": list(scenario_key(run)), "mean_asr": value,
                                 "passed": value is not None and value >= spec["gates"]["fedavg_min_attack_mean_asr"]})
     expected_attack = sum(key[3] > 0 for key in expected)
     attack_effective = len(attack_rows) == expected_attack and expected_attack > 0 and all(r["passed"] for r in attack_rows)
-    ours_audit = candidates.get(selected.get("sm9rrs"), {"status": "incomplete"})
-    qualified = len(selected) == len(ALL_METHODS) and ours_audit["status"] == "passed" and attack_effective
-    return {"status": "qualified_for_final" if qualified else "needs_development",
-            "all_six_methods_healthy": len(selected) == len(ALL_METHODS),
+    ours_audit = candidates.get(selected.get("sm9rrs"), {"status": "incomplete", "role": "descriptive_only_not_selection_or_promotion"})
+    qualified = "sm9rrs" in healthy_selected
+    return {"status": "qualified_for_final" if qualified else "needs_ours_development",
+            "promotion_basis": {"required_method": "sm9rrs", "independent_health_required": True,
+                                "clean_utility_against_available_healthy_controls_required": True,
+                                "missing_healthy_clean_references": missing_controls,
+                                "missing_clean_references_are_unassessed_not_passed": True,
+                                "baseline_eligibility_required": False,
+                                "relative_performance_required": False},
+            "ours_health_passed": qualified,
+            "all_six_methods_healthy": len(healthy_selected) == len(ALL_METHODS),
+            "six_method_comparison_available": len(healthy_selected) == len(ALL_METHODS),
             "selected": selected, "methods": method_status, "trials": rows,
+            "selection_rule": "fixed_common_score_for_eligible_candidates_else_predeclared_baseline_fallback",
             "ours_target": ours_audit, "ours_candidate_targets": candidates,
-            "attack_effectiveness": {"passed": attack_effective, "reference": "fedavg",
+            "attack_effectiveness": {"passed": attack_effective, "role": "descriptive_only_not_promotion",
+                                     "reference": "fedavg", "expected_attacked_runs": expected_attack,
+                                     "observed_healthy_attacked_runs": len(attack_rows),
                                      "minimum_mean_asr": spec["gates"]["fedavg_min_attack_mean_asr"], "scenarios": attack_rows},
-            "clean_reference_error": controls_error,
+            "clean_reference_error": controls_error, "missing_healthy_clean_references": missing_controls,
             "official_test_used_for_selection": False, "automatic_parameter_search_continues": False}
 
 
@@ -452,7 +510,7 @@ def check_environment(output, metadata):
 
 
 def worker_environment(device):
-    """Called only after strict settings, before any task training starts."""
+    """Read provenance after choosing the requested GPU; leave numerical flags unchanged."""
     import torch
     torch.cuda.set_device(device)
     torch.cuda.init()
@@ -498,7 +556,6 @@ def run_worker(args):
             repair_completed(output, task, complete)
             print("ALREADY_COMPLETED " + task["task_id"], flush=True)
             return
-        configure_strict_numerics(tf32=False)
         metadata = worker_environment(args.devices[0])
         check_environment(output, metadata)
         write_json(folder / "environment.json", metadata)
@@ -508,30 +565,24 @@ def run_worker(args):
         dataset = split.calibration_dataset if args.phase == "validation" else split.main_dataset
         config = replace(identity, device=args.devices[0])
         from cifar_ours_development_policy import weak_quarantine_policy
-        from sm9rrsfl.stable_training import stable_client_training
         variant = task["candidate"]
         policy = weak_quarantine_policy(variant["weak_threshold"]) if variant["variant"] == "weak_quarantine" else nullcontext()
         attempt = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f")
         event_context = {"attempt": attempt, "task_id": task["task_id"], "method": task["method"],
-                         "study_phase": args.phase, "candidate_id": variant["candidate_id"]}
-        def event(row):
-            with (folder / "numerical_events.jsonl").open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(json_safe({**event_context, **row}), sort_keys=True, allow_nan=False) + "\n")
-                handle.flush()
-        def save_stats(stats):
-            write_json(folder / f"numerical_stats_{attempt}.json", {**event_context, **stats.summary()})
-            attempts = [json.loads(p.read_text()) for p in sorted(folder.glob("numerical_stats_*.json"))]
-            write_json(folder / "numerical_stats.json", {"scope": "all process attempts; resumed or re-executed work remains visible",
-                       "attempts": attempts, "backtracked_steps_all_attempts": sum(a["totals"]["backtracked_steps"] for a in attempts),
-                       "retries_all_attempts": sum(a["totals"]["retries"] for a in attempts),
-                       "note": "Per-attempt counts are persisted at every complete round and process exit. Events also retain failures within incomplete rounds."})
-        with policy, stable_client_training(max_backtracks=spec["numerics"]["max_backtracks"], event_callback=event) as stats, round_observer(task["task_id"], event_context, lambda state: save_stats(stats)):
-            try:
-                result = experiments.run_measured_experiment(dataset, config, checkpoint_dir=folder / "checkpoints",
-                    run_fingerprint=task["fingerprint"], retain_success_checkpoint=True,
-                    checkpoint_identity_config=identity)
-            finally:
-                save_stats(stats)
+                         "study_phase": args.phase, "candidate_id": variant["candidate_id"],
+                         "numerical_mode": "original_runtime", "shared_backtracking": False}
+        def save_progress(state):
+            # Only observe the original execution. Earlier attempt records and
+            # checkpoints remain present if a later process resumes this task.
+            last = state["records"][-1] if state.get("records") else None
+            write_json(folder / f"attempt_{attempt}.json", {**event_context,
+                       "last_completed_round": state["completed_round"],
+                       "last_round": asdict(last) if last is not None else None})
+        write_json(folder / f"attempt_{attempt}.json", event_context)
+        with policy, round_observer(task["task_id"], event_context, save_progress):
+            result = experiments.run_measured_experiment(dataset, config, checkpoint_dir=folder / "checkpoints",
+                run_fingerprint=task["fingerprint"], retain_success_checkpoint=True,
+                checkpoint_identity_config=identity)
         experiments.write_result_files(folder, [result])
         write_json(folder / "metrics.json", metrics(result))
         experiments.finalize_config_checkpoint(folder / "checkpoints", identity, task["fingerprint"])
@@ -539,7 +590,10 @@ def run_worker(args):
     except BaseException as exc:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f")
         failure = {"task_id": task["task_id"], "time_utc": stamp, "exception": type(exc).__name__,
-                   "message": str(exc), "traceback": traceback.format_exc()}
+                   "message": str(exc), "traceback": traceback.format_exc(),
+                   "execution_context": locals().get("event_context"),
+                   "nonfinite_updates_total": None,
+                   "metrics_note": "Failed attempt has no complete-run metrics; unknown values are not imputed as zero."}
         write_json(folder / "failure.json", failure)
         write_json(folder / f"failure_{stamp}.json", failure)
         raise
@@ -566,7 +620,7 @@ def execute_phase(args, tasks, output):
                 command += ["--data-dir", str(args.data_dir.resolve())]
             folder = output / "tasks" / task["task_id"]
             folder.mkdir(parents=True, exist_ok=True)
-            child_env = dict(os.environ, CUBLAS_WORKSPACE_CONFIG=":4096:8", PYTHONHASHSEED="0")
+            child_env = dict(os.environ)
             print(f"START {task['task_id']} device={device}", flush=True)
             with (folder / "worker.log").open("a", encoding="utf-8") as log:
                 with lock:
@@ -628,24 +682,42 @@ def execute_phase(args, tasks, output):
     return failed
 
 
-def summarize_final(spec, selected, results, statuses, tasks):
+def summarize_final(spec, selected, results, statuses, tasks, selection_details=None):
     peers = {method: results.get(cid, []) for method, cid in selected.items()}
+    healthy_peers = {method: [r for r in runs if metrics(r)["healthy"]] for method, runs in peers.items()}
     expected = {(t["config"]["partition"], t["config"]["dirichlet_alpha"], t["config"]["num_clients"],
                  t["config"]["malicious_ratio"], t["config"]["seed"]) for t in tasks}
-    report = paired_all_baselines(peers.get("sm9rrs", []), peers, PerformanceTarget.parse(spec["performance_target"]), expected)
+    target = paired_all_baselines(healthy_peers.get("sm9rrs", []), healthy_peers,
+                                 PerformanceTarget.parse(spec["performance_target"]), expected)
+    target["role"] = "descriptive_only_not_execution_or_health_status"
     health = [{"task_id": row["task_id"], "reasons": row["metrics"]["reasons"] if row["metrics"] else [row["status"]]}
               for row in statuses if row["metrics"] is None or not row["metrics"]["healthy"]]
-    if health:
-        report["status"] = "incomplete" if any(row["metrics"] is None for row in statuses) else "unmet"
-    report.update(tasks=statuses, health_failures=health, selected=selected,
-                  official_test_used_for_selection=False, parameters_reselected=False)
-    report["methods"] = {method: {"status": "complete_healthy" if all(row["metrics"] and row["metrics"]["healthy"] for row in statuses if row["method"] == method)
-                                   and any(row["method"] == method for row in statuses) else "incomplete_or_failed",
-                                   "selected_candidate": selected.get(method),
-                                   "expected_runs": sum(t["method"] == method for t in tasks),
-                                   "completed_runs": sum(row["method"] == method and row["metrics"] is not None for row in statuses)}
-                         for method in ALL_METHODS}
-    return report
+    methods = {}
+    for method in ALL_METHODS:
+        wanted = sum(t["method"] == method for t in tasks)
+        observed = [row for row in statuses if row["method"] == method]
+        full = bool(wanted) and len(observed) == wanted and all(row["metrics"] is not None for row in observed)
+        healthy = full and all(row["metrics"]["healthy"] for row in observed)
+        selection = (selection_details or {}).get(method, {})
+        methods[method] = {"status": "complete_healthy" if healthy else "complete_unhealthy" if full else "incomplete_or_failed",
+                           "selected_candidate": selected.get(method), "expected_runs": wanted,
+                           "completed_runs": sum(row["metrics"] is not None for row in observed),
+                           "healthy_runs": sum(bool(row["metrics"] and row["metrics"]["healthy"]) for row in observed),
+                           "comparison_available": healthy,
+                           "validation_selection_status": selection.get("selection_status", "unknown"),
+                           "selected_without_valid_validation": selection.get("selection_status") == "fixed_fallback_unqualified"}
+    full_execution = len(statuses) == len(tasks) and all(row["metrics"] is not None for row in statuses)
+    all_attempted = len(statuses) == len(tasks) and all(row["status"] in ("complete", "failed") for row in statuses)
+    status = "completed" if full_execution and not health else "completed_with_health_failures" if full_execution else "completed_with_task_failures" if all_attempted else "incomplete"
+    clean_controls = _matched_fedavg_clean_accuracy({"fedavg-001": healthy_peers.get("fedavg", [])})
+    ours_utility = clean_utility_audit(peers.get("sm9rrs", []), clean_controls, spec["gates"]["max_clean_accuracy_drop"])
+    return {"status": status, "full_execution_completed": full_execution,
+            "all_scheduled_tasks_attempted": all_attempted,
+            "ours_independent_health_passed": methods["sm9rrs"]["status"] == "complete_healthy",
+            "ours_clean_utility": ours_utility,
+            "six_method_comparison_available": all(m["comparison_available"] for m in methods.values()),
+            "ours_target": target, "tasks": statuses, "health_failures": health, "selected": selected,
+            "methods": methods, "official_test_used_for_selection": False, "parameters_reselected": False}
 
 
 def final_aggregate(tasks, results):
@@ -667,7 +739,10 @@ def final_aggregate(tasks, results):
                      "expected_seeds": json.dumps(wanted), "completed_seeds": json.dumps(observed),
                      "missing_seeds": json.dumps(sorted(set(wanted) - set(observed))),
                      "status": "incomplete" if not complete else "failed" if failures else "complete_healthy",
-                     "failure_reasons": ",".join(failures), "nonfinite_updates_total": sum(r.nonfinite_updates for r in group),
+                     "failure_reasons": ",".join(failures),
+                     "nonfinite_updates_total": sum(r.nonfinite_updates for r in group) if complete else None,
+                     "observed_completed_runs_nonfinite_updates": sum(r.nonfinite_updates for r in group) if group else None,
+                     "healthy_completed_runs": sum(metrics(r)["healthy"] for r in group),
                      "observed_final_accuracy_mean": fmean(values) if values else None,
                      "observed_final_accuracy_std": pstdev(values) if len(values) > 1 else 0. if values else None,
                      "observed_final_asr_mean": fmean(rates) if rates else None})
@@ -682,7 +757,6 @@ def run_parent(args):
     with file_lock(output / ".runner.lock", nonblocking=True):
         if not (output / "manifest.json").exists() and any(p.name != ".runner.lock" for p in output.iterdir()):
             raise ValueError("refusing a nonempty output without its immutable manifest")
-        configure_strict_numerics(tf32=False)
         split, contract = load_split(spec, args.data_dir)
         del split
         manifest = build_manifest(spec, contract, repo)
@@ -698,7 +772,7 @@ def run_parent(args):
         write_json(output / "validation_summary.json", report)
         print("VALIDATION_STATUS " + report["status"], flush=True)
         if report["status"] != "qualified_for_final":
-            print("FINAL_NOT_STARTED: completed results and failures retained; no qualifying six-method near-best conclusion.", flush=True)
+            print("FINAL_NOT_STARTED: no healthy Ours candidate; validation results and baseline failures retained.", flush=True)
             return 0
         if args.phase == "validation":
             return 0
@@ -708,7 +782,7 @@ def run_parent(args):
         print(f"FINAL_RUNS {len(final)} parameters_frozen=true", flush=True)
         execute_phase(args, final, output)
         results, statuses = collect_results(output, final)
-        final_report = summarize_final(spec, report["selected"], results, statuses, final)
+        final_report = summarize_final(spec, report["selected"], results, statuses, final, report["methods"])
         write_json(output / "final_summary.json", final_report)
         completed = [r for runs in results.values() for r in runs]
         final_dir = output / "final_results"
@@ -727,7 +801,7 @@ def run_parent(args):
 def main():
     repo = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=repo / "configs/cifar10_six_stable_v1.json")
+    parser.add_argument("--config", type=Path, default=repo / "configs/cifar10_six_original_v2.json")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--devices", nargs="+", default=["cuda:0"])

@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "name": "CIFAR-10 stable six-method development and frozen final evaluation",
+  "schema_version": 2,
+  "name": "CIFAR-10 original-runtime six-method study with Ours-only health promotion",
   "dataset": {
     "name": "cifar10",
     "data_dir": "data/cifar10",
@@ -352,10 +352,24 @@
     "tail_rounds": 10
   },
   "numerics": {
-    "deterministic": true,
-    "tf32": false,
-    "max_backtracks": 12
+    "mode": "original_runtime",
+    "shared_backtracking": false
   },
-  "output_dir": "outputs/cifar10_six_stable_v1",
-  "protocol_note": "All methods use the same finite-step backtracking optimizer and deterministic FP32 execution. This changes shared numerical optimization from the earlier implementation; original attack boost 5 and nominal learning rate are fixed, and every backtracking event is retained. No attack profile is chosen using Ours ranking. Validation uses training holdout only; final evaluation freezes parameters and uses the untouched official test set."
+  "output_dir": "outputs/cifar10_six_original_v2",
+  "protocol_note": "Use the repository original runtime, local training, fixed attack and baseline algorithms; do not activate strict numerics, shared step backtracking or VERT numerical repairs. Only Ours validation health controls promotion. Score ranks eligible candidates with the same fixed weights. Baselines with no eligible candidate use the predeclared fixed fallback for explicit failure measurement, never as a qualified selection. Accuracy/ASR targets and FedAvg attack effectiveness are descriptive reports only; unavailable healthy clean controls are reported as unassessed without blocking Ours. Validation uses training holdout only; final evaluation freezes parameters and uses the official test set.",
+  "promotion": {
+    "required_healthy_methods": [
+      "sm9rrs"
+    ],
+    "performance_target_is_gate": false,
+    "attack_effectiveness_is_gate": false,
+    "missing_clean_reference": "report_unassessed_without_baseline_veto"
+  },
+  "fallback_candidates": {
+    "vert": "vert-v8-001",
+    "alignins": "alignins-v8-001",
+    "krum": "krum-v8-001",
+    "ding13": "ding13-v8-001",
+    "fedavg": "fedavg-v8-001"
+  }
 }

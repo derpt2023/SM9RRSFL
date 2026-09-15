@@ -222,19 +222,23 @@ python -u -m sm9rrsfl.experiments --dataset synthetic --crypto-mode simulated \
   --compute-backend numpy --jobs 1 --output-dir outputs/normal_state_smoke
 ```
 
-### CIFAR-10 新六方案入口（2026-09-15）
+### CIFAR-10 新六方案入口（2026-09-15，v2）
 
-从零重训请使用独立配置 `configs/cifar10_six_stable_v1.json`，不需要旧的630组实验结果：
+代码更新统一通过 GitHub 同步，在 AI Station 执行 `git pull --ff-only origin main`；不再使用上传代码包的方式。
+
+从零重训使用独立配置 `configs/cifar10_six_original_v2.json`，不依赖旧630组结果：
 
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=7 \
 python -u run_cifar_six_from_scratch.py \
-  --config configs/cifar10_six_stable_v1.json --devices cuda:0
+  --config configs/cifar10_six_original_v2.json --devices cuda:0
 ```
 
-新入口先运行84组、每组100轮的六方案验证；所有方法有健康候选、攻击有效且Ours对全部五个基线满足Accuracy/ASR目标后，再自动运行180组正式评估。每个任务独立保存错误，某个VERT任务失败不会中止其他验证任务；无合格VERT时不伪造六方比较结论。所有方法共用严格FP32及有限性步长回溯，另修复VERT有限大数余弦溢出。这是新的数值实验协议，需重新训练并披露改动，不能混用旧结果；尚不保证完整CUDA实验健康或Ours达标。
+先运行84组、每组100轮验证；只有Ours验证健康才控制是否自动进入180组正式评估。ASR相差1个百分点等性能目标只用于报告，不再阻断。基线没有健康候选时使用预先声明的固定备用候选，并明确保留验证失败；单任务异常不取消其他任务。六方案结果可以包含数值失败行，不能把缺失指标伪装成正常准确率或ASR。
 
-相同命令可断点续跑；查看 `outputs/cifar10_six_stable_v1/validation_summary.json` 与条件生成的 `final_summary.json`。独立配置、候选、门槛、改动及复现边界见 [CIFAR六方案从零重训](docs/CIFAR六方案从零重训-2026-09-15.md)。MNIST继续使用原入口。
+本入口保留原训练/攻击优化器和基线实现，不启用上一版的步长回退、VERT数值修复或强制确定性覆盖。Ours原策略与弱告警隔离变体按配置显式比较。NaN是该实现及环境下的实验现象，不能单独证明原论文算法普遍不健壮。
+
+相同命令支持断点续跑，输出位于 `outputs/cifar10_six_original_v2/`。协议、Ours健康门槛、未评估参考和复现边界见 [CIFAR六方案从零重训](docs/CIFAR六方案从零重训-2026-09-15.md)。MNIST继续使用原入口。
 
 ### CIFAR-10 旧v7协议（保留用于追溯）
 

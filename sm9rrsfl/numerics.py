@@ -1,9 +1,9 @@
-"""Opt-in numerical runtime policy and portable experiment provenance.
+"""Read-only numerical runtime and hardware provenance.
 
-Importing this module does not import Torch or alter its process-wide settings.
-Call ``configure_strict_numerics`` in the parent and each spawned worker before
-any CUDA work.  Determinism is a property of a fixed software/hardware setup;
-these settings do not promise identical values across Torch or GPU versions.
+This module never changes environment variables or Torch runtime flags.
+Importing it does not load Torch; taking a snapshot may load optional numerical
+libraries, but never initializes CUDA or changes the requested device.  The
+existing package initialization policy is independent of this metadata module.
 """
 
 from __future__ import annotations
@@ -14,12 +14,9 @@ import os
 import platform
 import shutil
 import subprocess
-from threading import Lock
 from typing import Any
 
 
-STRICT_CUBLAS_WORKSPACE_CONFIG = ":4096:8"
-_CONFIGURE_LOCK = Lock()
 _RECORDED_ENVIRONMENT = (
     "CUBLAS_WORKSPACE_CONFIG", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
     "NVIDIA_TF32_OVERRIDE", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
@@ -31,57 +28,8 @@ _RECORDED_ENVIRONMENT = (
 def _load_torch():
     try:
         return importlib.import_module("torch")
-    except ImportError as exc:
-        raise RuntimeError("strict numerical mode requires PyTorch") from exc
-
-
-def configure_strict_numerics(tf32: bool = False, *, torch_module=None) -> dict[str, Any]:
-    """Apply the same deterministic, full-FP32 policy to all six methods.
-
-    ``tf32`` is explicit for callers recording their protocol, but must remain
-    false.  An existing workspace setting other than ``:4096:8`` is rejected,
-    including a different deterministic workspace size.  Missing configuration
-    after CUDA initialization cannot be repaired safely inside that process.
-    Repeated calls with a correctly configured CUDA runtime are supported.
-
-    ``torch_module`` is an optional dependency injection hook for CPU tests.
-    This function does not query GPU properties or initialize CUDA.
-    """
-
-    if tf32 is not False:
-        raise ValueError("strict numerical mode requires tf32=False")
-    with _CONFIGURE_LOCK:
-        workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
-        if workspace is not None and workspace != STRICT_CUBLAS_WORKSPACE_CONFIG:
-            raise ValueError(
-                "strict numerical mode requires CUBLAS_WORKSPACE_CONFIG=:4096:8; "
-                "set this value before starting a fresh process"
-            )
-        torch = _load_torch() if torch_module is None else torch_module
-        if torch.cuda.is_initialized() and workspace != STRICT_CUBLAS_WORKSPACE_CONFIG:
-            raise RuntimeError(
-                "CUDA is already initialized without CUBLAS_WORKSPACE_CONFIG=:4096:8; "
-                "restart the process and configure strict numerics before CUDA initialization"
-            )
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = STRICT_CUBLAS_WORKSPACE_CONFIG
-        torch.use_deterministic_algorithms(True, warn_only=False)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        # Set the general matmul policy first: some Torch versions translate
-        # this API to allow_tf32.  Explicit backend flags below are definitive.
-        torch.set_float32_matmul_precision("highest")
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        return {
-            "cublas_workspace_config": STRICT_CUBLAS_WORKSPACE_CONFIG,
-            "deterministic_algorithms": True,
-            "deterministic_warn_only": False,
-            "cudnn_deterministic": True,
-            "cudnn_benchmark": False,
-            "cuda_matmul_allow_tf32": False,
-            "cudnn_allow_tf32": False,
-            "float32_matmul_precision": "highest",
-        }
+    except (ImportError, OSError) as exc:
+        raise RuntimeError("PyTorch metadata is unavailable") from exc
 
 
 def _json_value(value):
@@ -153,12 +101,13 @@ def _native_sm9_information() -> dict[str, Any]:
 def _numpy_information() -> dict[str, Any]:
     try:
         np = importlib.import_module("numpy")
-    except ImportError:
+    except (ImportError, OSError):
         return {"available": False}
-    config = getattr(np.__config__, "CONFIG", None)
+    np_config = getattr(np, "__config__", None)
+    config = getattr(np_config, "CONFIG", None)
     if config is None:
-        get_info = getattr(np.__config__, "get_info", None)
-        config = ({name: get_info(name) for name in
+        get_info = getattr(np_config, "get_info", None)
+        config = ({name: _optional_call(lambda: get_info(name)) for name in
                    ("blas_opt_info", "blas_ilp64_opt_info", "lapack_opt_info")}
                   if get_info is not None else None)
     return {"available": True, "version": str(np.__version__),
@@ -234,5 +183,4 @@ def numerical_environment(device=None, *, torch_module=None) -> dict[str, Any]:
     return _json_value(metadata)
 
 
-__all__ = ["STRICT_CUBLAS_WORKSPACE_CONFIG", "configure_strict_numerics",
-           "numerical_environment"]
+__all__ = ["numerical_environment"]

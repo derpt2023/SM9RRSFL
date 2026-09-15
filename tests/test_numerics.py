@@ -31,70 +31,21 @@ def fake_torch(*, initialized=False):
     return torch
 
 
-class StrictNumericsTest(unittest.TestCase):
-    def setUp(self):
-        self.environment = mock.patch.dict(os.environ, {}, clear=True)
-        self.environment.start()
-        self.addCleanup(self.environment.stop)
-
-    def test_import_alone_does_not_load_torch_or_set_workspace(self):
+class MetadataImportTest(unittest.TestCase):
+    def test_import_alone_preserves_environment_and_does_not_load_torch(self):
+        # Import the existing package first: its long-standing thread defaults
+        # are separate from this module's read-only contract.
         code = (
-            "import os, sys; import sm9rrsfl.numerics; "
+            "import os, sys; import sm9rrsfl; before = dict(os.environ); "
+            "import sm9rrsfl.numerics; "
             "assert 'torch' not in sys.modules; "
-            "assert 'CUBLAS_WORKSPACE_CONFIG' not in os.environ"
+            "assert dict(os.environ) == before; "
+            "assert sm9rrsfl.numerics.__all__ == ['numerical_environment']; "
+            "assert not hasattr(sm9rrsfl.numerics, 'configure_strict_numerics')"
         )
         subprocess.run([sys.executable, "-c", code],
                        cwd=Path(__file__).resolve().parents[1], check=True,
                        capture_output=True, text=True)
-
-    def test_strict_configuration_applies_before_first_cuda_work(self):
-        torch = fake_torch()
-        def verify_workspace(*args, **kwargs):
-            self.assertEqual(os.environ["CUBLAS_WORKSPACE_CONFIG"], ":4096:8")
-        torch.use_deterministic_algorithms.side_effect = verify_workspace
-        result = numerics.configure_strict_numerics(torch_module=torch)
-        torch.use_deterministic_algorithms.assert_called_once_with(True, warn_only=False)
-        torch.set_float32_matmul_precision.assert_called_once_with("highest")
-        self.assertTrue(torch.backends.cudnn.deterministic)
-        self.assertFalse(torch.backends.cudnn.benchmark)
-        self.assertFalse(torch.backends.cuda.matmul.allow_tf32)
-        self.assertFalse(torch.backends.cudnn.allow_tf32)
-        self.assertFalse(result["cuda_matmul_allow_tf32"])
-        torch.cuda.device_count.assert_not_called()
-        torch.cuda.get_device_properties.assert_not_called()
-
-    def test_different_or_empty_preexisting_workspace_is_not_overwritten(self):
-        for value in (":16:8", "invalid", ""):
-            with self.subTest(value=value):
-                os.environ["CUBLAS_WORKSPACE_CONFIG"] = value
-                torch = fake_torch()
-                with self.assertRaisesRegex(ValueError, "CUBLAS_WORKSPACE_CONFIG"):
-                    numerics.configure_strict_numerics(torch_module=torch)
-                self.assertEqual(os.environ["CUBLAS_WORKSPACE_CONFIG"], value)
-                torch.use_deterministic_algorithms.assert_not_called()
-
-    def test_late_configuration_without_workspace_requires_restart(self):
-        torch = fake_torch(initialized=True)
-        with self.assertRaisesRegex(RuntimeError, "already initialized.*restart"):
-            numerics.configure_strict_numerics(torch_module=torch)
-        self.assertNotIn("CUBLAS_WORKSPACE_CONFIG", os.environ)
-        torch.use_deterministic_algorithms.assert_not_called()
-
-    def test_repeat_call_with_correct_environment_supports_initialized_worker(self):
-        torch = fake_torch()
-        first = numerics.configure_strict_numerics(torch_module=torch)
-        torch.cuda.is_initialized.return_value = True
-        second = numerics.configure_strict_numerics(torch_module=torch)
-        self.assertEqual(first, second)
-        self.assertEqual(torch.use_deterministic_algorithms.call_count, 2)
-
-    def test_tf32_cannot_be_enabled_under_strict_protocol(self):
-        torch = fake_torch()
-        with self.assertRaisesRegex(ValueError, "tf32=False"):
-            numerics.configure_strict_numerics(tf32=True, torch_module=torch)
-        self.assertNotIn("CUBLAS_WORKSPACE_CONFIG", os.environ)
-        torch.use_deterministic_algorithms.assert_not_called()
-
 
 class NumericalEnvironmentTest(unittest.TestCase):
     def setUp(self):
@@ -125,6 +76,34 @@ class NumericalEnvironmentTest(unittest.TestCase):
         torch.cuda.get_device_properties.assert_not_called()
         torch.use_deterministic_algorithms.assert_not_called()
 
+    def test_snapshot_preserves_all_flags_and_operator_environment(self):
+        torch = fake_torch()
+        for workspace in (None, ":16:8", "operator-defined"):
+            with self.subTest(workspace=workspace), mock.patch.dict(os.environ, {}, clear=True):
+                if workspace is not None:
+                    os.environ["CUBLAS_WORKSPACE_CONFIG"] = workspace
+                os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+                before = dict(os.environ)
+                result = numerics.numerical_environment("cuda:0", torch_module=torch)
+                self.assertEqual(dict(os.environ), before)
+                self.assertEqual(result["environment"]["CUBLAS_WORKSPACE_CONFIG"], workspace)
+                self.assertFalse(torch.backends.cudnn.deterministic)
+                self.assertTrue(torch.backends.cudnn.benchmark)
+                self.assertTrue(torch.backends.cudnn.allow_tf32)
+                self.assertTrue(torch.backends.cuda.matmul.allow_tf32)
+                torch.use_deterministic_algorithms.assert_not_called()
+                torch.set_float32_matmul_precision.assert_not_called()
+                torch.cuda.device_count.assert_not_called()
+                torch.cuda.get_device_properties.assert_not_called()
+
+    def test_optional_torch_query_failure_is_recorded_as_null(self):
+        torch = fake_torch()
+        torch.backends.cudnn.version = mock.Mock(side_effect=RuntimeError("missing library"))
+        torch.get_num_threads = mock.Mock(side_effect=OSError("query failed"))
+        result = numerics.numerical_environment(torch_module=torch)
+        self.assertIsNone(result["torch"]["cudnn_version"])
+        self.assertIsNone(result["torch"]["num_threads"])
+
     def test_initialized_cuda_metadata_records_logical_device_identity(self):
         torch = fake_torch(initialized=True)
         torch.version.cuda = "12.test"
@@ -138,13 +117,64 @@ class NumericalEnvironmentTest(unittest.TestCase):
         self.assertEqual(device["compute_capability"], [8, 9])
         self.assertEqual(device["uuid"], "GPU-example")
         self.assertEqual(result["torch"]["logical_cuda_devices_status"], "queried")
+        torch.use_deterministic_algorithms.assert_not_called()
+        torch.set_float32_matmul_precision.assert_not_called()
         json.dumps(result, allow_nan=False)
+
+    def test_initialized_cuda_properties_failure_is_reported(self):
+        torch = fake_torch(initialized=True)
+        torch.cuda.device_count.side_effect = RuntimeError("driver unavailable")
+        result = numerics.numerical_environment("cuda:0", torch_module=torch)
+        self.assertEqual(result["torch"]["logical_cuda_devices"], [])
+        self.assertEqual(result["torch"]["logical_cuda_devices_status"], "RuntimeError")
 
     def test_missing_torch_is_reported_without_failing_metadata(self):
         with mock.patch.object(numerics, "_load_torch", side_effect=RuntimeError("missing")):
             result = numerics.numerical_environment()
         self.assertEqual(result["torch"], {"available": False})
         self.assertIn("numpy", result)
+
+
+class OptionalMetadataTest(unittest.TestCase):
+    def test_nvidia_unavailable_does_not_spawn_command(self):
+        with mock.patch.object(numerics.shutil, "which", return_value=None), \
+                mock.patch.object(numerics.subprocess, "run") as run:
+            result = numerics._nvidia_information()
+        self.assertFalse(result["available"])
+        run.assert_not_called()
+
+    def test_nvidia_failures_are_optional(self):
+        for failure in (OSError("missing"), subprocess.TimeoutExpired("nvidia-smi", 2)):
+            with self.subTest(failure=failure), \
+                    mock.patch.object(numerics.shutil, "which", return_value="/usr/bin/nvidia-smi"), \
+                    mock.patch.object(numerics.subprocess, "run", side_effect=failure):
+                result = numerics._nvidia_information()
+            self.assertFalse(result["available"])
+            self.assertEqual(result["reason"], type(failure).__name__)
+
+    def test_nvidia_readonly_query_parses_physical_identity(self):
+        response = SimpleNamespace(returncode=0, stdout="0, GPU-id, Test GPU, 123.4, 24576\ninvalid\n")
+        with mock.patch.object(numerics.shutil, "which", return_value="/usr/bin/nvidia-smi"), \
+                mock.patch.object(numerics.subprocess, "run", return_value=response) as run:
+            result = numerics._nvidia_information()
+        self.assertEqual(result["gpus"][0]["uuid"], "GPU-id")
+        self.assertEqual(len(result["gpus"]), 1)
+        self.assertEqual(run.call_args.args[0], [
+            "/usr/bin/nvidia-smi", "--query-gpu=index,uuid,name,driver_version,memory.total",
+            "--format=csv,noheader,nounits"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 2)
+
+    def test_numpy_optional_build_query_failure_is_recorded_as_null(self):
+        np = SimpleNamespace(__version__="test", __config__=SimpleNamespace(
+            get_info=mock.Mock(side_effect=RuntimeError("unsupported query"))))
+        with mock.patch.object(numerics.importlib, "import_module", return_value=np):
+            result = numerics._numpy_information()
+        self.assertTrue(result["available"])
+        self.assertTrue(all(value is None for value in result["build_configuration"].values()))
+
+    def test_missing_numpy_is_optional(self):
+        with mock.patch.object(numerics.importlib, "import_module", side_effect=ImportError):
+            self.assertEqual(numerics._numpy_information(), {"available": False})
 
 
 if __name__ == "__main__":

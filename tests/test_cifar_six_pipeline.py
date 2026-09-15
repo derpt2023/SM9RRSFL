@@ -16,7 +16,7 @@ import run_cifar_six_from_scratch as runner
 from sm9rrsfl import experiments, fl
 
 
-CONFIG = Path(__file__).resolve().parents[1] / "configs/cifar10_six_stable_v1.json"
+CONFIG = Path(__file__).resolve().parents[1] / "configs/cifar10_six_original_v2.json"
 
 
 def synthetic_run(config, accuracy=.8, asr=.05, nonfinite=0):
@@ -87,14 +87,16 @@ class SixMethodPipelineTests(unittest.TestCase):
             self.assertEqual(audit["reference_method"], name)
             self.assertEqual(audit["status"], "passed")
 
-    def test_nonfinite_vert_cannot_veto_other_selections_or_qualify(self):
+    def test_nonfinite_vert_uses_fixed_unqualified_fallback_without_veto(self):
         for candidate in self.spec["candidates"]["vert"]:
             cid = candidate["candidate_id"]
             self.results[cid][2] = synthetic_run(self.results[cid][2].config, nonfinite=1)
         report = runner.select_validation(self.spec, self.results, self.tasks)
-        self.assertEqual(report["status"], "needs_development")
-        self.assertNotIn("vert", report["selected"])
-        self.assertEqual(len(report["selected"]), 5)
+        self.assertEqual(report["status"], "qualified_for_final")
+        self.assertEqual(report["selected"]["vert"], self.spec["fallback_candidates"]["vert"])
+        self.assertEqual(len(report["selected"]), 6)
+        self.assertFalse(report["six_method_comparison_available"])
+        self.assertEqual(report["methods"]["vert"]["selection_status"], "fixed_fallback_unqualified")
         self.assertEqual(report["methods"]["vert"]["status"], "no_eligible_candidate")
         self.assertEqual(report["ours_target"]["status"], "incomplete")
         self.assertTrue(all("nonfinite_updates" in reason for reason in report["methods"]["vert"]["candidate_failures"].values()))
@@ -103,35 +105,40 @@ class SixMethodPipelineTests(unittest.TestCase):
         for candidate in self.spec["candidates"]["vert"]:
             self.results.pop(candidate["candidate_id"])
         report = runner.select_validation(self.spec, self.results, self.tasks)
-        self.assertEqual(report["status"], "needs_development")
-        self.assertEqual(len(report["selected"]), 5)
+        self.assertEqual(report["status"], "qualified_for_final")
+        self.assertEqual(len(report["selected"]), 6)
         self.assertEqual(report["ours_target"]["status"], "incomplete")
 
-    def test_bad_clean_fedavg_reference_is_a_reported_failure(self):
+    def test_bad_clean_fedavg_reference_is_unassessed_without_veto(self):
         cid = self.spec["candidates"]["fedavg"][0]["candidate_id"]
         self.results[cid][0] = synthetic_run(self.results[cid][0].config, accuracy=float("nan"))
         report = runner.select_validation(self.spec, self.results, self.tasks)
-        self.assertEqual(report["status"], "needs_development")
-        self.assertIn("invalid accuracy", report["clean_reference_error"])
+        self.assertEqual(report["status"], "qualified_for_final")
+        self.assertTrue(report["missing_healthy_clean_references"])
+        self.assertTrue(report["promotion_basis"]["missing_clean_references_are_unassessed_not_passed"])
+        self.assertFalse(report["promotion_basis"]["baseline_eligibility_required"])
         self.assertFalse(report["all_six_methods_healthy"])
+        ours = next(row for row in report["trials"] if row["method"] == "sm9rrs")
+        self.assertIsNone(ours["worst_clean_accuracy_drop"])
+        self.assertEqual(ours["clean_utility"]["status"], "unassessed")
 
-    def test_best_krum_prevents_claim_based_only_on_vert(self):
+    def test_better_krum_remains_descriptive_without_veto(self):
         cid = self.spec["candidates"]["krum"][0]["candidate_id"]
         self.results[cid] = [synthetic_run(r.config, accuracy=.9) for r in self.results[cid]]
         report = runner.select_validation(self.spec, self.results, self.tasks)
-        self.assertEqual(report["status"], "needs_development")
+        self.assertEqual(report["status"], "qualified_for_final")
         self.assertEqual(report["ours_target"]["comparisons"]["vert"]["status"], "passed")
         self.assertEqual(report["ours_target"]["comparisons"]["krum"]["status"], "unmet")
 
-    def test_ineffective_attack_cannot_make_ours_qualified(self):
+    def test_ineffective_attack_remains_descriptive_without_veto(self):
         cid = self.spec["candidates"]["fedavg"][0]["candidate_id"]
         self.results[cid] = [synthetic_run(r.config) for r in self.results[cid]]
         report = runner.select_validation(self.spec, self.results, self.tasks)
         self.assertEqual(report["ours_target"]["status"], "passed")
         self.assertFalse(report["attack_effectiveness"]["passed"])
-        self.assertEqual(report["status"], "needs_development")
+        self.assertEqual(report["status"], "qualified_for_final")
 
-    def test_target_selection_changes_only_ours(self):
+    def test_common_score_selects_ours_without_target_ranking(self):
         good = self.spec["candidates"]["sm9rrs"][2]["candidate_id"]
         for candidate in self.spec["candidates"]["sm9rrs"]:
             cid = candidate["candidate_id"]
@@ -141,6 +148,51 @@ class SixMethodPipelineTests(unittest.TestCase):
         self.assertEqual(report["selected"]["sm9rrs"], good)
         self.assertEqual(report["status"], "qualified_for_final")
         self.assertEqual(report["selected"]["vert"], "vert-v8-006")
+
+    def test_ours_nonfinite_still_blocks_formal(self):
+        for candidate in self.spec["candidates"]["sm9rrs"]:
+            cid = candidate["candidate_id"]
+            self.results[cid][2] = synthetic_run(self.results[cid][2].config, nonfinite=1)
+        report = runner.select_validation(self.spec, self.results, self.tasks)
+        self.assertEqual(report["status"], "needs_ours_development")
+        self.assertFalse(report["ours_health_passed"])
+        self.assertNotIn("sm9rrs", report["selected"])
+
+    def test_available_healthy_clean_control_still_enforces_three_pp_drop(self):
+        for candidate in self.spec["candidates"]["sm9rrs"]:
+            cid = candidate["candidate_id"]
+            self.results[cid] = [synthetic_run(r.config, accuracy=.7) for r in self.results[cid]]
+        report = runner.select_validation(self.spec, self.results, self.tasks)
+        self.assertEqual(report["status"], "needs_ours_development")
+        ours = next(row for row in report["trials"] if row["method"] == "sm9rrs")
+        self.assertAlmostEqual(ours["worst_clean_accuracy_drop"], .1)
+        self.assertTrue(all("clean_accuracy_drop" in why for why in report["methods"]["sm9rrs"]["candidate_failures"].values()))
+
+    def test_asr_one_pp_target_does_not_control_selection_or_promotion(self):
+        for candidate in self.spec["candidates"]["sm9rrs"]:
+            cid = candidate["candidate_id"]
+            self.results[cid] = [synthetic_run(r.config, asr=.2) for r in self.results[cid]]
+        with mock.patch.object(runner, "paired_all_baselines", return_value={"status": "unmet"}):
+            report = runner.select_validation(self.spec, self.results, self.tasks)
+        self.assertEqual(report["status"], "qualified_for_final")
+        self.assertEqual(report["ours_target"]["status"], "unmet")
+        self.assertEqual(report["ours_target"]["role"], "descriptive_only_not_selection_or_promotion")
+        self.assertEqual(report["selected"]["sm9rrs"], "sm9rrs-v8-006")
+
+    def test_formal_fallback_keeps_unqualified_validation_label_even_if_later_healthy(self):
+        for candidate in self.spec["candidates"]["vert"]:
+            self.results.pop(candidate["candidate_id"])
+        validation = runner.select_validation(self.spec, self.results, self.tasks)
+        final = runner.build_tasks(self.spec, "final", validation["selected"])
+        groups = result_matrix(self.spec, final)
+        by_config = {runner.digest(runner.semantic_config(r.config)): r for runs in groups.values() for r in runs}
+        statuses = [{"task_id": t["task_id"], "method": t["method"], "status": "complete",
+                     "metrics": runner.metrics(by_config[runner.digest(runner.semantic_config(t["config"]))])} for t in final]
+        report = runner.summarize_final(self.spec, validation["selected"], groups, statuses, final, validation["methods"])
+        self.assertEqual(report["status"], "completed")
+        self.assertTrue(report["methods"]["vert"]["selected_without_valid_validation"])
+        self.assertEqual(report["methods"]["vert"]["status"], "complete_healthy")
+        self.assertTrue(report["ours_independent_health_passed"])
 
     def test_global_nonfinite_model_rejected_before_checkpoint_write(self):
         callback = mock.Mock()
@@ -177,7 +229,7 @@ class SixMethodPipelineTests(unittest.TestCase):
         self.assertEqual(ours["completed_runs"], 1)
         self.assertEqual(ours["status"], "incomplete")
         self.assertEqual(json.loads(ours["missing_seeds"]), [802, 803])
-        self.assertTrue(all(r["completed_runs"] == 0 and r["status"] == "incomplete" for r in rows if r["method"] == "vert"))
+        self.assertTrue(all(r["completed_runs"] == 0 and r["status"] == "incomplete" and r["nonfinite_updates_total"] is None for r in rows if r["method"] == "vert"))
 
     def test_round_observer_records_resume_round_and_persists_finite_state(self):
         contexts, context, callback = [], {}, mock.Mock()
@@ -236,8 +288,7 @@ class SixMethodPipelineTests(unittest.TestCase):
             self.assertTrue((folder / "summary.csv").exists())
             self.assertTrue((folder / "rounds.csv").exists())
 
-    def test_resume_keeps_first_attempt_numeric_stats_and_failure(self):
-        from sm9rrsfl import stable_training
+    def test_resume_keeps_first_attempt_and_failure_without_numerical_patch(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             task = {**self.tasks[0], "fingerprint": "test"}
@@ -245,19 +296,18 @@ class SixMethodPipelineTests(unittest.TestCase):
             (output / "manifest.json").write_text(json.dumps(manifest))
             (output / "validation_plan.json").write_text(json.dumps({"tasks": [task]}))
             args = SimpleNamespace(output=output, phase="validation", worker=task["task_id"], devices=["cuda:0"], data_dir=None)
-            stats = SimpleNamespace(summary=lambda: {"totals": {"backtracked_steps": 2, "retries": 3}})
             split = SimpleNamespace(calibration_dataset=object())
             result = synthetic_run(fl.ExperimentConfig(**task["config"]))
-            with mock.patch.object(runner, "source_hashes", return_value={}), mock.patch.object(runner, "configure_strict_numerics"), mock.patch.object(runner, "worker_environment", return_value={"environment": {}}), mock.patch.object(runner, "load_split", return_value=(split, {})), mock.patch.object(stable_training, "stable_client_training", side_effect=lambda **kwargs: nullcontext(stats)), mock.patch.object(experiments, "run_measured_experiment", side_effect=[RuntimeError("simulated stop"), result]), mock.patch.object(experiments, "finalize_config_checkpoint"), redirect_stdout(io.StringIO()):
+            with mock.patch.object(runner, "source_hashes", return_value={}), mock.patch.object(runner, "worker_environment", return_value={"environment": {}}), mock.patch.object(runner, "load_split", return_value=(split, {})), mock.patch.object(experiments, "run_measured_experiment", side_effect=[RuntimeError("simulated stop"), result]), mock.patch.object(experiments, "finalize_config_checkpoint"), redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(RuntimeError, "simulated stop"):
                     runner.run_worker(args)
                 runner.run_worker(args)
             folder = output / "tasks" / task["task_id"]
-            report = json.loads((folder / "numerical_stats.json").read_text())
-            self.assertEqual(len(report["attempts"]), 2)
-            self.assertEqual(report["backtracked_steps_all_attempts"], 4)
-            self.assertEqual(report["retries_all_attempts"], 6)
+            attempts = [json.loads(p.read_text()) for p in folder.glob("attempt_*.json")]
+            self.assertEqual(len(attempts), 2)
+            self.assertTrue(all(a["numerical_mode"] == "original_runtime" and a["shared_backtracking"] is False for a in attempts))
             self.assertTrue((folder / "failure.json").exists())
+            self.assertFalse((folder / "numerical_stats.json").exists())
 
     def test_worker_failure_does_not_cancel_unrelated_task(self):
         launched = []
@@ -295,13 +345,13 @@ class SixMethodPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             args = SimpleNamespace(config=CONFIG, output=output, devices=["cuda:0"], data_dir=None, phase="all")
-            with mock.patch.object(runner, "configure_strict_numerics"), mock.patch.object(runner, "source_hashes", return_value={}), mock.patch.object(runner, "load_split", return_value=(object(), {})), mock.patch.object(runner, "execute_phase", return_value=0) as execution, mock.patch.object(runner, "collect_results", side_effect=[(self.results, statuses(self.tasks, self.results)), (final_results, statuses(final, final_results))]), redirect_stdout(io.StringIO()):
+            with mock.patch.object(runner, "source_hashes", return_value={}), mock.patch.object(runner, "load_split", return_value=(object(), {})), mock.patch.object(runner, "execute_phase", return_value=0) as execution, mock.patch.object(runner, "collect_results", side_effect=[(self.results, statuses(self.tasks, self.results)), (final_results, statuses(final, final_results))]), redirect_stdout(io.StringIO()):
                 self.assertEqual(runner.run_parent(args), 0)
             self.assertEqual(execution.call_count, 2)
             self.assertTrue((output / "final_results" / "aggregate.csv").exists())
             self.assertTrue((output / "final_results" / "summary.csv").exists())
             report = json.loads((output / "final_summary.json").read_text())
-            self.assertEqual(report["status"], "passed")
+            self.assertEqual(report["status"], "completed")
             self.assertEqual(set(report["methods"]), set(runner.ALL_METHODS))
             self.assertFalse(report["parameters_reselected"])
 
