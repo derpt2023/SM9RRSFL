@@ -16,6 +16,7 @@ import inspect
 import json
 import linecache
 import math
+import os
 from pathlib import Path
 import pickle
 import sys
@@ -24,9 +25,10 @@ if __name__ == "__main__":
     from run_experiments_from_config import _try_project_virtualenv
     _try_project_virtualenv(Path(__file__).resolve().parent, launcher_path=Path(__file__))
 
-import numpy as np
-
+# Match the production launcher's thread-environment initialization order.
+# Importing NumPy first can initialize BLAS before the package sets defaults.
 from sm9rrsfl import fl, torch_backend
+import numpy as np
 from sm9rrsfl.datasets import load_image_dataset, stratified_training_three_way_split
 from sm9rrsfl.experiments import _array_content_digest
 
@@ -231,7 +233,14 @@ def run_probe(dataset, config, output, until_round, reference, environment=None)
                               or not math.isfinite(float(expected[key]))
                               or abs(float(expected[key]) - float(getattr(latest, key))) > 1e-7)]
             if different:
-                report["prefix_metric_mismatches"].append({"round": round_id, "fields": different})
+                difference = {
+                    "round": round_id, "fields": different,
+                    "values": {key: {"original": expected[key],
+                                     "probe": getattr(latest, key)} for key in different},
+                }
+                if not report["prefix_metric_mismatches"]:
+                    print("FIRST_PREFIX_MISMATCH " + json.dumps(difference), flush=True)
+                report["prefix_metric_mismatches"].append(difference)
         if round_id == until_round - 1:
             with (output / f"checkpoint_round_{round_id:03d}.pickle").open("wb") as handle:
                 pickle.dump(state, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -294,10 +303,10 @@ def main():
     repo = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-output", type=Path, default=repo / "outputs/cifar10_v7_target_fair_tuning")
-    parser.add_argument("--candidate", default="vert-001")
+    parser.add_argument("--candidate", default="sm9rrs-002")
     parser.add_argument("--partition", default="dirichlet")
-    parser.add_argument("--ratio", type=float, default=0.3)
-    parser.add_argument("--seed", type=int, default=401)
+    parser.add_argument("--ratio", type=float, default=0.5)
+    parser.add_argument("--seed", type=int, default=403)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--until-round", type=int, default=25)
     parser.add_argument("--data-dir", type=Path)
@@ -328,11 +337,26 @@ def main():
         parser.error("CUDA is unavailable; no CPU fallback for this reproduction")
     metadata = {"source_fingerprint": manifest["fingerprint"], "candidate_id": args.candidate,
                 "python": sys.version, "torch": torch.__version__, "cuda": torch.version.cuda,
+                "python_executable": sys.executable, "numpy": np.__version__,
+                "cudnn": torch.backends.cudnn.version(),
                 "gpu": torch.cuda.get_device_name(args.device),
-                "cuda_visible_devices": __import__("os").environ.get("CUDA_VISIBLE_DEVICES"),
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+                "execution_settings": {
+                    "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+                    "cudnn_benchmark": torch.backends.cudnn.benchmark,
+                    "cudnn_deterministic": torch.backends.cudnn.deterministic,
+                    "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+                    "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+                    "torch_num_threads": torch.get_num_threads(),
+                    "torch_num_interop_threads": torch.get_num_interop_threads(),
+                    "environment": {key: os.environ.get(key) for key in (
+                        "CUDA_DEVICE_ORDER", "CUBLAS_WORKSPACE_CONFIG",
+                        "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                        "NVIDIA_TF32_OVERRIDE")},
+                },
+                "source_identity_note": "Current probe files only; does not verify the original run's source or environment.",
                 "source_sha256": {str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest()
-                                  for p in (repo / "sm9rrsfl/fl.py", repo / "sm9rrsfl/torch_backend.py",
-                                            repo / "sm9rrsfl/vert.py", Path(__file__).resolve())}}
+                                  for p in sorted((repo / "sm9rrsfl").glob("*.py")) + [Path(__file__).resolve()]}}
     print("PROBE_OUTPUT " + str(output), flush=True)
     report = run_probe(dataset, config, output, args.until_round, reference, environment=metadata)
     print("PROBE_STATUS " + report["status"], flush=True)
