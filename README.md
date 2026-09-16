@@ -224,7 +224,44 @@ python -u -m sm9rrsfl.experiments --dataset synthetic --crypto-mode simulated \
   --compute-backend numpy --jobs 1 --output-dir outputs/normal_state_smoke
 ```
 
-### CIFAR-10 新六方案入口（2026-09-15，v2）
+### CIFAR-10 当前流程：630 组验证、均值最优或接近 VERT（2026-09-16，v3）
+
+当前配置为 `configs/cifar10_six_630_mean_v3.json`，入口为 `run_cifar_six_630.py`；建议通过下面的显示包装启动。它恢复旧版验证规模和 Ours 原策略网格，按用户后续确认的近似门槛和失败候选择优规则，独立输出到 `outputs/cifar10_six_630_near_vert_v3/`，保留所有旧实验。
+
+```bash
+cd /3251901002/SM9RRSFL && \
+git pull --ff-only origin main && \
+env -u CUDA_VISIBLE_DEVICES CUDA_DEVICE_ORDER=PCI_BUS_ID \
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_630_mean_v3.json \
+  --devices auto --progress-mode live
+```
+
+包装根据这份 v3 配置启动新入口，使用全部通过初始化、型号和空闲显存检查的卡，每卡同时一个独立任务；保留动态进度、原始日志、OOM 排除换卡及断点续跑。旧 v2 配置仍启动原入口。不要将新协议写入旧输出目录，也不要为本轮重复执行旧 `prepare_cifar_final_recovery.py`。
+
+验证规模为 **21 候选 × 3 种子 × 2 分区 × 5 比例 = 630 组**，每组 100 轮。种子 401/402/403；IID 与 Dirichlet 都验证恶意比例 0/0.1/0.3/0.5/0.7。Ours、VERT、AlignIns 各 6 候选，其余各 1 个。Ours 恢复原策略的告警阈值 1.25/1.75/2.5 × 撤销阈值 3/5，不启用弱告警隔离变体；公共训练、攻击优化器和基线算法保持原实现。
+
+用户选定的“平均双指标最优或非常接近 VERT”采用以下固定口径：
+
+- 准确率：每个候选 30 组验证任务的第 100 轮准确率等权平均，包含 6 组干净场景。
+- ASR：仅使用 24 组受攻击任务；各任务先对第 25–100 轮 ASR 求均值，再对 24 个任务等权平均。干净场景的 ASR 不计入。
+- 先按原完整性、零非有限更新、误撤销等健康约束筛选；健康的 FedAvg 干净参考可用时仍检查准确率下降不超过 3 个百分点。
+- 健康 Ours 满足任一分支即可推进：①在健康 Ours 候选和五个对照方案选定的可评分候选中，同时达到最高平均准确率、最低平均 ASR；②相对选定 VERT，平均准确率落后不超过 **0.005（0.5 个百分点）**，平均 ASR 高出不超过 **0.01（1 个百分点）**。分支②允许其他方案表现更好；两个差距必须同时满足，不相互补偿。分支①仅用 `1e-12` 数值容差。
+- Ours 优先选择分支①达标者，再考虑分支②达标者；每档采用公共 Score、较低最坏 ASR、候选 ID 的既有同分规则。所有 Ours 候选仍须通过原健康检查，不能用不健康 Ours 的有限成绩放行。
+- **五个对照方案统一选参**：有健康候选时取公共 Score 最高者；无健康候选时，从 30 组完整验证、全部评分指标有效的失败候选中取原公式 `raw_score` 最高者，标记 `best_scored_unqualified`，保留健康失败原因。只有所有候选都无法评分时才使用固定第一候选，标记 `fixed_fallback_unqualified`。按全部验证任务汇总，不能挑单个种子最好的一次。
+- 健康失败的原 `score` 仍为空，`valid` 仍为 false；`raw_score` 只是失败候选之间的观察成绩排名。客户端非有限更新计数、误撤销或权重饥饿等健康失败不会被抹去。缺任务、不满100轮、配置不匹配、NaN/无穷或缺失的评分指标不具备评分资格；不采用哨兵值代替真实指标。
+- **VERT 没有健康候选时，使用最高 `raw_score` 的完整失败候选作为近似参照**；明确记录 `reference_health_qualified=false`。这是与该实现的已观察成绩比较，不能描述成健康基线验证通过。VERT 连可评分候选也没有时，近似分支为未评估；Ours 仍可通过分支①对其余可评分参照的比较推进。完全没有可评分基线时，仅能评估 Ours 候选内部双优，不能宣称六方案双优。
+- 旧 `performance_target` 的逐场景差距、绝对 ASR、峰值 ASR 均保留为描述性报告；新的 `mean_dual_gate` / `near_vert_gate` 记录实际推进分支。缺失指标不会自动视为达到近似目标。
+
+Ours 健康且满足上述任一性能分支后，**全部六方案自动进入 180 组正式实验**：各方法冻结一个候选，IID/Dirichlet、比例 0/0.2/0.4/0.6/0.8、种子 901/902/903，各 30 组。对照方案的健康失败本身不阻断，但已选 VERT 的可评分观察成绩仍用于已确认的近似比较。新种子用于新协议下的重复试验，仍使用同一官方 CIFAR-10 测试集，不代表获得了一个从未查看过的新测试集；论文应保留此前实验历史。正式指标不参与本轮参数选择。
+
+若固定六个 Ours 候选中没有达标者，会停在 `needs_ours_development`（健康未通过）或 `needs_ours_dual_development`（健康通过、两个性能分支均未通过），保存所有候选指标和差距，不自动降低门槛或反复重跑挑结果。630 组扩大筛查覆盖，不能保证一定出现合格候选，也不能保证新正式种子上永不出现 NaN。
+
+OOM、初始化/数据准备失败、损坏缓存和仍待执行的验证任务属于证据不完整，单独返回 `validation_evidence_incomplete`；不能把它们作为基线算法失败而冻结备用参数。已进入正式阶段后，再次执行相同命令会跳过验证训练、核验已有验证与冻结计划并续跑正式任务。已有正式计划不会被新候选静默覆盖。
+
+`validation_summary.json` 中的 `mean_dual_gate` 保存均值、raw Score、参照范围、每个 Ours 的差距、推进分支及最终选择。`final_summary.json` 的方法明细继续保留验证选参来源、失败原因和 `selected_without_valid_validation`；正式训练后来健康也不会抹去失败候选的来源。`final_results/aggregate.csv` 保存正式结果。终端结尾的 `FINAL_EXECUTION_SUMMARY` 分别显示执行是否完成和 Ours 是否健康：`completed_with_health_failures` 表示已有结果中存在健康失败，不能解释为没有进入正式阶段；基线失败不会取消其他正式任务。
+
+### CIFAR-10 旧 84 组验证流程（2026-09-15，v2，保留续跑）
 
 代码更新统一通过 GitHub 同步，在 AI Station 执行 `git pull --ff-only origin main`；不再使用上传代码包的方式。
 

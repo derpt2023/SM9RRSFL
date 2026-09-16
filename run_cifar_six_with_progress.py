@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Display progress while the unchanged six-method runner trains/resumes.
+"""Display progress while the configured six-method runner trains/resumes.
 
-All ordinary options are forwarded to run_cifar_six_from_scratch.py. This file
+The explicit 630-run v3 config selects run_cifar_six_630.py; existing v2 configs
+keep run_cifar_six_from_scratch.py. Ordinary options are forwarded. This file
 is deliberately outside that runner's source fingerprint: changing the display
 must not invalidate existing experiment identities or checkpoints.
 """
@@ -637,13 +638,14 @@ def main(argv=None):
     metadata, _ = view.parse_known_args(forwarded)
     if any(arg == "--worker" or arg.startswith("--worker=") for arg in forwarded):
         parser.error("invoke this wrapper as a parent, not an internal --worker")
-    runner = str(repo / "run_cifar_six_from_scratch.py")
+    spec = read_json(metadata.config)
+    runner = str(repo / ("run_cifar_six_630.py" if spec.get("schema_version") == 3
+                         and "mean_dual_gate" in spec else "run_cifar_six_from_scratch.py"))
     if "--help" in forwarded or "-h" in forwarded:
         parser.print_help()
         return subprocess.call([sys.executable, runner, "--help"])
     try:
         found = discover_gpus(repo)
-        spec = read_json(metadata.config)
         output = metadata.output or repo / spec.get("output_dir", "outputs/cifar10_six_original_v2")
         recorded = read_json(output / "execution_environment.json").get("actual_compute_device")
         chosen, skipped = select_devices(found, metadata.devices, recorded, options.min_free_gpu_memory_mib)

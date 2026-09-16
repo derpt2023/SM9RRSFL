@@ -74,6 +74,22 @@ class ProgressTests(unittest.TestCase):
                 progress.main(["--config", str(spec), "--devices=cuda:1"])
                 self.assertEqual(monitor.call_args.args[1], ["cuda:1"])
 
+    def test_630_config_routes_to_new_runner_and_keeps_live_all_gpu_display(self):
+        repo = Path(progress.__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(progress, "discover_gpus", return_value=[gpu(0), gpu(1)]), \
+                mock.patch.object(progress, "monitor", return_value=0) as monitor, \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            for config, runner in (("cifar10_six_630_mean_v3.json", "run_cifar_six_630.py"),
+                                   ("cifar10_six_original_v2.json", "run_cifar_six_from_scratch.py")):
+                with self.subTest(config=config):
+                    self.assertEqual(progress.main(["--config", str(repo / "configs" / config),
+                        "--output", directory, "--devices", "auto", "--progress-mode", "live"]), 0)
+                    command, devices = monitor.call_args.args
+                    self.assertEqual(Path(command[2]).name, runner)
+                    self.assertEqual(devices, ["cuda:0", "cuda:1"])
+                    self.assertEqual(monitor.call_args.kwargs["mode"], "live")
+
     def test_round_parser_eta_ignores_round_zero_and_resume_prefix(self):
         now = [0.]
         state = progress.Progress(["cuda:0"], now=lambda: now[0], visible="7")

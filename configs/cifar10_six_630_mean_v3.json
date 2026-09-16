@@ -1,0 +1,412 @@
+{
+  "schema_version": 3,
+  "name": "CIFAR-10 630-run validation: healthy Ours mean-best or near VERT, best-score baseline fallback",
+  "dataset": {
+    "name": "cifar10",
+    "data_dir": "data/cifar10",
+    "download": true,
+    "train_samples": 50000,
+    "test_samples": 10000,
+    "split_seed": 20260917,
+    "validation_fraction": 0.05
+  },
+  "shared_parameters": {
+    "detector_subspace_dim": 2,
+    "detector_normal_clusters": 2,
+    "detector_distance_threshold": 1.75,
+    "detector_reject_threshold": 6.0,
+    "detector_drift_memory": 0.8,
+    "detector_drift_allowance": 1.25,
+    "detector_drift_threshold": 6.0,
+    "detector_history_confirm": 2,
+    "detector_history_threshold": 1.0,
+    "detector_recovery_confirm": 2,
+    "detector_reference_budget": 3.5,
+    "detector_clip_factor": 2.0,
+    "detector_weight_cap": 2.0,
+    "suspicion_penalty_factor": 0.5,
+    "suspicion_recovery_factor": 1.25,
+    "suspicion_remove_after": 3,
+    "method": "sm9rrs",
+    "malicious_ratio": 0.1,
+    "num_clients": 100,
+    "rounds": 100,
+    "target_error": 0.12,
+    "local_epochs": 1,
+    "batch_size": 50,
+    "lr": 0.05,
+    "lr_decay": 0.99,
+    "compute_backend": "torch",
+    "device": "cuda:0",
+    "partition": "iid",
+    "dirichlet_alpha": 0.5,
+    "attack": "alternating_minimization",
+    "attack_scale": 5.0,
+    "attack_boost": 5.0,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 1,
+    "attack_distance_weight": 0.0001,
+    "attack_source_label": 5,
+    "attack_target_label": 7,
+    "attack_target_count": 200,
+    "attack_start_round": 25,
+    "detector_window": 20,
+    "crypto_mode": "sm9",
+    "dkg_threshold": 2,
+    "dkg_nodes": 3,
+    "early_stop": false,
+    "eval_interval": 1,
+    "checkpoint_interval": 1,
+    "sm9_workers": 1,
+    "vert_history_window": 10,
+    "vert_projection_dim": 128,
+    "vert_predict_epochs": 5,
+    "vert_predict_lr": 0.001,
+    "vert_top_k": 0,
+    "vert_use_ratio_prior": false,
+    "alignins_sparsity": 0.3,
+    "alignins_tda_radius": 1.0,
+    "alignins_mpsa_radius": 1.0,
+    "seed": 701
+  },
+  "candidates": {
+    "sm9rrs": [
+      {
+        "candidate_id": "sm9rrs-v9-001",
+        "variant": "original",
+        "weak_threshold": 1.25,
+        "parameters": {
+          "detector_distance_threshold": 1.25,
+          "suspicion_remove_after": 3
+        }
+      },
+      {
+        "candidate_id": "sm9rrs-v9-002",
+        "variant": "original",
+        "weak_threshold": 1.25,
+        "parameters": {
+          "detector_distance_threshold": 1.25,
+          "suspicion_remove_after": 5
+        }
+      },
+      {
+        "candidate_id": "sm9rrs-v9-003",
+        "variant": "original",
+        "weak_threshold": 1.25,
+        "parameters": {
+          "detector_distance_threshold": 1.75,
+          "suspicion_remove_after": 3
+        }
+      },
+      {
+        "candidate_id": "sm9rrs-v9-004",
+        "variant": "original",
+        "weak_threshold": 1.25,
+        "parameters": {
+          "detector_distance_threshold": 1.75,
+          "suspicion_remove_after": 5
+        }
+      },
+      {
+        "candidate_id": "sm9rrs-v9-005",
+        "variant": "original",
+        "weak_threshold": 1.25,
+        "parameters": {
+          "detector_distance_threshold": 2.5,
+          "suspicion_remove_after": 3
+        }
+      },
+      {
+        "candidate_id": "sm9rrs-v9-006",
+        "variant": "original",
+        "weak_threshold": 1.25,
+        "parameters": {
+          "detector_distance_threshold": 2.5,
+          "suspicion_remove_after": 5
+        }
+      }
+    ],
+    "vert": [
+      {
+        "candidate_id": "vert-v9-001",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 5,
+          "vert_predict_epochs": 5,
+          "vert_predict_lr": 0.001
+        }
+      },
+      {
+        "candidate_id": "vert-v9-002",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 5,
+          "vert_predict_epochs": 20,
+          "vert_predict_lr": 0.001
+        }
+      },
+      {
+        "candidate_id": "vert-v9-003",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 5,
+          "vert_predict_epochs": 50,
+          "vert_predict_lr": 0.001
+        }
+      },
+      {
+        "candidate_id": "vert-v9-004",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 5,
+          "vert_predict_lr": 0.001
+        }
+      },
+      {
+        "candidate_id": "vert-v9-005",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 20,
+          "vert_predict_lr": 0.001
+        }
+      },
+      {
+        "candidate_id": "vert-v9-006",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 50,
+          "vert_predict_lr": 0.001
+        }
+      }
+    ],
+    "alignins": [
+      {
+        "candidate_id": "alignins-v9-001",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.1,
+          "alignins_tda_radius": 0.5,
+          "alignins_mpsa_radius": 1.0
+        }
+      },
+      {
+        "candidate_id": "alignins-v9-002",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.1,
+          "alignins_tda_radius": 1.0,
+          "alignins_mpsa_radius": 1.0
+        }
+      },
+      {
+        "candidate_id": "alignins-v9-003",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.3,
+          "alignins_tda_radius": 0.5,
+          "alignins_mpsa_radius": 1.0
+        }
+      },
+      {
+        "candidate_id": "alignins-v9-004",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.3,
+          "alignins_tda_radius": 1.0,
+          "alignins_mpsa_radius": 1.0
+        }
+      },
+      {
+        "candidate_id": "alignins-v9-005",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.5,
+          "alignins_tda_radius": 0.5,
+          "alignins_mpsa_radius": 1.0
+        }
+      },
+      {
+        "candidate_id": "alignins-v9-006",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.5,
+          "alignins_tda_radius": 1.0,
+          "alignins_mpsa_radius": 1.0
+        }
+      }
+    ],
+    "krum": [
+      {
+        "candidate_id": "krum-v9-001",
+        "variant": "original",
+        "parameters": {}
+      }
+    ],
+    "ding13": [
+      {
+        "candidate_id": "ding13-v9-001",
+        "variant": "original",
+        "parameters": {}
+      }
+    ],
+    "fedavg": [
+      {
+        "candidate_id": "fedavg-v9-001",
+        "variant": "original",
+        "parameters": {}
+      }
+    ]
+  },
+  "validation": {
+    "seeds": [
+      401,
+      402,
+      403
+    ],
+    "scenarios": [
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.1
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.3
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.5
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.7
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.1
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.3
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.5
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.7
+      }
+    ]
+  },
+  "final": {
+    "seeds": [
+      901,
+      902,
+      903
+    ],
+    "scenarios": [
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.2
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.4
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.6
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.8
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.2
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.4
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.6
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.8
+      }
+    ]
+  },
+  "objective": {
+    "clean_accuracy_weight": 0.25,
+    "robust_accuracy_weight": 0.5,
+    "attack_success_weight": 0.2,
+    "honest_weight_loss_weight": 0.05
+  },
+  "gates": {
+    "max_clean_accuracy_drop": 0.03,
+    "max_nonfinite_updates": 0,
+    "min_round_completion_rate": 1.0,
+    "fedavg_min_attack_mean_asr": 0.5
+  },
+  "performance_target": {
+    "accuracy_gap": 0.005,
+    "asr_gap": 0.01,
+    "max_asr": 0.1,
+    "max_peak_asr": 0.3,
+    "tail_rounds": 10
+  },
+  "numerics": {
+    "mode": "original_runtime",
+    "shared_backtracking": false
+  },
+  "output_dir": "outputs/cifar10_six_630_near_vert_v3",
+  "protocol_note": "Restore the original six-candidate Ours grid and validate 21 candidates across three seeds, both partitions and five ratios (630 runs). Keep original baseline algorithms, training and attack optimizers. An Ours candidate must pass all health checks and either attain both mean metric optima or have mean final accuracy no more than 0.005 below the selected VERT and mean attack-window ASR no more than 0.01 above it. Accuracy averages 30 final-round validation accuracies equally; ASR averages the 24 attacked runs equally after averaging rounds 25 through 100 within each run. Each of the five baselines first selects its highest common-Score healthy candidate. If none is healthy, select the highest raw common-Score candidate whose 30 runs are complete with valid scoring metrics; retain all health-failure reasons and mark best_scored_unqualified. Only if no candidate is scorable use the first predeclared fixed fallback. Unhealthy but scorable VERT supplies observed metrics for the near-VERT branch, with reference health explicitly false. Incomparable missing metrics are never imputed as zero or marked as passing. If VERT is not scorable the near-VERT branch is unassessed; the joint-best branch can still qualify Ours against available observed references. Prefer joint-best Ours, then near-VERT Ours; use the original common Score and tie rules within each group. Individual scenarios may be worse. The original per-scenario performance_target and attack-effectiveness targets remain descriptive. Once Ours qualifies, all six methods start 180 formal runs with frozen parameters, regardless of baseline health. Training holdout only is used to choose parameters. Final seeds 901/902/903 are new repeated trials, still using the same official CIFAR-10 test set; earlier experiment history remains relevant. This policy does not guarantee that an Ours candidate will qualify or that formal results will remain healthy or best.",
+  "promotion": {
+    "required_healthy_methods": [
+      "sm9rrs"
+    ],
+    "performance_target_is_gate": true,
+    "attack_effectiveness_is_gate": false,
+    "missing_clean_reference": "report_unassessed_without_baseline_veto"
+  },
+  "fallback_candidates": {
+    "vert": "vert-v9-001",
+    "alignins": "alignins-v9-001",
+    "krum": "krum-v9-001",
+    "ding13": "ding13-v9-001",
+    "fedavg": "fedavg-v9-001"
+  },
+  "mean_dual_gate": {
+    "accuracy_metric": "mean_final_accuracy_all_validation_runs",
+    "asr_metric": "mean_attack_asr_attacked_validation_runs",
+    "comparison": "scorable_selected_baselines_and_healthy_ours_candidates",
+    "absolute_tolerance": 1e-12,
+    "unavailable_baselines": "report_unassessed_without_veto",
+    "acceptance": "joint_best_or_near_vert",
+    "near_vert_accuracy_gap": 0.005,
+    "near_vert_asr_gap": 0.01,
+    "baseline_selection": "healthy_score_then_complete_score_then_fixed"
+  }
+}
