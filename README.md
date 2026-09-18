@@ -224,7 +224,61 @@ python -u -m sm9rrsfl.experiments --dataset synthetic --crypto-mode simulated \
   --compute-backend numpy --jobs 1 --output-dir outputs/normal_state_smoke
 ```
 
-### CIFAR-10 新实验：扩展候选与 MNIST 逐场景目标（2026-09-18，v4）
+### CIFAR-10 当前推荐：750 组验证，仅增加四套 Ours 候选（2026-09-18）
+
+按“规则不变、小幅增加候选、Ours尽量最优”的要求，新增 `configs/cifar10_six_mnist_gate_compact_plus_v4.json`，在630组紧凑版基础上保留全部21套候选及原顺序，再追加4套Ours；五个基线的候选和固定回退项完全不变。新预算为 **Ours14、VERT4、AlignIns4、Krum/TAD/FedAvg各1，共25套 × 30 = 750组验证 / 75000训练轮**；达标后正式仍180组/18000轮，总上限930组/93000轮。相对630组多120组验证、12000轮（+19.05%），新增全部属于Ours，实际耗时增幅不保证等于任务数增幅。
+
+新增四套完整候选均来自原完整v4空间，不拼接历史赢家的部分参数：
+
+| 新增Ours候选 | 增加理由 | 已知限制 |
+|---|---|---|
+| `sm9rrs-v10-010` | MNIST验证Score第三；与已有012形成不同子空间、惩罚、撤销组合的完整策略对照 | MNIST成绩不能直接当作CIFAR成绩 |
+| `sm9rrs-v10-011` | MNIST验证Score第二；加上010、已有012，覆盖历史验证前三套完整策略 | 必须重新通过本轮完整验证 |
+| `sm9rrs-v10-016` | 相对CIFAR锚点015只把撤销阈值3→5，考察延后撤销的影响 | 旧CIFAR对应004曾有1次非有限更新，虽raw Score与ASR更好，历史仍不健康 |
+| `sm9rrs-v10-039` | 相对015只把可信历史连续确认2→3，考察延后历史准入的影响 | 尚无本轮成绩，不能保证阻止持续低异常攻击 |
+
+**保持原规则：** 公共模型/训练/攻击、数据划分、seed、场景、每组100轮、健康和MNIST性能门槛、Score权重、基线失败回退全部不变。`require_mean_dual_best`仍为false；在达标Ours中优先选验证均值双优，再按原Score等顺序选择，目标未达仍停止。更多候选增加找到好解的机会，不能保证存在合格解或正式结果最佳，不能通过削弱基线、放宽门槛或使用正式成绩选参来保证排名。各方法候选预算仍不相等，需如实披露。
+
+```bash
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_mnist_gate_compact_plus_v4.json --plan-only
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_mnist_gate_compact_plus_v4.json \
+  --devices auto --progress-mode live
+```
+
+生成器为 `cifar_compact_plus_candidates.py`，独立输出 `outputs/cifar10_six_mnist_gate_compact_plus_v4/`。源码/配置保留630紧凑版、2610完整备选及旧实验身份；不向已冻结任务中追加候选。进度、多卡、断点与正式完成后的HTML/均值SVG/PDF继续由原包装入口处理。新配置生成与运行无需历史outputs；历史验证只作开发候选设计依据，不转移为新验证资格。
+
+### CIFAR-10 基础紧凑方案：630 组验证（保留）
+
+为减少 2610 组完整搜索的开销，新增 `configs/cifar10_six_mnist_gate_compact_v4.json`，独立输出 `outputs/cifar10_six_mnist_gate_compact_v4/`。它复用现有 v4 入口和门槛，保留每候选 **3 seed × 10 场景 × 100 轮**，仅把候选压缩为 **Ours 10、VERT 4、AlignIns 4、Krum/TAD/FedAvg 各1**。因此验证为 **630 组 / 63000 训练轮**，Ours 达标后正式仍为 **180 组 / 18000 轮**，合计最多810组/81000轮。相对完整87候选，验证轮次减少 **75.86%**，含正式阶段总轮次减少 **70.97%**。第0轮是初始评估，不额外算一轮训练。
+
+```bash
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_mnist_gate_compact_v4.json --plan-only
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_mnist_gate_compact_v4.json \
+  --devices auto --progress-mode live
+```
+
+完整搜索配置和旧630组v3均原样保留，不混用输出目录。紧凑版生成器为 `cifar_compact_candidates.py`，JSON记录每个候选的 `shortlist_reason`，不依赖本地历史outputs即可在新服务器生成、运行。沿用v4种子、Score、健康/性能门槛、公共训练和攻击设置，不启用新的算法变体；仍自动生成正式汇总HTML与均值SVG/PDF。
+
+**减法依据仅来自历史验证记录与参数覆盖，不采用正式结果筛选，也不把历史Score当作本轮资格。** Ours保留CIFAR健康最高Score锚点、两个低阈值高raw Score但不健康的方向、三个完整MNIST代表策略（含验证最佳），再保留子空间维数、漂移、惩罚和固定锚点预算四个单参数探测。VERT保留CIFAR健康最佳和raw Score最佳，增加低预测学习率的对应配置及MNIST验证最佳；删除成本高的50预测epoch和未测history20扩展。AlignIns保留CIFAR raw Score前二、29/30组独立健康的候选，以及MNIST按当前CIFAR权重重评分最佳，移除新增半径1.5探索。
+
+| 方法 | 保留的完整v4候选ID后缀（方法前缀与 `-v10-` 不变） |
+|---|---|
+| Ours | 015、013、014、002、007、012、023、029、034、041 |
+| VERT | 014、016、015、003 |
+| AlignIns | 008、012、009、001 |
+| Krum / TAD / FedAvg | 各001 |
+
+旧CIFAR验证中，VERT history10/20epochs的30任务共记录10.19任务小时，而50epochs为20.64小时，前者同时有更高最终准确率和更低攻击窗口ASR；这支持优先删去50epochs，不能证明新seed永远如此。两者均未通过整体健康，50epochs的非有限更新更少（2次对4次），所以这是预算取舍，并非所有指标都更差。旧Ours六候选都未满足新绝对目标：最低平均ASR仍约24.48%，且该候选不健康。保留候选是新的开发优先级，不是已经找到低于5% ASR的CIFAR最优解。
+
+轮次数减少不等于耗时同比减少：Ours在旧日志中每30任务约18任务小时，AlignIns约1.36小时。紧凑版比旧v3同为630组但有更多Ours，按历史同类任务粗估约221任务小时，甚至高于旧v3的176.57任务小时；这些含并发、设备与未测参数估计，不能换算成承诺的墙钟工期。降低的是相对2610组扩展方案的预算。
+
+**基线回退的准确触发方式：** 对五种基线分别执行“本方法存在健康候选→最高健康Score；本方法没有健康候选→最高完整可评分raw Score；全部不可评分→固定首候选”。不要求五种一起失败，有健康候选的方法不会被失败候选替代。选择器先计算基线参照，再检查Ours，所以Ours未达时报告也可能出现回退建议；只有状态为 `qualified_for_final` 才冻结和执行180组。Ours未通过时不会因基线回退而启动正式训练。这里基线的健康要求不等同于Ours专属ASR性能目标；VERT完全不可评分时的明确未评估分支等细则，继续遵循下文v4政策。
+
+### CIFAR-10 完整候选备选：2610 组验证与 MNIST 逐场景目标（v4，保留）
 
 新配置为 `configs/cifar10_six_mnist_gate_v4.json`，独立入口 `run_cifar_six_mnist_gate.py`，独立输出 `outputs/cifar10_six_mnist_gate_v4/`。旧 v2/v3 的入口、配置和输出保留供续跑与追溯。用户自行提交、推送 GitHub，再由 AI Station `git pull` 更新；不要用新配置覆盖旧实验目录。
 

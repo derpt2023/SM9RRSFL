@@ -147,6 +147,34 @@ class MnistGateLifecycleTests(unittest.TestCase):
         self.assertFalse((output / "final_plan.json").exists())
         self.assertIn("FINAL_NOT_STARTED", stdout)
 
+    def test_precomputed_baseline_fallback_cannot_start_formal_when_ours_target_fails(self):
+        for method, candidates in self.spec["candidates"].items():
+            for index, candidate in enumerate(candidates):
+                cid = candidate["candidate_id"]
+                ours = method == "sm9rrs"
+                self.groups[cid] = [synthetic_run(run.config,
+                    accuracy=.8 if ours else .79 + .001 * index,
+                    asr=.051 if ours else .05, nonfinite=0 if ours else 1)
+                    for run in self.groups[cid]]
+        output = self.directory / "fallback_with_unmet_ours"
+        code, launched, collected, stdout = self.invoke(output)
+        report = json.loads((output / "validation_summary.json").read_text())
+        self.assertEqual(code, 0)
+        self.assertEqual([phase for phase, _ in launched], ["validation"])
+        self.assertEqual(collected, ["validation"])
+        self.assertEqual(report["status"], "needs_ours_target_development")
+        self.assertTrue(report["ours_health_passed"])
+        self.assertFalse(report["ours_mnist_target_passed"])
+        self.assertEqual(set(report["selected"]), set(runner.ALL_METHODS[1:]))
+        for method in runner.ALL_METHODS[1:]:
+            self.assertEqual(report["selected"][method], self.spec["candidates"][method][-1]["candidate_id"])
+            self.assertEqual(report["methods"][method]["selection_status"], "best_scored_unqualified")
+            self.assertFalse(report["methods"][method]["health_qualified"])
+        self.assertFalse((output / "final_plan.json").exists())
+        self.assertFalse((output / "final_summary.json").exists())
+        self.assertFalse((output / "final_results").exists())
+        self.assertIn("FINAL_NOT_STARTED", stdout)
+
     def test_missing_or_damaged_snapshot_is_not_algorithm_failure_evidence(self):
         for missing_kind in ("pending", "damaged", "absent_status"):
             with self.subTest(missing_kind=missing_kind):

@@ -147,6 +147,24 @@ class MnistTargetGateTests(unittest.TestCase):
         self.assertTrue(target["reference_scorable"])
         self.assertEqual(target["relative_target_status"], "unmet")
 
+    def test_only_one_failed_baseline_uses_fallback_without_changing_healthy_baselines(self):
+        before = self.report()["selected"]
+        for index, candidate in enumerate(self.spec["candidates"]["vert"]):
+            self.change(candidate["candidate_id"], accuracy=.79 + .001 * index,
+                        asr=.05, nonfinite=1)
+        report = self.report()
+        self.assertEqual(report["status"], "qualified_for_final")
+        self.assertTrue(report["ours_mnist_target_passed"])
+        self.assertEqual(report["selected"]["vert"], self.spec["candidates"]["vert"][-1]["candidate_id"])
+        self.assertEqual(report["methods"]["vert"]["selection_status"], "best_scored_unqualified")
+        self.assertFalse(report["methods"]["vert"]["health_qualified"])
+        for method in ("alignins", "krum", "ding13", "fedavg"):
+            self.assertEqual(report["selected"][method], before[method])
+            self.assertEqual(report["methods"][method]["selection_status"], "eligible_score_selection")
+            self.assertTrue(report["methods"][method]["health_qualified"])
+            self.assertFalse(report["methods"][method]["selected_without_valid_validation"])
+        self.assertEqual(report["mnist_target_gate"]["unqualified_reference_methods"], ["vert"])
+
     def test_healthy_baseline_preferred_over_higher_scoring_failure(self):
         for candidate in self.spec["candidates"]["vert"]:
             self.change(candidate["candidate_id"], accuracy=.95, asr=.0, nonfinite=1)
