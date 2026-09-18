@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Display progress while the configured six-method runner trains/resumes.
 
-The explicit 630-run v3 config selects run_cifar_six_630.py; existing v2 configs
+The expanded v4 config selects run_cifar_six_mnist_gate.py; the 630-run v3
+config selects run_cifar_six_630.py; existing v2 configs
 keep run_cifar_six_from_scratch.py. Ordinary options are forwarded. This file
 is deliberately outside that runner's source fingerprint: changing the display
 must not invalidate existing experiment identities or checkpoints.
@@ -17,9 +18,11 @@ from pathlib import Path
 import queue
 import re
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from time import monotonic
 
@@ -611,6 +614,68 @@ def forwarded_phase(arguments, phase):
     return [*result, "--phase", phase]
 
 
+def render_final_report(output, *, training_exit_code=None):
+    """Run CSV/JSON reporting separately from the immutable training identity.
+
+    Imports are lazy so validation, GPU retries and the progress display never
+    depend on plotting libraries. A report failure does not become a training
+    failure or cause another training attempt.
+    """
+    output = Path(output).resolve()
+    retry = shlex.join([sys.executable, str(Path(__file__).resolve()),
+                        "--report-only", "--output", str(output)])
+    status = {
+        "mode": "report_only" if training_exit_code is None else "post_training",
+        "source_output": str(output), "training_exit_code": training_exit_code,
+        "training_result_unchanged": True, "retry_command": retry,
+    }
+    print(f"REPORT_START source={output}", flush=True)
+    try:
+        from experiment_reporting import check_dependencies, generate_report
+        check_dependencies()
+        result = generate_report(output)
+        status.update(status="completed", report=result)
+        print("REPORT_COMPLETED " + json.dumps(result, ensure_ascii=False, default=str), flush=True)
+        succeeded = True
+    except Exception as exc:
+        status.update(status="failed", error_type=type(exc).__name__, error=str(exc))
+        print(f"REPORT_FAILED {type(exc).__name__}: {exc}", flush=True)
+        print("REPORT_NOTE Report generation failed; training results and checkpoints are unchanged. "
+              "No training retry was requested.", flush=True)
+        print(f"REPORT_RETRY {retry}", flush=True)
+        succeeded = False
+    status["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+    # Never make a fresh training output nonempty before its manifest exists.
+    # Existing manifests, plans, CSVs and checkpoints remain read-only here.
+    if output.is_dir() and (output / "manifest.json").is_file():
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output,
+                    prefix=".report-status-", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                json.dump(status, handle, ensure_ascii=False, indent=2, default=str)
+                handle.write("\n")
+            temporary.replace(output / "report_generation_status.json")
+        except OSError as exc:
+            print(f"REPORT_STATUS_WRITE_FAILED {exc}", flush=True)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError as exc:
+                    print(f"REPORT_STATUS_CLEANUP_FAILED {exc}", flush=True)
+    return succeeded
+
+
+def runner_for_spec(repo, spec):
+    """Keep historical entry points stable when a new study is introduced."""
+    if spec.get("schema_version") == 4:
+        return str(repo / "run_cifar_six_mnist_gate.py")
+    if spec.get("schema_version") == 3 and "mean_dual_gate" in spec:
+        return str(repo / "run_cifar_six_630.py")
+    return str(repo / "run_cifar_six_from_scratch.py")
+
+
 def main(argv=None):
     repo = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__, add_help=False, allow_abbrev=False,
@@ -620,6 +685,8 @@ def main(argv=None):
     parser.add_argument("--progress-mode", choices=("auto", "live", "log"), default="auto")
     parser.add_argument("--progress-interval", "--progress-refresh", type=float, default=1.)
     parser.add_argument("--progress-log-interval", type=float, default=15.)
+    parser.add_argument("--report-only", action="store_true",
+                        help="generate HTML and mean figures from completed CSV/JSON results; no CUDA or training")
     parser.add_argument("--min-free-gpu-memory-mib", type=float, default=4096.,
                         help="require this much free GPU memory after CUDA initialization (default: 4096 MiB)")
     options, forwarded = parser.parse_known_args(argv)
@@ -635,18 +702,28 @@ def main(argv=None):
     view.add_argument("--devices", nargs="+", default=["auto"])
     view.add_argument("--config", type=Path, default=repo / "configs/cifar10_six_original_v2.json")
     view.add_argument("--output", type=Path)
+    view.add_argument("--phase", choices=("all", "validation", "final"), default="all")
     metadata, _ = view.parse_known_args(forwarded)
     if any(arg == "--worker" or arg.startswith("--worker=") for arg in forwarded):
         parser.error("invoke this wrapper as a parent, not an internal --worker")
     spec = read_json(metadata.config)
-    runner = str(repo / ("run_cifar_six_630.py" if spec.get("schema_version") == 3
-                         and "mean_dual_gate" in spec else "run_cifar_six_from_scratch.py"))
+    runner = runner_for_spec(repo, spec)
     if "--help" in forwarded or "-h" in forwarded:
         parser.print_help()
+        if options.report_only:
+            return 0
         return subprocess.call([sys.executable, runner, "--help"])
+    if "--plan-only" in forwarded:
+        if options.report_only:
+            parser.error("--plan-only and --report-only are separate read-only actions")
+        return subprocess.call([sys.executable, runner, *forwarded])
+    if options.report_only and metadata.output is None and not spec.get("output_dir"):
+        parser.error("--report-only requires --output or a readable config containing output_dir")
+    output = (metadata.output or repo / spec.get("output_dir", "outputs/cifar10_six_original_v2")).resolve()
+    if options.report_only:
+        return 0 if render_final_report(output) else 1
     try:
         found = discover_gpus(repo)
-        output = metadata.output or repo / spec.get("output_dir", "outputs/cifar10_six_original_v2")
         recorded = read_json(output / "execution_environment.json").get("actual_compute_device")
         chosen, skipped = select_devices(found, metadata.devices, recorded, options.min_free_gpu_memory_mib)
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
@@ -675,6 +752,8 @@ def main(argv=None):
                        log_interval=options.progress_log_interval, mode=options.progress_mode,
                        oom_devices=oom_devices, phase_state=phase_state)
         if code != 75 or not oom_devices:
+            if code == 0 and metadata.phase != "validation" and phase_state.get("phase") == "final":
+                render_final_report(output, training_exit_code=code)
             return code
         if phase_state.get("phase") == "final":
             run_arguments = forwarded_phase(run_arguments, "final")

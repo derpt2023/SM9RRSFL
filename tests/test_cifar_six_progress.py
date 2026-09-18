@@ -80,7 +80,8 @@ class ProgressTests(unittest.TestCase):
                 mock.patch.object(progress, "discover_gpus", return_value=[gpu(0), gpu(1)]), \
                 mock.patch.object(progress, "monitor", return_value=0) as monitor, \
                 mock.patch("sys.stdout", new_callable=io.StringIO):
-            for config, runner in (("cifar10_six_630_mean_v3.json", "run_cifar_six_630.py"),
+            for config, runner in (("cifar10_six_mnist_gate_v4.json", "run_cifar_six_mnist_gate.py"),
+                                   ("cifar10_six_630_mean_v3.json", "run_cifar_six_630.py"),
                                    ("cifar10_six_original_v2.json", "run_cifar_six_from_scratch.py")):
                 with self.subTest(config=config):
                     self.assertEqual(progress.main(["--config", str(repo / "configs" / config),
@@ -89,6 +90,27 @@ class ProgressTests(unittest.TestCase):
                     self.assertEqual(Path(command[2]).name, runner)
                     self.assertEqual(devices, ["cuda:0", "cuda:1"])
                     self.assertEqual(monitor.call_args.kwargs["mode"], "live")
+
+    def test_v4_plan_only_bypasses_gpu_discovery_and_training_monitor(self):
+        repo = Path(progress.__file__).resolve().parent
+        with mock.patch.object(progress, "discover_gpus") as discover, \
+                mock.patch.object(progress, "monitor") as monitor, \
+                mock.patch.object(progress.subprocess, "call", return_value=0) as run:
+            self.assertEqual(progress.main(["--config", str(repo / "configs/cifar10_six_mnist_gate_v4.json"),
+                                            "--plan-only", "--devices", "auto"]), 0)
+        discover.assert_not_called()
+        monitor.assert_not_called()
+        command = run.call_args.args[0]
+        self.assertEqual(Path(command[1]).name, "run_cifar_six_mnist_gate.py")
+        self.assertIn("--plan-only", command)
+
+    def test_plan_only_cannot_mix_with_report_only(self):
+        with mock.patch.object(progress, "discover_gpus") as discover, \
+                mock.patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as stopped:
+                progress.main(["--plan-only", "--report-only"])
+            self.assertEqual(stopped.exception.code, 2)
+        discover.assert_not_called()
 
     def test_round_parser_eta_ignores_round_zero_and_resume_prefix(self):
         now = [0.]
@@ -379,6 +401,166 @@ class ConcurrentOutputTests(unittest.TestCase):
         self.assertEqual(rejected, {"cuda:1"})
         self.assertEqual(phase, {"phase": "final"})
         self.assertIn("sending SIGKILL", out.getvalue())
+
+
+class ReportHookTests(unittest.TestCase):
+    def report_module(self):
+        module = mock.Mock()
+        module.check_dependencies.return_value = None
+        module.generate_report.return_value = {
+            "html_path": "paper_figures/index.html", "pdf_path": "paper_figures/figures.pdf",
+            "run_count": 180, "health_failed_runs": 35,
+        }
+        return module
+
+    def prepare_output(self, directory):
+        output = Path(directory) / "results"
+        output.mkdir()
+        (output / "manifest.json").write_text('{"fingerprint":"unchanged"}')
+        (output / "final_summary.json").write_text(json.dumps({
+            "status": "completed_with_health_failures", "full_execution_completed": True,
+        }))
+        return output
+
+    def test_report_only_uses_explicit_output_without_gpu_or_training(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.prepare_output(directory)
+            module = self.report_module()
+            with mock.patch.dict(sys.modules, {"experiment_reporting": module}), \
+                    mock.patch.object(progress, "discover_gpus", side_effect=AssertionError("no GPU probe")) as probe, \
+                    mock.patch.object(progress, "monitor", side_effect=AssertionError("no training")) as monitor, \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as console:
+                self.assertEqual(progress.main(["--report-only", "--output", str(output)]), 0)
+            probe.assert_not_called()
+            monitor.assert_not_called()
+            module.check_dependencies.assert_called_once_with()
+            module.generate_report.assert_called_once_with(output.resolve())
+            status = json.loads((output / "report_generation_status.json").read_text())
+            self.assertEqual(status["mode"], "report_only")
+            self.assertEqual(status["status"], "completed")
+            self.assertIsNone(status["training_exit_code"])
+            self.assertIn("REPORT_COMPLETED", console.getvalue())
+            self.assertEqual((output / "manifest.json").read_text(), '{"fingerprint":"unchanged"}')
+
+    def test_report_only_resolves_config_output_and_rejects_missing_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.prepare_output(directory)
+            spec = Path(directory) / "config.json"
+            spec.write_text(json.dumps({"output_dir": str(output)}))
+            module = self.report_module()
+            with mock.patch.dict(sys.modules, {"experiment_reporting": module}), \
+                    mock.patch.object(progress, "discover_gpus", side_effect=AssertionError("no GPU probe")), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(progress.main(["--report-only", "--config", str(spec)]), 0)
+                module.generate_report.assert_called_once_with(output.resolve())
+                with mock.patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
+                    progress.main(["--report-only", "--config", str(spec.with_name("missing.json"))])
+                self.assertEqual(error.exception.code, 2)
+
+    def test_automatic_report_keeps_complete_health_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.prepare_output(directory)
+            module = self.report_module()
+            def complete(*args, **kwargs):
+                kwargs["phase_state"]["phase"] = "final"
+                return 0
+            with mock.patch.dict(sys.modules, {"experiment_reporting": module}), \
+                    mock.patch.object(progress, "discover_gpus", return_value=[gpu(0)]), \
+                    mock.patch.object(progress, "monitor", side_effect=complete) as monitor, \
+                    mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(progress.main(["--output", str(output)]), 0)
+            monitor.assert_called_once()
+            module.generate_report.assert_called_once_with(output.resolve())
+            status = json.loads((output / "report_generation_status.json").read_text())
+            self.assertEqual(status["mode"], "post_training")
+            self.assertEqual(status["training_exit_code"], 0)
+            self.assertEqual(status["report"]["health_failed_runs"], 35)
+
+    def test_validation_gate_and_nonzero_exits_do_not_generate_reports(self):
+        cases = [("validation", "validation", 0), ("all", "validation", 0),
+                 ("all", None, 0), ("all", "final", 1), ("all", "final", 75),
+                 ("all", "final", 130), ("all", "final", 143)]
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.prepare_output(directory)  # Deliberately contains old formal metadata.
+            module = self.report_module()
+            for requested, observed, code in cases:
+                with self.subTest(requested=requested, observed=observed, code=code):
+                    def finish(*args, **kwargs):
+                        if observed:
+                            kwargs["phase_state"]["phase"] = observed
+                        return code
+                    with mock.patch.dict(sys.modules, {"experiment_reporting": module}), \
+                            mock.patch.object(progress, "discover_gpus", return_value=[gpu(0)]), \
+                            mock.patch.object(progress, "monitor", side_effect=finish), \
+                            mock.patch("sys.stdout", new_callable=io.StringIO):
+                        self.assertEqual(progress.main(["--output", str(output), "--phase", requested]), code)
+            module.check_dependencies.assert_not_called()
+            module.generate_report.assert_not_called()
+            self.assertFalse((output / "report_generation_status.json").exists())
+
+    def test_failed_automatic_report_preserves_training_success_and_can_be_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.prepare_output(directory)
+            module = self.report_module()
+            module.generate_report.side_effect = ValueError("incomplete three-seed evidence")
+            def complete(*args, **kwargs):
+                kwargs["phase_state"]["phase"] = "final"
+                return 0
+            with mock.patch.dict(sys.modules, {"experiment_reporting": module}), \
+                    mock.patch.object(progress, "discover_gpus", return_value=[gpu(0)]), \
+                    mock.patch.object(progress, "monitor", side_effect=complete) as monitor, \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as console:
+                self.assertEqual(progress.main(["--output", str(output)]), 0)
+            monitor.assert_called_once()
+            status = json.loads((output / "report_generation_status.json").read_text())
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["training_exit_code"], 0)
+            self.assertTrue(status["training_result_unchanged"])
+            self.assertIn("REPORT_FAILED", console.getvalue())
+            self.assertIn("--report-only --output", status["retry_command"])
+            module.generate_report.side_effect = None
+            with mock.patch.dict(sys.modules, {"experiment_reporting": module}), \
+                    mock.patch.object(progress, "discover_gpus", side_effect=AssertionError("no GPU probe")), \
+                    mock.patch.object(progress, "monitor", side_effect=AssertionError("no training")), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(progress.main(["--report-only", "--output", str(output)]), 0)
+            self.assertEqual(json.loads((output / "report_generation_status.json").read_text())["status"], "completed")
+            self.assertEqual((output / "manifest.json").read_text(), '{"fingerprint":"unchanged"}')
+
+    def test_report_only_missing_dependencies_fails_without_creating_training_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "not-yet-created"
+            module = self.report_module()
+            module.check_dependencies.side_effect = ImportError("pip install -r requirements.txt")
+            with mock.patch.dict(sys.modules, {"experiment_reporting": module}), \
+                    mock.patch.object(progress, "discover_gpus", side_effect=AssertionError("no GPU probe")), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as console:
+                self.assertEqual(progress.main(["--report-only", "--output", str(output)]), 1)
+            module.generate_report.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertIn("pip install -r requirements.txt", console.getvalue())
+
+    def test_resource_retry_generates_report_only_after_final_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.prepare_output(directory)
+            module = self.report_module()
+            attempts = []
+            def execute(*args, **kwargs):
+                attempts.append(args[1])
+                kwargs["phase_state"]["phase"] = "final"
+                if len(attempts) == 1:
+                    kwargs["oom_devices"].add("cuda:0")
+                    module.generate_report.assert_not_called()
+                    return 75
+                module.generate_report.assert_not_called()
+                return 0
+            with mock.patch.dict(sys.modules, {"experiment_reporting": module}), \
+                    mock.patch.object(progress, "discover_gpus", return_value=[gpu(0), gpu(1)]), \
+                    mock.patch.object(progress, "monitor", side_effect=execute), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(progress.main(["--output", str(output)]), 0)
+            self.assertEqual(attempts, [["cuda:0", "cuda:1"], ["cuda:1"]])
+            module.generate_report.assert_called_once_with(output.resolve())
 
 
 if __name__ == "__main__":

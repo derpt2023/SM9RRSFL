@@ -224,9 +224,57 @@ python -u -m sm9rrsfl.experiments --dataset synthetic --crypto-mode simulated \
   --compute-backend numpy --jobs 1 --output-dir outputs/normal_state_smoke
 ```
 
-### CIFAR-10 当前流程：630 组验证、均值最优或接近 VERT（2026-09-16，v3）
+### CIFAR-10 新实验：扩展候选与 MNIST 逐场景目标（2026-09-18，v4）
 
-当前配置为 `configs/cifar10_six_630_mean_v3.json`，入口为 `run_cifar_six_630.py`；建议通过下面的显示包装启动。它恢复旧版验证规模和 Ours 原策略网格，按用户后续确认的近似门槛和失败候选择优规则，独立输出到 `outputs/cifar10_six_630_near_vert_v3/`，保留所有旧实验。
+新配置为 `configs/cifar10_six_mnist_gate_v4.json`，独立入口 `run_cifar_six_mnist_gate.py`，独立输出 `outputs/cifar10_six_mnist_gate_v4/`。旧 v2/v3 的入口、配置和输出保留供续跑与追溯。用户自行提交、推送 GitHub，再由 AI Station `git pull` 更新；不要用新配置覆盖旧实验目录。
+
+先安装报告依赖并检查计划（不加载数据、不检查 GPU、不训练、不创建输出目录），再通过包装入口运行：
+
+```bash
+python -m pip install -r requirements.txt
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_mnist_gate_v4.json --plan-only
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_mnist_gate_v4.json \
+  --devices auto --progress-mode live
+```
+
+**为什么扩大候选：** 旧 CIFAR 网格是有界的人工预设筛查空间，Ours 只搜索告警阈值 1.25/1.75/2.5 × 撤销阈值 3/5，共 6 套；它没有覆盖 MNIST 已执行的 12 套完整策略。旧配置也未证明其余固定参数已经最优。因此新实验完整保留两套历史参数空间，增加有明确含义的敏感性探测；所有候选在本轮验证集重新训练、评分，不复用旧研究的 Score 或正式测试成绩。
+
+| 方法 | 候选数 | 新空间 |
+|---|---:|---|
+| Ours | 42 | MNIST 实际 12 套完整策略 + CIFAR v3 的 6 套 + 围绕 CIFAR 锚点的 24 个单参数探测，覆盖子空间维数、正常簇数、告警/强拒绝、漂移、历史准入、恢复、裁剪、权重上限及撤销 |
+| VERT | 24 | 历史窗口 5/7/10/20 × 预测训练轮数 5/20/50 × 预测学习率 0.0005/0.001；投影维数、top-k、比例先验不变 |
+| AlignIns | 18 | 历史 12 套 + 分别单独放宽 TDA 或 MPSA 半径至 1.5 的 6 套，保留稀疏率 0.1/0.3/0.5 |
+| Krum、TAD、FedAvg | 各 1 | 当前实验接口未暴露可搜索的专属参数，保持原算法；重复相同配置不算新候选 |
+
+候选生成器为 `cifar_expanded_candidates.py`，每套参数记录 `origin`。**87 套候选 × 3 seed × 10 场景 = 2610 组验证**，达标后再运行六方案 **180 组正式实验**，最多 2790 组，每组 100 轮。相比旧 630 组验证，任务数约为 4.14 倍；VERT 部分候选训练更重，耗时不能直接按任务数同比估计。各方法搜索预算不等，论文须披露，不能称为等预算调参或穷举全局最优。
+
+**实际推进条件：** Ours 必须健康，并通过以下与 MNIST 相同的性能目标数值和窗口。这里把目标设为新 CIFAR 的推进条件；历史 MNIST 入口曾允许目标未达时退回 nearest-healthy 继续运行，本 v4 不采用该回退。
+
+- 对每个 seed、每个场景分别判断，不用跨场景均值掩盖局部失败。受攻击任务分别检查第 25–100 轮均值、最后 10 轮均值和最终轮；三个窗口的 ASR 均须 ≤ **5%**，整个攻击窗口峰值须 ≤ **20%**。
+- 选定 VERT 可评分时，上述三个窗口分别要求 Ours 准确率落后 ≤ **2 个百分点**、ASR 高出 ≤ **1 个百分点**；干净任务检查最终准确率相对差距。VERT 健康失败但完整可评分时仍参与比较，并记录 `reference_health_qualified=false`。
+- Ours 保留原健康检查（完整轮次、零非有限更新、误撤销等）；健康的 FedAvg 干净对照可用时仍检查干净准确率下降不超过 3 个百分点。缺失的健康对照明确标为未评估，不当作已通过。
+- **对照方案不因健康失败阻断正式阶段：** 有健康候选时选择公共 Score 最高者；无健康候选时，从本轮全部历史候选的 30 组完整、可评分验证记录中选 `raw_score` 最高者，保留 `valid=false`、失败原因和 `best_scored_unqualified`。只有全部不可评分时使用预先声明的第一候选，不凭空生成分数。
+- 如果 VERT 全部无法评分，健康且绝对 ASR 目标达标的 Ours 仍可推进；相对比较为 `unassessed`，完整目标为 `full_target_passed=false`，推进分支明确为 `mnist_absolute_target_without_scorable_vert`。这只适用于已有身份与训练上下文证据的算法数值失败；待执行、损坏缓存、OOM、环境或数据缺失会先返回 `validation_evidence_incomplete`，必须排除原因并续跑，不能归为算法失败。
+- 默认 `promotion.require_mean_dual_best=false`：在上述合格 Ours 中优先选验证均值双优者，否则取合格者的最高公共 Score。可在**创建新实验前**改成 `true`，把均值双优设为附加硬条件；比较范围为健康 Ours 候选及五个对照选定的可评分候选，缺失参照不算被战胜，报告明确比较范围。准确率为全部 30 组最终轮均值，ASR 为 24 组受攻击任务各自攻击窗口均值的等权平均。两项必须同时最优，仅允许 `1e-12` 数值容差；同分按 Score、最坏 ASR、候选 ID 排序。
+
+公共 Score 保持 CIFAR v3 的原公式：`0.25 × clean_accuracy + 0.50 × robust_accuracy + 0.20 × (1 − attack_success_rate) + 0.05 × (1 − honest_weight_loss)`，没有混入 MNIST 的历史学习权重。公共模型、数据划分、训练/攻击优化器、100 客户端、batch 50、预热 K=20、攻击起点 25 和 boost=5 均保持原 CIFAR 协议；改变的是候选参数与选参/推进政策。
+
+验证 seed 为 1001/1002/1003，比例 0/0.1/0.3/0.5/0.7；正式 seed 为 1101/1102/1103，比例 0/0.2/0.4/0.6/0.8；均含 IID/Dirichlet。没有 Ours 达标时停在 `needs_ours_development` 或 `needs_ours_target_development`，不自动放宽目标。达标后冻结六个候选，不继承验证模型权重，全部进入正式阶段。续跑核验源码、配置、数据和冻结计划身份，不根据正式结果重新选参。
+
+`validation_summary.json` 的 `mnist_target_gate` 和 `ours_target` 保存真正生效的逐场景检查、各候选失败原因、参照范围和选择。正式摘要复制到 `validation_mnist_target_gate` / `validation_ours_target`，HTML 同时展示。通过上述包装入口完成正式阶段后，自动生成汇总 HTML、各 seed 图、**12 张均值 SVG/PNG 和 12 页矢量 PDF**；种子从新计划读取。单独补报：
+
+```bash
+python -u run_cifar_six_with_progress.py --report-only \
+  --output outputs/cifar10_six_mnist_gate_v4
+```
+
+直接运行底层 `run_cifar_six_mnist_gate.py` 时只保存 CSV/JSON，完成后可用补报命令。更广的搜索只能提供更多可验证的选择，不能保证 Ours 必定达标或正式测试最优。新 seed 仍使用已有研究历史的同一个官方测试集，不把它声称为从未查看过的测试集。
+
+### CIFAR-10 历史流程：630 组验证、均值最优或接近 VERT（2026-09-16，v3）
+
+上一轮配置为 `configs/cifar10_six_630_mean_v3.json`，入口为 `run_cifar_six_630.py`；继续旧实验时通过下面的显示包装启动。它恢复旧版验证规模和 Ours 原策略网格，按当时确认的近似门槛和失败候选择优规则，独立输出到 `outputs/cifar10_six_630_near_vert_v3/`，保留所有旧实验。
 
 ```bash
 cd /3251901002/SM9RRSFL && \
@@ -260,6 +308,31 @@ Ours 健康且满足上述任一性能分支后，**全部六方案自动进入 
 OOM、初始化/数据准备失败、损坏缓存和仍待执行的验证任务属于证据不完整，单独返回 `validation_evidence_incomplete`；不能把它们作为基线算法失败而冻结备用参数。已进入正式阶段后，再次执行相同命令会跳过验证训练、核验已有验证与冻结计划并续跑正式任务。已有正式计划不会被新候选静默覆盖。
 
 `validation_summary.json` 中的 `mean_dual_gate` 保存均值、raw Score、参照范围、每个 Ours 的差距、推进分支及最终选择。`final_summary.json` 的方法明细继续保留验证选参来源、失败原因和 `selected_without_valid_validation`；正式训练后来健康也不会抹去失败候选的来源。`final_results/aggregate.csv` 保存正式结果。终端结尾的 `FINAL_EXECUTION_SUMMARY` 分别显示执行是否完成和 Ours 是否健康：`completed_with_health_failures` 表示已有结果中存在健康失败，不能解释为没有进入正式阶段；基线失败不会取消其他正式任务。
+
+### 正式实验完成后的 HTML 与均值图（2026-09-18）
+
+通过 `run_cifar_six_with_progress.py` 启动的流程，在本次正式阶段成功结束后自动生成离线报告。包含健康失败但已完整执行的正式结果也会报告，所有失败 seed 保留并明确标注；仅完成验证、任务缺失或轮次不完整时不会伪造完整均值图。安装或更新依赖：
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+已有完整结果可直接补报，不需要 CUDA，不会启动训练或读取模型 pickle：
+
+```bash
+python -u run_cifar_six_with_progress.py --report-only \
+  --output outputs/cifar10_six_630_near_vert_v3
+```
+
+也可运行 `python experiment_reporting.py --output outputs/cifar10_six_630_near_vert_v3`。报告入口为输出目录下的 `final_results/visualizations.html`，同时提供 `visualized.html` 跳转入口及各 `seed_*/visualizations.html`。每个分区生成六类均值图：逐轮 Accuracy、逐轮 ASR、最终与攻击窗口指标、扣除密码时段的耗时、总耗时及进程峰值 RSS；本配置共 12 张。SVG 和 PNG 位于 `final_results/mean_plots/svg/`、`png/`，12 页矢量图册为 `mean_plots/mean_figures.pdf`。HTML 可直接离线打开。
+
+均值按相同方法、分区、恶意比例和轮次跨正式 seed 等权计算，阴影/误差棒为样本标准差（`ddof=1`，不是置信区间）；单 seed 不画标准差。原 `aggregate.csv` 的总体标准差（`ddof=0`）保持原样，新统计另写 `scenario_mean_sd.csv`、`curve_mean_sd.csv`、`per_run.csv`、`health_failures.csv`，来源 SHA-256 和审计说明见 `data_audit.json`。ASR 攻击窗口先在单任务内求均值，不把每轮当作独立重复；0% 的目标误分类率仅是无攻击背景。
+
+绘图配色与原 seed 页面一致。Word 可从文件插入 SVG；LaTeX 使用矢量 PDF，例如 `\includegraphics[page=1,width=\textwidth]{mean_figures.pdf}`，无需截图。计时是并行运行日志，不是受控性能基准；扣除密码时段不等于关闭密码重跑，RSS 不是 GPU 显存。
+
+原 CIFAR v2/v3 底层入口只写 CSV/JSON，没有接入旧 `fair_tuning` 的 HTML 收尾，这是本次缺页面的原因。自动报告挂在不参与训练源码指纹的包装入口；直接调用底层 `run_cifar_six_630.py` / `run_cifar_six_from_scratch.py` 后需执行上述补报命令。没有修改底层训练入口、算法或已冻结的 manifest，所以已有断点仍保持相同源码身份。
+
+报告异常单独输出 `REPORT_FAILED` 和补报命令；包装入口将状态写入 `report_generation_status.json`，不会因此重训或触发 OOM 换卡。更新已在运行的旧包装脚本不会给该进程补上新收尾逻辑；待其训练完成后执行一次 `--report-only` 即可。
 
 ### CIFAR-10 旧 84 组验证流程（2026-09-15，v2，保留续跑）
 
