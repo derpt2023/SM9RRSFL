@@ -669,6 +669,12 @@ def render_final_report(output, *, training_exit_code=None):
 
 def runner_for_spec(repo, spec):
     """Keep historical entry points stable when a new study is introduced."""
+    if spec.get("schema_version") == 7:
+        return str(repo / "run_cifar_six_relative_best.py")
+    if spec.get("schema_version") == 6:
+        return str(repo / "run_cifar_six_relative_asr.py")
+    if spec.get("schema_version") == 5:
+        return str(repo / "run_cifar_six_final_metrics.py")
     if spec.get("schema_version") == 4:
         return str(repo / "run_cifar_six_mnist_gate.py")
     if spec.get("schema_version") == 3 and "mean_dual_gate" in spec:
@@ -716,7 +722,10 @@ def main(argv=None):
     if "--plan-only" in forwarded:
         if options.report_only:
             parser.error("--plan-only and --report-only are separate read-only actions")
-        return subprocess.call([sys.executable, runner, *forwarded])
+        code = subprocess.call([sys.executable, runner, *forwarded])
+        if code == 0 and spec.get("runtime_estimate"):
+            print("RUNTIME_ESTIMATE " + json.dumps(spec["runtime_estimate"], ensure_ascii=False), flush=True)
+        return code
     if options.report_only and metadata.output is None and not spec.get("output_dir"):
         parser.error("--report-only requires --output or a readable config containing output_dir")
     output = (metadata.output or repo / spec.get("output_dir", "outputs/cifar10_six_original_v2")).resolve()

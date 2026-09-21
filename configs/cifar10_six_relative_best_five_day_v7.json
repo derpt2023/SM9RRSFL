@@ -1,0 +1,1181 @@
+{
+  "schema_version": 7,
+  "name": "CIFAR-10 final Accuracy and ASR within two points of selected-method best",
+  "dataset": {
+    "name": "cifar10",
+    "data_dir": "data/cifar10",
+    "download": true,
+    "train_samples": 50000,
+    "test_samples": 10000,
+    "split_seed": 20260917,
+    "validation_fraction": 0.05
+  },
+  "shared_parameters": {
+    "detector_subspace_dim": 2,
+    "detector_normal_clusters": 2,
+    "detector_distance_threshold": 1.75,
+    "detector_reject_threshold": 6.0,
+    "detector_drift_memory": 0.8,
+    "detector_drift_allowance": 1.25,
+    "detector_drift_threshold": 6.0,
+    "detector_history_confirm": 2,
+    "detector_history_threshold": 1.0,
+    "detector_recovery_confirm": 2,
+    "detector_reference_budget": 3.5,
+    "detector_clip_factor": 2.0,
+    "detector_weight_cap": 2.0,
+    "suspicion_penalty_factor": 0.5,
+    "suspicion_recovery_factor": 1.25,
+    "suspicion_remove_after": 3,
+    "method": "sm9rrs",
+    "malicious_ratio": 0.1,
+    "num_clients": 100,
+    "rounds": 100,
+    "target_error": 0.12,
+    "local_epochs": 1,
+    "batch_size": 50,
+    "lr": 0.05,
+    "lr_decay": 0.99,
+    "compute_backend": "torch",
+    "device": "cuda:0",
+    "partition": "iid",
+    "dirichlet_alpha": 0.5,
+    "attack": "alternating_minimization",
+    "attack_scale": 5.0,
+    "attack_boost": 5.0,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 1,
+    "attack_distance_weight": 0.0001,
+    "attack_source_label": 5,
+    "attack_target_label": 7,
+    "attack_target_count": 200,
+    "attack_start_round": 25,
+    "detector_window": 20,
+    "crypto_mode": "sm9",
+    "dkg_threshold": 2,
+    "dkg_nodes": 3,
+    "early_stop": false,
+    "eval_interval": 1,
+    "checkpoint_interval": 1,
+    "sm9_workers": 1,
+    "vert_history_window": 10,
+    "vert_projection_dim": 128,
+    "vert_predict_epochs": 5,
+    "vert_predict_lr": 0.001,
+    "vert_top_k": 0,
+    "vert_use_ratio_prior": false,
+    "alignins_sparsity": 0.3,
+    "alignins_tda_radius": 1.0,
+    "alignins_mpsa_radius": 1.0,
+    "seed": 701
+  },
+  "candidates": {
+    "sm9rrs": [
+      {
+        "candidate_id": "sm9rrs-v10-015",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_v3_historical",
+        "shortlist_reason": "CIFAR v3 highest healthy Score; reference anchor"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-013",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_v3_historical",
+        "shortlist_reason": "CIFAR v3 highest raw Score and lowest mean ASR; historically unhealthy, must requalify"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-014",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "cifar_v3_historical",
+        "shortlist_reason": "CIFAR v3 second raw Score; paired revocation threshold 5 versus 3; historically unhealthy"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-002",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 3.0,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 2.5,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 2.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "mnist_historical_002",
+        "shortlist_reason": "MNIST healthy balanced q=2, warning=3 complete policy"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-007",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 1,
+          "detector_normal_clusters": 1,
+          "detector_distance_threshold": 3.0,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 2.5,
+          "detector_drift_threshold": 4.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 2.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 2.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.75,
+          "suspicion_recovery_factor": 1.1,
+          "suspicion_remove_after": 3
+        },
+        "origin": "mnist_historical_007",
+        "shortlist_reason": "MNIST healthy q=1, one-cluster complete policy"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-012",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 3,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 3.5,
+          "detector_reject_threshold": 7.0,
+          "detector_drift_memory": 0.9,
+          "detector_drift_allowance": 3.0,
+          "detector_drift_threshold": 8.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 2.5,
+          "detector_recovery_confirm": 3,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 3.0,
+          "detector_weight_cap": 2.5,
+          "suspicion_penalty_factor": 0.75,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "mnist_historical_012",
+        "shortlist_reason": "MNIST highest validation Score complete policy, q=3 and warning=3.5"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-023",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 3,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:detector_subspace_dim",
+        "shortlist_reason": "Unmeasured probe: change only anchor subspace rank from 2 to 3"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-029",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 4.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:detector_drift_threshold",
+        "shortlist_reason": "Unmeasured probe: change only drift threshold from 6 to 4"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-034",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.75,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:suspicion_penalty_factor",
+        "shortlist_reason": "Unmeasured probe: change only reliability penalty factor from .5 to .75"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-041",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 2.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:detector_reference_budget",
+        "shortlist_reason": "Unmeasured probe: change only reference budget from 3.5 to 2.5"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-010",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 1,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 3.5,
+          "detector_reject_threshold": 7.0,
+          "detector_drift_memory": 0.9,
+          "detector_drift_allowance": 3.0,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 2.5,
+          "detector_recovery_confirm": 3,
+          "detector_reference_budget": 2.5,
+          "detector_clip_factor": 3.0,
+          "detector_weight_cap": 2.5,
+          "suspicion_penalty_factor": 0.25,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "mnist_historical_010",
+        "shortlist_reason": "MNIST validation third-ranked complete healthy policy; complement the retained top policy, without assuming CIFAR transfer"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-011",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 3.5,
+          "detector_reject_threshold": 7.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 3.0,
+          "detector_drift_threshold": 8.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 2.5,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.0,
+          "detector_clip_factor": 3.0,
+          "detector_weight_cap": 2.5,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.1,
+          "suspicion_remove_after": 1
+        },
+        "origin": "mnist_historical_011",
+        "shortlist_reason": "MNIST validation second-ranked complete healthy policy; together with 010 and retained 012 covers the historical top three"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-016",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "cifar_v3_historical",
+        "shortlist_reason": "CIFAR v3 004: change only anchor revocation threshold 3 to 5; better observed raw Score/ASR but one nonfinite update, so must requalify"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-039",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:detector_history_confirm",
+        "shortlist_reason": "Unmeasured probe: change only trusted-history confirmation 2 to 3; delay admission without claiming it prevents persistent attacks"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-101",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "A: accumulate small persistent deviations"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-102",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "B: stricter trusted-history admission"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-103",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "C: A plus B"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-104",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.1,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "D: C plus warning 1.10"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-105",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.1,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.75,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "D with allowance .75"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-106",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.1,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.95,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "D with allowance .95"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-107",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.1,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 0.75,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "D with drift threshold .75"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-108",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.1,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.5,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "D with drift threshold 1.5"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-109",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.2,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "C with warning 1.20"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-110",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.9,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "C with history threshold .90"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-111",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.7,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "C with history threshold .70"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-112",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 4,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "C with four history confirmations"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-113",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.1,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.9,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "D with longer drift memory"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-114",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.1,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 0.85,
+          "detector_drift_threshold": 1.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 0.8,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 7
+        },
+        "origin": "014_focused_development_20260921",
+        "shortlist_reason": "D with slower permanent revocation"
+      }
+    ],
+    "vert": [
+      {
+        "candidate_id": "vert-v10-014",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 5,
+          "vert_predict_lr": 0.001,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "historical_union_and_window_epoch_extension",
+        "shortlist_reason": "CIFAR v3 highest healthy Score: history=10, epochs=5, lr=.001"
+      },
+      {
+        "candidate_id": "vert-v10-016",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 20,
+          "vert_predict_lr": 0.001,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "historical_union_and_window_epoch_extension",
+        "shortlist_reason": "CIFAR v3 highest raw Score: history=10, epochs=20, lr=.001; historically unhealthy"
+      },
+      {
+        "candidate_id": "vert-v10-015",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 20,
+          "vert_predict_lr": 0.0005,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "historical_union_and_window_epoch_extension",
+        "shortlist_reason": "Unmeasured lower-lr counterpart of the preceding candidate"
+      },
+      {
+        "candidate_id": "vert-v10-003",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 5,
+          "vert_predict_epochs": 20,
+          "vert_predict_lr": 0.0005,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "historical_union_and_window_epoch_extension",
+        "shortlist_reason": "MNIST highest validation Score: history=5, epochs=20, lr=.0005"
+      },
+      {
+        "candidate_id": "vert-v10-101",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 7,
+          "vert_predict_epochs": 20,
+          "vert_predict_lr": 0.0005,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "015_neighborhood_20260921",
+        "shortlist_reason": "Lower-cost history/epoch interpolation; unchanged VERT algorithm"
+      },
+      {
+        "candidate_id": "vert-v10-102",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 10,
+          "vert_predict_lr": 0.0005,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "015_neighborhood_20260921",
+        "shortlist_reason": "Lower-cost history/epoch interpolation; unchanged VERT algorithm"
+      }
+    ],
+    "alignins": [
+      {
+        "candidate_id": "alignins-v10-008",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.1,
+          "alignins_tda_radius": 1.0,
+          "alignins_mpsa_radius": 1.0
+        },
+        "origin": "mnist_historical_including_cifar_v3",
+        "shortlist_reason": "CIFAR v3 highest raw Score; historically unhealthy"
+      },
+      {
+        "candidate_id": "alignins-v10-012",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.5,
+          "alignins_tda_radius": 1.0,
+          "alignins_mpsa_radius": 1.0
+        },
+        "origin": "mnist_historical_including_cifar_v3",
+        "shortlist_reason": "CIFAR v3 second raw Score, higher sparsity and fewer nonfinite updates"
+      },
+      {
+        "candidate_id": "alignins-v10-009",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.3,
+          "alignins_tda_radius": 0.5,
+          "alignins_mpsa_radius": 1.0
+        },
+        "origin": "mnist_historical_including_cifar_v3",
+        "shortlist_reason": "CIFAR v3 29 of 30 healthy runs; retain a near-healthy middle-sparsity policy"
+      },
+      {
+        "candidate_id": "alignins-v10-001",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.1,
+          "alignins_tda_radius": 0.5,
+          "alignins_mpsa_radius": 0.5
+        },
+        "origin": "mnist_historical_including_cifar_v3",
+        "shortlist_reason": "MNIST validation observations rank first under the current CIFAR Score weights"
+      },
+      {
+        "candidate_id": "alignins-v10-101",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.1,
+          "alignins_tda_radius": 0.75,
+          "alignins_mpsa_radius": 0.75
+        },
+        "origin": "radius_interpolation_20260921",
+        "shortlist_reason": "Intermediate existing radius controls; unchanged AlignIns algorithm"
+      },
+      {
+        "candidate_id": "alignins-v10-102",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.3,
+          "alignins_tda_radius": 0.75,
+          "alignins_mpsa_radius": 0.75
+        },
+        "origin": "radius_interpolation_20260921",
+        "shortlist_reason": "Intermediate existing radius controls; unchanged AlignIns algorithm"
+      }
+    ],
+    "krum": [
+      {
+        "candidate_id": "krum-v10-001",
+        "variant": "original",
+        "parameters": {},
+        "origin": "fixed_original_method_no_exposed_defense_hyperparameters",
+        "shortlist_reason": "Fixed original method; no exposed method-specific search parameter"
+      }
+    ],
+    "ding13": [
+      {
+        "candidate_id": "ding13-v10-001",
+        "variant": "original",
+        "parameters": {},
+        "origin": "fixed_original_method_no_exposed_defense_hyperparameters",
+        "shortlist_reason": "Fixed original method; no exposed method-specific search parameter"
+      }
+    ],
+    "fedavg": [
+      {
+        "candidate_id": "fedavg-v10-001",
+        "variant": "original",
+        "parameters": {},
+        "origin": "fixed_original_method_no_exposed_defense_hyperparameters",
+        "shortlist_reason": "Fixed original method; no exposed method-specific search parameter"
+      }
+    ]
+  },
+  "validation": {
+    "seeds": [
+      1001,
+      1002,
+      1003
+    ],
+    "scenarios": [
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.1
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.3
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.5
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.7
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.1
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.3
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.5
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.7
+      }
+    ]
+  },
+  "final": {
+    "seeds": [
+      1101,
+      1102,
+      1103
+    ],
+    "scenarios": [
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.2
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.4
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.6
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.8
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.2
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.4
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.6
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.8
+      }
+    ]
+  },
+  "objective": {
+    "clean_accuracy_weight": 0.25,
+    "robust_accuracy_weight": 0.5,
+    "attack_success_weight": 0.2,
+    "honest_weight_loss_weight": 0.05
+  },
+  "gates": {
+    "max_clean_accuracy_drop": 0.03,
+    "max_nonfinite_updates": 0,
+    "min_round_completion_rate": 1.0,
+    "fedavg_min_attack_mean_asr": 0.5
+  },
+  "performance_target": {
+    "accuracy_gap": 0.02,
+    "asr_gap": 0.02,
+    "tail_rounds": 10
+  },
+  "numerics": {
+    "mode": "original_runtime",
+    "shared_backtracking": false
+  },
+  "output_dir": "outputs/cifar10_six_relative_best_five_day_v7",
+  "protocol_note": "Freeze the same 43 candidates before 1290 validation tasks; run 180 formal tasks only if a healthy Ours qualifies. Each task uses round 100: best available fixed-selected method Accuracy minus Ours <= .02; each attacked task additionally requires Ours ASR minus the available fixed-selected minimum <= .02. The two best references may be different methods; equality passes. Clean ASR remains diagnostic only. Keep health, final Score, baseline fallback, mean-dual preference, candidates, shared parameters and seeds. Incomplete baseline comparisons remain explicitly incomplete without a separate veto. No wall-time cutoff. Keep round checkpoints, resume and automatic HTML/SVG/PDF via the progress wrapper. Runtime estimate is conditional, and validation qualification does not guarantee formal superiority.",
+  "promotion": {
+    "required_healthy_methods": [
+      "sm9rrs"
+    ],
+    "performance_target_is_gate": true,
+    "attack_effectiveness_is_gate": false,
+    "missing_clean_reference": "report_unassessed_without_baseline_veto",
+    "require_mean_dual_best": false
+  },
+  "fallback_candidates": {
+    "vert": "vert-v10-014",
+    "alignins": "alignins-v10-008",
+    "krum": "krum-v10-001",
+    "ding13": "ding13-v10-001",
+    "fedavg": "fedavg-v10-001"
+  },
+  "search_design": {
+    "parent_configuration": "configs/cifar10_six_relative_asr_five_day_v6.json",
+    "all_parent_candidates_preserved": true,
+    "baseline_candidates_unchanged": false,
+    "old_candidates_and_order_preserved": true,
+    "new_candidates": {
+      "sm9rrs": [
+        "sm9rrs-v10-101",
+        "sm9rrs-v10-102",
+        "sm9rrs-v10-103",
+        "sm9rrs-v10-104",
+        "sm9rrs-v10-105",
+        "sm9rrs-v10-106",
+        "sm9rrs-v10-107",
+        "sm9rrs-v10-108",
+        "sm9rrs-v10-109",
+        "sm9rrs-v10-110",
+        "sm9rrs-v10-111",
+        "sm9rrs-v10-112",
+        "sm9rrs-v10-113",
+        "sm9rrs-v10-114"
+      ],
+      "vert": [
+        "vert-v10-101",
+        "vert-v10-102"
+      ],
+      "alignins": [
+        "alignins-v10-101",
+        "alignins-v10-102"
+      ],
+      "krum": [],
+      "ding13": [],
+      "fedavg": []
+    },
+    "selection_and_promotion_rules_unchanged": false,
+    "historical_validation_used_for_search_design": true,
+    "historical_scores_reused_for_new_qualification": false,
+    "formal_results_used_for_selection": false,
+    "validation_evidence": "outputs/cifar10_six_mnist_gate_compact_plus_v4; development evidence only, not cached qualification",
+    "unequal_search_budget": "28 Ours / 6 VERT / 6 AlignIns / 1 Krum / 1 TAD / 1 FedAvg; not equal tuning compute or an exhaustive optimum",
+    "fixed_method_reason": "Krum, TAD and FedAvg expose no method-specific tuning controls; no duplicate configurations added",
+    "no_performance_guarantee": "Neither qualification nor best formal performance is guaranteed. Reused validation seeds are development data, not independent confirmation.",
+    "performance_gate_change": "final Accuracy gap to maximum <= .02; final ASR gap to minimum <= .02; equality passes",
+    "candidates_unchanged_from_parent": true
+  },
+  "run_budget": {
+    "candidate_counts": {
+      "sm9rrs": 28,
+      "vert": 6,
+      "alignins": 6,
+      "krum": 1,
+      "ding13": 1,
+      "fedavg": 1
+    },
+    "total_candidates": 43,
+    "validation_runs_per_candidate": 30,
+    "validation_runs": 1290,
+    "formal_runs_if_ours_qualifies": 180,
+    "maximum_total_runs": 1470
+  },
+  "selection_metrics": {
+    "accuracy": "final_round",
+    "asr": "final_round",
+    "round": 100,
+    "performance_gate": "final_round_only",
+    "process_metrics": "diagnostic_only",
+    "replicate_summary": "equal_mean_of_final_values",
+    "honest_weight_loss": "unchanged_time_and_scenario_mean"
+  },
+  "asr_target": {
+    "mode": "within_selected_six_method_minimum",
+    "max_gap": 0.02,
+    "comparison": "less_than_or_equal",
+    "scope": "each_attacked_task_final_round",
+    "reference_candidates": "fixed_by_validation_score_or_declared_fallback",
+    "include_ours": true,
+    "include_scorable_health_failures": true,
+    "missing_baselines": "compare_available_and_mark_incomplete",
+    "absolute_cap": null,
+    "boundary_arithmetic": "recover_discrete_sample_rates_then_exact_rational_comparison"
+  },
+  "runtime_estimate": {
+    "reference": "configs/cifar10_five_day_timing_reference.json",
+    "historical_validation_wall_hours": 43.28097445666687,
+    "reference_gpu_lanes": 7,
+    "gpu_name": "NVIDIA GeForce RTX 4090 D",
+    "new_candidate_seconds_by_method": {
+      "sm9rrs": 2432.819128117959,
+      "vert": 1438.7833340277275,
+      "alignins": 157.96131451278924,
+      "krum": 152.89097692159314,
+      "ding13": 122.35241454467177,
+      "fedavg": 155.56162328558665
+    },
+    "observed_overhead_factor": 1.0036973426058582,
+    "validation_hours": 87.79857865820206,
+    "formal_reserve_hours": 5.3295955987864865,
+    "training_hours": 93.12817425698854,
+    "slowdown_allowance_fraction": 0.2,
+    "setup_and_report_reserve_hours": 1.0,
+    "planned_total_hours_with_margin": 112.75380910838625,
+    "limitation": "Observational estimate, not a completion guarantee; assumes matching hardware, seven available lanes, CPU/SM9 throughput and no extra contention. No formal performance informs the search."
+  },
+  "accuracy_target": {
+    "mode": "within_selected_six_method_maximum",
+    "max_gap": 0.02,
+    "comparison": "less_than_or_equal",
+    "scope": "each_task_final_round",
+    "reference_candidates": "fixed_by_validation_score_or_declared_fallback",
+    "include_ours": true,
+    "include_scorable_health_failures": true,
+    "missing_baselines": "compare_available_and_mark_incomplete",
+    "absolute_cap": null,
+    "boundary_arithmetic": "recover_discrete_sample_rates_then_exact_rational_comparison"
+  }
+}

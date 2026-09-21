@@ -1,0 +1,749 @@
+{
+  "schema_version": 5,
+  "name": "CIFAR-10 final-round Accuracy and ASR selection",
+  "dataset": {
+    "name": "cifar10",
+    "data_dir": "data/cifar10",
+    "download": true,
+    "train_samples": 50000,
+    "test_samples": 10000,
+    "split_seed": 20260917,
+    "validation_fraction": 0.05
+  },
+  "shared_parameters": {
+    "detector_subspace_dim": 2,
+    "detector_normal_clusters": 2,
+    "detector_distance_threshold": 1.75,
+    "detector_reject_threshold": 6.0,
+    "detector_drift_memory": 0.8,
+    "detector_drift_allowance": 1.25,
+    "detector_drift_threshold": 6.0,
+    "detector_history_confirm": 2,
+    "detector_history_threshold": 1.0,
+    "detector_recovery_confirm": 2,
+    "detector_reference_budget": 3.5,
+    "detector_clip_factor": 2.0,
+    "detector_weight_cap": 2.0,
+    "suspicion_penalty_factor": 0.5,
+    "suspicion_recovery_factor": 1.25,
+    "suspicion_remove_after": 3,
+    "method": "sm9rrs",
+    "malicious_ratio": 0.1,
+    "num_clients": 100,
+    "rounds": 100,
+    "target_error": 0.12,
+    "local_epochs": 1,
+    "batch_size": 50,
+    "lr": 0.05,
+    "lr_decay": 0.99,
+    "compute_backend": "torch",
+    "device": "cuda:0",
+    "partition": "iid",
+    "dirichlet_alpha": 0.5,
+    "attack": "alternating_minimization",
+    "attack_scale": 5.0,
+    "attack_boost": 5.0,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 1,
+    "attack_distance_weight": 0.0001,
+    "attack_source_label": 5,
+    "attack_target_label": 7,
+    "attack_target_count": 200,
+    "attack_start_round": 25,
+    "detector_window": 20,
+    "crypto_mode": "sm9",
+    "dkg_threshold": 2,
+    "dkg_nodes": 3,
+    "early_stop": false,
+    "eval_interval": 1,
+    "checkpoint_interval": 1,
+    "sm9_workers": 1,
+    "vert_history_window": 10,
+    "vert_projection_dim": 128,
+    "vert_predict_epochs": 5,
+    "vert_predict_lr": 0.001,
+    "vert_top_k": 0,
+    "vert_use_ratio_prior": false,
+    "alignins_sparsity": 0.3,
+    "alignins_tda_radius": 1.0,
+    "alignins_mpsa_radius": 1.0,
+    "seed": 701
+  },
+  "candidates": {
+    "sm9rrs": [
+      {
+        "candidate_id": "sm9rrs-v10-015",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_v3_historical",
+        "shortlist_reason": "CIFAR v3 highest healthy Score; reference anchor"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-013",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_v3_historical",
+        "shortlist_reason": "CIFAR v3 highest raw Score and lowest mean ASR; historically unhealthy, must requalify"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-014",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.25,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "cifar_v3_historical",
+        "shortlist_reason": "CIFAR v3 second raw Score; paired revocation threshold 5 versus 3; historically unhealthy"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-002",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 3.0,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 2.5,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 2.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "mnist_historical_002",
+        "shortlist_reason": "MNIST healthy balanced q=2, warning=3 complete policy"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-007",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 1,
+          "detector_normal_clusters": 1,
+          "detector_distance_threshold": 3.0,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 2.5,
+          "detector_drift_threshold": 4.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 2.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 2.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.75,
+          "suspicion_recovery_factor": 1.1,
+          "suspicion_remove_after": 3
+        },
+        "origin": "mnist_historical_007",
+        "shortlist_reason": "MNIST healthy q=1, one-cluster complete policy"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-012",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 3,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 3.5,
+          "detector_reject_threshold": 7.0,
+          "detector_drift_memory": 0.9,
+          "detector_drift_allowance": 3.0,
+          "detector_drift_threshold": 8.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 2.5,
+          "detector_recovery_confirm": 3,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 3.0,
+          "detector_weight_cap": 2.5,
+          "suspicion_penalty_factor": 0.75,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "mnist_historical_012",
+        "shortlist_reason": "MNIST highest validation Score complete policy, q=3 and warning=3.5"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-023",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 3,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:detector_subspace_dim",
+        "shortlist_reason": "Unmeasured probe: change only anchor subspace rank from 2 to 3"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-029",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 4.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:detector_drift_threshold",
+        "shortlist_reason": "Unmeasured probe: change only drift threshold from 6 to 4"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-034",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.75,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:suspicion_penalty_factor",
+        "shortlist_reason": "Unmeasured probe: change only reliability penalty factor from .5 to .75"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-041",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 2.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:detector_reference_budget",
+        "shortlist_reason": "Unmeasured probe: change only reference budget from 3.5 to 2.5"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-010",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 1,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 3.5,
+          "detector_reject_threshold": 7.0,
+          "detector_drift_memory": 0.9,
+          "detector_drift_allowance": 3.0,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 2.5,
+          "detector_recovery_confirm": 3,
+          "detector_reference_budget": 2.5,
+          "detector_clip_factor": 3.0,
+          "detector_weight_cap": 2.5,
+          "suspicion_penalty_factor": 0.25,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "mnist_historical_010",
+        "shortlist_reason": "MNIST validation third-ranked complete healthy policy; complement the retained top policy, without assuming CIFAR transfer"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-011",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 3.5,
+          "detector_reject_threshold": 7.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 3.0,
+          "detector_drift_threshold": 8.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 2.5,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.0,
+          "detector_clip_factor": 3.0,
+          "detector_weight_cap": 2.5,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.1,
+          "suspicion_remove_after": 1
+        },
+        "origin": "mnist_historical_011",
+        "shortlist_reason": "MNIST validation second-ranked complete healthy policy; together with 010 and retained 012 covers the historical top three"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-016",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 2,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 5
+        },
+        "origin": "cifar_v3_historical",
+        "shortlist_reason": "CIFAR v3 004: change only anchor revocation threshold 3 to 5; better observed raw Score/ASR but one nonfinite update, so must requalify"
+      },
+      {
+        "candidate_id": "sm9rrs-v10-039",
+        "variant": "original",
+        "parameters": {
+          "detector_subspace_dim": 2,
+          "detector_normal_clusters": 2,
+          "detector_distance_threshold": 1.75,
+          "detector_reject_threshold": 6.0,
+          "detector_drift_memory": 0.8,
+          "detector_drift_allowance": 1.25,
+          "detector_drift_threshold": 6.0,
+          "detector_history_confirm": 3,
+          "detector_history_threshold": 1.0,
+          "detector_recovery_confirm": 2,
+          "detector_reference_budget": 3.5,
+          "detector_clip_factor": 2.0,
+          "detector_weight_cap": 2.0,
+          "suspicion_penalty_factor": 0.5,
+          "suspicion_recovery_factor": 1.25,
+          "suspicion_remove_after": 3
+        },
+        "origin": "cifar_anchor_one_factor:detector_history_confirm",
+        "shortlist_reason": "Unmeasured probe: change only trusted-history confirmation 2 to 3; delay admission without claiming it prevents persistent attacks"
+      }
+    ],
+    "vert": [
+      {
+        "candidate_id": "vert-v10-014",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 5,
+          "vert_predict_lr": 0.001,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "historical_union_and_window_epoch_extension",
+        "shortlist_reason": "CIFAR v3 highest healthy Score: history=10, epochs=5, lr=.001"
+      },
+      {
+        "candidate_id": "vert-v10-016",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 20,
+          "vert_predict_lr": 0.001,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "historical_union_and_window_epoch_extension",
+        "shortlist_reason": "CIFAR v3 highest raw Score: history=10, epochs=20, lr=.001; historically unhealthy"
+      },
+      {
+        "candidate_id": "vert-v10-015",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 10,
+          "vert_predict_epochs": 20,
+          "vert_predict_lr": 0.0005,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "historical_union_and_window_epoch_extension",
+        "shortlist_reason": "Unmeasured lower-lr counterpart of the preceding candidate"
+      },
+      {
+        "candidate_id": "vert-v10-003",
+        "variant": "original",
+        "parameters": {
+          "vert_history_window": 5,
+          "vert_predict_epochs": 20,
+          "vert_predict_lr": 0.0005,
+          "vert_projection_dim": 128,
+          "vert_top_k": 0,
+          "vert_use_ratio_prior": false
+        },
+        "origin": "historical_union_and_window_epoch_extension",
+        "shortlist_reason": "MNIST highest validation Score: history=5, epochs=20, lr=.0005"
+      }
+    ],
+    "alignins": [
+      {
+        "candidate_id": "alignins-v10-008",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.1,
+          "alignins_tda_radius": 1.0,
+          "alignins_mpsa_radius": 1.0
+        },
+        "origin": "mnist_historical_including_cifar_v3",
+        "shortlist_reason": "CIFAR v3 highest raw Score; historically unhealthy"
+      },
+      {
+        "candidate_id": "alignins-v10-012",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.5,
+          "alignins_tda_radius": 1.0,
+          "alignins_mpsa_radius": 1.0
+        },
+        "origin": "mnist_historical_including_cifar_v3",
+        "shortlist_reason": "CIFAR v3 second raw Score, higher sparsity and fewer nonfinite updates"
+      },
+      {
+        "candidate_id": "alignins-v10-009",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.3,
+          "alignins_tda_radius": 0.5,
+          "alignins_mpsa_radius": 1.0
+        },
+        "origin": "mnist_historical_including_cifar_v3",
+        "shortlist_reason": "CIFAR v3 29 of 30 healthy runs; retain a near-healthy middle-sparsity policy"
+      },
+      {
+        "candidate_id": "alignins-v10-001",
+        "variant": "original",
+        "parameters": {
+          "alignins_sparsity": 0.1,
+          "alignins_tda_radius": 0.5,
+          "alignins_mpsa_radius": 0.5
+        },
+        "origin": "mnist_historical_including_cifar_v3",
+        "shortlist_reason": "MNIST validation observations rank first under the current CIFAR Score weights"
+      }
+    ],
+    "krum": [
+      {
+        "candidate_id": "krum-v10-001",
+        "variant": "original",
+        "parameters": {},
+        "origin": "fixed_original_method_no_exposed_defense_hyperparameters",
+        "shortlist_reason": "Fixed original method; no exposed method-specific search parameter"
+      }
+    ],
+    "ding13": [
+      {
+        "candidate_id": "ding13-v10-001",
+        "variant": "original",
+        "parameters": {},
+        "origin": "fixed_original_method_no_exposed_defense_hyperparameters",
+        "shortlist_reason": "Fixed original method; no exposed method-specific search parameter"
+      }
+    ],
+    "fedavg": [
+      {
+        "candidate_id": "fedavg-v10-001",
+        "variant": "original",
+        "parameters": {},
+        "origin": "fixed_original_method_no_exposed_defense_hyperparameters",
+        "shortlist_reason": "Fixed original method; no exposed method-specific search parameter"
+      }
+    ]
+  },
+  "validation": {
+    "seeds": [
+      1001,
+      1002,
+      1003
+    ],
+    "scenarios": [
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.1
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.3
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.5
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.7
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.1
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.3
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.5
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.7
+      }
+    ]
+  },
+  "final": {
+    "seeds": [
+      1101,
+      1102,
+      1103
+    ],
+    "scenarios": [
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.2
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.4
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.6
+      },
+      {
+        "partition": "iid",
+        "malicious_ratio": 0.8
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.0
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.2
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.4
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.6
+      },
+      {
+        "partition": "dirichlet",
+        "malicious_ratio": 0.8
+      }
+    ]
+  },
+  "objective": {
+    "clean_accuracy_weight": 0.25,
+    "robust_accuracy_weight": 0.5,
+    "attack_success_weight": 0.2,
+    "honest_weight_loss_weight": 0.05
+  },
+  "gates": {
+    "max_clean_accuracy_drop": 0.03,
+    "max_nonfinite_updates": 0,
+    "min_round_completion_rate": 1.0,
+    "fedavg_min_attack_mean_asr": 0.5
+  },
+  "performance_target": {
+    "accuracy_gap": 0.02,
+    "asr_gap": 0.01,
+    "max_asr": 0.05,
+    "max_peak_asr": 0.2,
+    "tail_rounds": 10
+  },
+  "numerics": {
+    "mode": "original_runtime",
+    "shared_backtracking": false
+  },
+  "output_dir": "outputs/cifar10_six_final_metrics_v5",
+  "protocol_note": "Final-round protocol authorized on 2026-09-21: Score Accuracy/ASR terms, ASR tie-breaking, dual preference and per-scenario performance gates use round 100 only. Cross-seed summaries still aggregate final values. Attack-window, tail and peak metrics are diagnostic only; max_peak_asr and tail_rounds remain diagnostic settings. Full-run integrity and health, objective weights, candidates, training, attacks and baseline fallback stay unchanged. New output identity; never relabel historical validation as prospective evidence or overwrite its selection. Read-only post-hoc reanalysis of v4 validation is supported separately and does not start formal training.",
+  "promotion": {
+    "required_healthy_methods": [
+      "sm9rrs"
+    ],
+    "performance_target_is_gate": true,
+    "attack_effectiveness_is_gate": false,
+    "missing_clean_reference": "report_unassessed_without_baseline_veto",
+    "require_mean_dual_best": false
+  },
+  "fallback_candidates": {
+    "vert": "vert-v10-014",
+    "alignins": "alignins-v10-008",
+    "krum": "krum-v10-001",
+    "ding13": "ding13-v10-001",
+    "fedavg": "fedavg-v10-001"
+  },
+  "search_design": {
+    "version": "compact_plus_four_ours_v4",
+    "objective_policy": "retain_cifar_v3_weights_0.25_0.50_0.20_0.05_without_relearning",
+    "mnist_alignment_scope": "performance_target_thresholds_and_per_seed_per_scenario_windows; the common Score remains the CIFAR v3 formula",
+    "historical_scores_reused": false,
+    "official_test_used_for_selection": false,
+    "shared_training_and_attack_protocol": "unchanged_from_cifar_v3",
+    "ours": "All 10 compact Ours policies plus 2 complete MNIST top-three policies, delayed revocation, and delayed trusted-history admission; 14 total",
+    "vert": "CIFAR healthy-best and raw-best, a lower-lr probe, and MNIST validation-best; omit epochs=50 and history=20",
+    "alignins": "CIFAR raw-best and runner-up, a 29/30-healthy policy, and MNIST best under CIFAR weights; omit radius=1.5 probes",
+    "fixed_methods": [
+      "krum",
+      "ding13",
+      "fedavg"
+    ],
+    "fixed_method_reason": "The existing method-specific tuning interface has no hyperparameters; repeated identical candidates are not distinct choices.",
+    "budget_limitation": "This unequal, predeclared search space is not a claim of equal tuning compute or an exhaustive optimum. Ours has more coupled controls; all counts are reported.",
+    "no_performance_guarantee": "An expanded search cannot guarantee an Ours pass, formal generalization, or best performance among six methods.",
+    "parent_configuration": "configs/cifar10_six_mnist_gate_compact_v4.json",
+    "historical_validation_used_for_search_design": true,
+    "historical_scores_reused_for_new_qualification": false,
+    "validation_evidence": [
+      "CIFAR v3: outputs/cifar10_six_630_near_vert_v3/validation_summary.json",
+      "MNIST: outputs/mnist_v7_target_fair_tuning/tuning_trials.csv"
+    ],
+    "evidence_availability": "Provenance only; historical outputs are not required to generate or run this configuration.",
+    "pruning_limit": "A priority shortlist, not proof that removed candidates are inferior on new seeds or that retained candidates satisfy the targets.",
+    "rounds_saved_vs_full_validation": 186000,
+    "validation_run_reduction_fraction": 0.7126436781609196,
+    "runtime_caveat": "The extra 120 validation runs are all Ours; their cost can exceed the 19.05% task-count increase. Historical concurrent runtimes are not a wall-time guarantee.",
+    "additional_ours_candidates": [
+      "sm9rrs-v10-010",
+      "sm9rrs-v10-011",
+      "sm9rrs-v10-016",
+      "sm9rrs-v10-039"
+    ],
+    "all_parent_candidates_preserved": true,
+    "baseline_candidates_unchanged": true,
+    "selection_and_promotion_rules_unchanged": true,
+    "extra_validation_runs_vs_compact": 120,
+    "extra_training_rounds_vs_compact": 12000,
+    "performance_limit": "More eligible choices may improve the selected validation result; no guarantee of passing, global optimality or formal superiority. Keep the existing mean-dual preference and Score order."
+  },
+  "run_budget": {
+    "candidate_counts": {
+      "sm9rrs": 14,
+      "vert": 4,
+      "alignins": 4,
+      "krum": 1,
+      "ding13": 1,
+      "fedavg": 1
+    },
+    "total_candidates": 25,
+    "validation_runs_per_candidate": 30,
+    "validation_runs": 750,
+    "formal_runs_if_ours_qualifies": 180,
+    "maximum_total_runs": 930
+  },
+  "selection_metrics": {
+    "accuracy": "final_round",
+    "asr": "final_round",
+    "round": 100,
+    "performance_gate": "final_round_only",
+    "process_metrics": "diagnostic_only",
+    "replicate_summary": "equal_mean_of_final_values",
+    "honest_weight_loss": "unchanged_time_and_scenario_mean"
+  }
+}

@@ -1,0 +1,169 @@
+{
+  "source_output": "outputs/cifar10_six_mnist_gate_compact_plus_v4",
+  "completed_runs": 749,
+  "planned_runs": 750,
+  "gpu_lanes": 7,
+  "gpu_name": "NVIDIA GeForce RTX 4090 D",
+  "wall_seconds": 155811.50804400072,
+  "cost_definition": "runtime_seconds + checkpoint_io_seconds per completed 100-round task; concurrent observational timing, not a controlled speed benchmark",
+  "incomplete_runs": "One TAD task missing; budget imputes its cost rather than dropping it. Health-failed complete runs retained.",
+  "summary_hashes_digest": "e0283968ae0ec12c834bb7167a7af12e5db33f5a72fba6175e3921521af50a59",
+  "evidence_sha256": {
+    "manifest.json": "632dc6db7e01bdcf1cc4121a6a2cd65f3d625014db122a62b8b6d11707cf8a6e",
+    "validation_progress.json": "1555fb25791b00a265552530775fca2ad0369a988e92e464fcbd473c5daedc99",
+    "execution_environment.json": "086e66051302bf044277c04f36e08fb0e8452ec1d10bc1697cd162ceb156a7f2",
+    "progress_display_logs/20260918T070705_879291_23037.log": "628eb107f5284ebaf864ac777b77e445d523a0e33e999a6a9d1bd56261c45646"
+  },
+  "candidates": {
+    "alignins-v10-001": {
+      "n": 30,
+      "mean_seconds": 157.72242351124683,
+      "max_seconds": 362.3000223264098,
+      "sum_seconds": 4731.672705337405
+    },
+    "alignins-v10-008": {
+      "n": 30,
+      "mean_seconds": 154.2220100539426,
+      "max_seconds": 230.94361387193203,
+      "sum_seconds": 4626.660301618278
+    },
+    "alignins-v10-009": {
+      "n": 30,
+      "mean_seconds": 157.6902500944833,
+      "max_seconds": 351.27530075237155,
+      "sum_seconds": 4730.707502834499
+    },
+    "alignins-v10-012": {
+      "n": 30,
+      "mean_seconds": 157.96131451278924,
+      "max_seconds": 289.9550786651671,
+      "sum_seconds": 4738.8394353836775
+    },
+    "ding13-v10-001": {
+      "n": 29,
+      "mean_seconds": 49.77344910582078,
+      "max_seconds": 122.35241454467177,
+      "sum_seconds": 1443.4300240688026
+    },
+    "fedavg-v10-001": {
+      "n": 30,
+      "mean_seconds": 155.56162328558665,
+      "max_seconds": 347.9038715623319,
+      "sum_seconds": 4666.848698567599
+    },
+    "krum-v10-001": {
+      "n": 30,
+      "mean_seconds": 152.89097692159314,
+      "max_seconds": 275.5619012005627,
+      "sum_seconds": 4586.7293076477945
+    },
+    "sm9rrs-v10-002": {
+      "n": 30,
+      "mean_seconds": 2292.998750451828,
+      "max_seconds": 2467.6615010611713,
+      "sum_seconds": 68789.96251355484
+    },
+    "sm9rrs-v10-007": {
+      "n": 30,
+      "mean_seconds": 2295.569553092122,
+      "max_seconds": 2555.1471764296293,
+      "sum_seconds": 68867.08659276366
+    },
+    "sm9rrs-v10-010": {
+      "n": 30,
+      "mean_seconds": 2432.819128117959,
+      "max_seconds": 2798.89801010862,
+      "sum_seconds": 72984.57384353876
+    },
+    "sm9rrs-v10-011": {
+      "n": 30,
+      "mean_seconds": 2395.243695356076,
+      "max_seconds": 2884.847540680319,
+      "sum_seconds": 71857.31086068228
+    },
+    "sm9rrs-v10-012": {
+      "n": 30,
+      "mean_seconds": 2321.0392671043674,
+      "max_seconds": 2631.4667056165636,
+      "sum_seconds": 69631.17801313102
+    },
+    "sm9rrs-v10-013": {
+      "n": 30,
+      "mean_seconds": 2111.9799493381133,
+      "max_seconds": 2715.5884231589735,
+      "sum_seconds": 63359.3984801434
+    },
+    "sm9rrs-v10-014": {
+      "n": 30,
+      "mean_seconds": 2096.780659958596,
+      "max_seconds": 2557.009593345225,
+      "sum_seconds": 62903.41979875788
+    },
+    "sm9rrs-v10-015": {
+      "n": 30,
+      "mean_seconds": 2156.36771236298,
+      "max_seconds": 2673.9509922489524,
+      "sum_seconds": 64691.031370889395
+    },
+    "sm9rrs-v10-016": {
+      "n": 30,
+      "mean_seconds": 2324.219797607139,
+      "max_seconds": 2990.821408841759,
+      "sum_seconds": 69726.59392821416
+    },
+    "sm9rrs-v10-023": {
+      "n": 30,
+      "mean_seconds": 2156.514111187309,
+      "max_seconds": 2495.1196401156485,
+      "sum_seconds": 64695.42333561927
+    },
+    "sm9rrs-v10-029": {
+      "n": 30,
+      "mean_seconds": 2160.7699605402845,
+      "max_seconds": 2851.810246247798,
+      "sum_seconds": 64823.09881620854
+    },
+    "sm9rrs-v10-034": {
+      "n": 30,
+      "mean_seconds": 2173.2774418468275,
+      "max_seconds": 2567.9971034638584,
+      "sum_seconds": 65198.32325540483
+    },
+    "sm9rrs-v10-039": {
+      "n": 30,
+      "mean_seconds": 2185.5771441691863,
+      "max_seconds": 2595.6636785529554,
+      "sum_seconds": 65567.3143250756
+    },
+    "sm9rrs-v10-041": {
+      "n": 30,
+      "mean_seconds": 2242.8901045644034,
+      "max_seconds": 2641.614900212735,
+      "sum_seconds": 67286.7031369321
+    },
+    "vert-v10-003": {
+      "n": 30,
+      "mean_seconds": 651.4339002067844,
+      "max_seconds": 1090.839093066752,
+      "sum_seconds": 19543.017006203532
+    },
+    "vert-v10-014": {
+      "n": 30,
+      "mean_seconds": 562.2238047926377,
+      "max_seconds": 1054.887774579227,
+      "sum_seconds": 16866.71414377913
+    },
+    "vert-v10-015": {
+      "n": 30,
+      "mean_seconds": 1239.4418084324648,
+      "max_seconds": 4186.408357072622,
+      "sum_seconds": 37183.254252973944
+    },
+    "vert-v10-016": {
+      "n": 30,
+      "mean_seconds": 1438.7833340277275,
+      "max_seconds": 2813.218976724893,
+      "sum_seconds": 43163.50002083182
+    }
+  }
+}

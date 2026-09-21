@@ -279,11 +279,31 @@ def _format(mean, sd=None, scale=1):
 
 
 def _validation_gate_html(data):
-    gate = data["final_summary"].get("validation_mnist_target_gate")
+    final_only = "validation_final_metric_gate" in data["final_summary"]
+    gate = data["final_summary"].get("validation_final_metric_gate" if final_only else "validation_mnist_target_gate")
     if not gate:
         return ""
     policy = data["manifest"]["spec"]["performance_target"]
+    relative_asr = data["manifest"]["spec"].get("asr_target")
     target = data["final_summary"].get("validation_ours_target", {})
+    relative_accuracy = data["manifest"]["spec"].get("accuracy_target")
+    if relative_accuracy:
+        return ("<section><h2>验证推进条件：最终 Accuracy / ASR 距六方案最优值不超过2个百分点</h2>"
+            "<p>逐 seed、逐场景比较第100轮：最高 Accuracy 减去 Ours Accuracy ≤ 2 个百分点；"
+            "受攻击场景同时要求 Ours ASR 减去最低 ASR ≤ 2 个百分点。恰好相等也通过。"
+            "两项最优值可来自不同方法，无攻击 ASR 仅作诊断；过程均值、末尾窗口和峰值不决定性能达标。"
+            "六法使用各自固定入选候选；完整且数值有效的健康失败任务也参与。缺失仅排除对应任务参照，"
+            "并标注比较不完整，不能声称完整六方法目标已通过。</p>"
+            + _table(["项目", "验证记录"], [
+                ["推进状态", gate.get("status", "—")],
+                ["实际推进分支", gate.get("selected_pass_route", "—")],
+                ["Accuracy 相对最高值通过", target.get("accuracy_maximum_target_passed", False)],
+                ["ASR 相对最低值通过", target.get("asr_minimum_target_passed", False)],
+                ["完整逐场景目标通过", target.get("full_target_passed", False)],
+                ["均值双优作为硬门槛", gate.get("require_mean_dual_best", False)],
+                ["比较范围", gate.get("comparison_scope", "—")]])
+            + "<p>这是验证阶段推进条件，不保证正式测试排名。Ours须通过完整健康检查；"
+            "其它方案保留原健康最高Score、完整失败最高raw Score、固定fallback顺序。</p></section>")
     rows = [["推进状态", gate.get("status", "—")],
             ["实际推进分支", gate.get("selected_pass_route", gate.get("pass_route", "—"))],
             ["完整逐场景目标通过", target.get("full_target_passed", False)],
@@ -292,10 +312,23 @@ def _validation_gate_html(data):
             ["均值双优作为硬门槛", gate.get("require_mean_dual_best", False)],
             ["验证均值双优", target.get("mean_dual_best_passed", "—")],
             ["比较范围", gate.get("comparison_scope", "—")]]
-    return ("<section><h2>验证推进条件：MNIST 逐场景目标</h2>"
+    if relative_asr:
+        description = ("<section><h2>验证推进条件：最终 ASR 接近六方案最低值</h2>"
+            "<p>逐 seed、逐受攻击场景比较第100轮：Ours ASR 减去该任务可用六方案最低 ASR，"
+            f"须严格小于 {relative_asr['max_gap'] * 100:g} 个百分点；恰好相等不通过。"
+            "不设5%的绝对上限。各基线固定使用验证选定候选，数值有效且完整的健康失败任务也参与；"
+            "只在对应任务排除缺失基线，不阻塞推进，但比较不完整时不声称通过完整六方案目标。"
+            "过程均值、末尾窗口和峰值仅作诊断。")
+    else:
+        description = ("<section><h2>验证推进条件：最终轮逐场景目标</h2>"
+            f"<p>逐 seed、逐场景仅检查第 {data['manifest']['spec']['selection_metrics']['round']} 轮 Accuracy 与 ASR："
+            f"受攻击场景最终 ASR ≤ {policy['max_asr'] * 100:g}%；"
+            "过程均值、末尾窗口和峰值仅作诊断，不决定性能达标。"
+            if final_only else "<section><h2>验证推进条件：MNIST 逐场景目标</h2>"
             f"<p>逐 seed、逐场景检查攻击窗口、末尾 {policy['tail_rounds']} 轮和最终轮次："
             f"ASR ≤ {policy['max_asr'] * 100:g}%，峰值 ≤ {policy['max_peak_asr'] * 100:g}%；"
-            f"有可评分 VERT 时，准确率落后 ≤ {policy['accuracy_gap'] * 100:g} 个百分点，"
+                )
+    return (description + f"有可评分 VERT 时，准确率落后 ≤ {policy['accuracy_gap'] * 100:g} 个百分点，"
             f"ASR 高出 ≤ {policy['asr_gap'] * 100:g} 个百分点。</p>"
             + _table(["项目", "验证记录"], rows)
             + "<p>这些是验证阶段的推进记录，不是正式测试最优性的保证。失败但可评分的 VERT 仍参与相对比较；"
@@ -304,6 +337,9 @@ def _validation_gate_html(data):
 
 
 def _html(data, figures, *, mean_page):
+    final_only = data["manifest"]["spec"].get("selection_metrics", {}).get("asr") == "final_round"
+    asr_label = "最终 ASR 均值 ± seed SD (%)" if final_only else "攻击窗口 ASR 均值 ± seed SD (%)"
+    asr_note = "每个任务仅取最终轮 ASR。过程统计仅作诊断。" if final_only else "先在单任务攻击窗口内求均值。"
     title = f"{data['dataset_label']} · " + ("三种子均值报告" if len(data['seeds']) == 3 else "实验报告")
     seed_text = ", ".join(map(str, data["seeds"]))
     prefix = "mean_plots/" if mean_page else "plots/"
@@ -320,7 +356,8 @@ def _html(data, figures, *, mean_page):
         for seed in data["seeds"]:
             selected = [r for r in rows if r["seed"] == seed]
             seed_acc.append(statistics.mean(r["final_accuracy"] for r in selected))
-            attacked = [r["attack_asr"] for r in selected if r["attack_asr"] is not None]
+            key = "final_asr" if final_only else "attack_asr"
+            attacked = [r[key] for r in selected if r["malicious_ratio"] > 0 and r[key] is not None]
             if attacked:
                 seed_asr.append(statistics.mean(attacked))
         overall.append([LABELS[method], _format(*_mean_sd(seed_acc), scale=100),
@@ -346,8 +383,8 @@ def _html(data, figures, *, mean_page):
 <section><h2>完成状态与选参来源</h2>{_table(['方法','固定候选','完整运行','健康通过','健康失败','非有限更新数','验证选参状态'], counts)}
 <p>best_scored_unqualified 表示验证候选未通过健康门槛，但按预设规则从完整可评分候选中选出最高 raw Score；不代表健康通过。正式结果不参与重选参数。原始 ours_target 中的 incomplete 属于过滤不健康参照后的比较状态，不等于任务未运行完。</p></section>
 {_validation_gate_html(data)}
-<section><h2>总体指标</h2>{_table(['方法','最终准确率均值 ± seed SD (%)','攻击窗口 ASR 均值 ± seed SD (%)'], overall)}
-<p>先对每个 seed 的各场景等权平均，再对 seed 求均值与样本标准差。准确率包含干净和受攻击场景；ASR 仅包含恶意比例大于 0 的场景，先在单任务攻击窗口内求均值。高 ASR 表示攻击更成功；仅有相对优势不代表绝对攻击成功率足够低。</p></section>
+<section><h2>总体指标</h2>{_table(['方法','最终准确率均值 ± seed SD (%)',asr_label], overall)}
+<p>先对每个 seed 的各场景等权平均，再对 seed 求均值与样本标准差。准确率包含干净和受攻击场景；ASR 仅包含恶意比例大于 0 的场景，{asr_note}高 ASR 表示攻击更成功；仅有相对优势不代表绝对攻击成功率足够低。</p></section>
 <section><h2>如何理解阴影、误差棒与散点</h2><p>曲线为同一轮次跨 seed 的均值；阴影和带端帽的误差棒均为均值 ± 1 个样本标准差（ddof=1），表示不同随机种子之间的离散程度，并非 95% 置信区间。柱高为均值；每个灰色散点为一个 seed 的原始测量，轻微横向错开只为避免重叠。单 seed 页面不画标准差。</p>
 <p>准确率和 ASR 图的可视范围限定在 0–100%；落在范围外的误差带会被裁切，CSV 中的真实标准差不裁切。0% 条件的目标误分类率属于无攻击背景，不能解释为发生了攻击。竖虚线标记攻击开始轮次。未进行曲线平滑。</p>
 <p>运行耗时来自本次实际并行执行日志。扣除密码耗时图使用 runtime_seconds − crypto_wall_seconds，是事后统计扣除，并非关闭密码模块后重跑。检查点 I/O 单独记录，已不计入 runtime_seconds。设备、并行作业和运行顺序影响时间，不能把它当严格控制环境的速度基准。RSS 是进程峰值常驻内存（MiB），不是 GPU 显存或算法独占内存。</p>

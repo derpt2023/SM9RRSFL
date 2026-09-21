@@ -4,6 +4,168 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。支持 MNIST/CIFAR-10、IID/Dirichlet Non-IID、NumPy/PyTorch，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-09-21：Accuracy与ASR均距六法最优值≤2个百分点（当前推荐v7）
+
+用户最新要求：每个分区×恶意比例×seed任务只比较第100轮，
+`max(可用六法Accuracy) − Ours Accuracy ≤ 0.02`；受攻击任务还须满足
+`Ours ASR − min(可用六法ASR) ≤ 0.02`。**等于2个百分点也通过**，例如最高Accuracy80%时Ours至少78%；最低ASR10%时Ours至多12%。
+这不是乘以最优值的2%。两项最优值可来自不同方法，Accuracy不再只与VERT比较；无攻击ASR仍仅作诊断。
+
+使用 `configs/cifar10_six_relative_best_five_day_v7.json`，由进度包装选择新入口 `run_cifar_six_relative_best.py`，
+独立输出 `outputs/cifar10_six_relative_best_five_day_v7`。下面历史v6扩展配置的43套候选完全不变，仍1290验证＋达标后180正式。
+Score及均值双优优先排序、基线选参/fallback、完整健康、数据、公共参数、seed及检查点均保持。
+每个基线仍使用按验证Score选定的固定候选，不逐任务挑不同候选；其完整、数值有效的健康失败任务也参与比较。
+缺失只排除对应任务参照，明确标记比较不完整，不冒称完整六法通过。旧v6门槛与输出保留历史语义。
+
+已取消120小时强制截止，五天仅为估时；检查点、续跑、OOM恢复和自动HTML/SVG/PDF保留。
+新门槛只决定验证是否推进，不能保证新正式seed或更高恶意比例下仍在2个百分点内；不根据正式结果回选参数。
+
+```bash
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_relative_best_five_day_v7.json --plan-only
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_relative_best_five_day_v7.json --devices auto
+```
+
+`cifar_budgeted_search.py`现在默认生成上述v7配置，`build_spec_v6()`保留旧版构建逻辑。
+本轮新增 `cifar_relative_best_gate.py`、`run_cifar_six_relative_best.py`、
+`configs/cifar10_six_relative_best_five_day_v7.json`、`tests/test_cifar_relative_best.py`；还须一并提交此前尚未提交的v5/v6依赖及包装/报告/生成器等修改。
+
+## 2026-09-21：五天预算的定向扩展搜索（历史v6规则）
+
+使用 `configs/cifar10_six_relative_asr_five_day_v6.json`，独立输出到
+`outputs/cifar10_six_relative_asr_five_day_v6`。原25套候选及各方法内部顺序保留，
+新增14套Ours、2套VERT、2套AlignIns：**28/6/6/1/1/1，共43套、1290组验证；达标后180组正式，最多1470组/147000轮**。
+训练/攻击公共参数、数据划分、种子、最终轮选参、健康检查、Score、基线fallback及逐任务ASR差值严格<1pp规则均不变。
+不使用旧输出作为本轮资格缓存；旧配置和实验目录保留。
+
+新增Ours为`sm9rrs-v10-101`至`114`，以014为基础：
+
+- 101：漂移容忍量κ从1.25降至.85，同时漂移阈值h从6降至1。
+- 102：历史准入阈值从1降至.8，连续确认从2增至3。
+- 103：合并101与102；104：再将单轮告警阈值从1.25降至1.10。
+- 105–114：围绕上述组合探测κ=.75/.95、h=.75/1.5、告警1.20、历史阈值.70/.90、历史确认4、漂移记忆.90，及永久撤销容忍次数7；每套只改其声明的局部参数。其余新Ours保留撤销容忍次数5。
+- VERT新增015附近的历史窗口7和预测训练10轮两套；AlignIns新增半径均为.75、稀疏率.1/.3两套。只调整已有超参数。Krum/TAD/FedAvg无可搜索的专属参数，仍各一套。
+
+这检验现有检测公式中的漂移累积和历史污染问题，未改核心算法。更严格的阈值也可能增加诚实误报，仍须通过完整健康和准确率检查。
+各方法搜索额度不相等，不能在论文中称为等调参算力。新候选尚未训练，不能保证Ours达标或正式最优。
+验证seed仍为1001–1003，已有开发历史；正式1101–1103保持独立于本轮选参，不把重复验证称为全新独立证据。
+
+**时间估算：** 上次750验证实际运行43.28小时，使用7张`NVIDIA GeForce RTX 4090 D`。
+逐任务计入`runtime_seconds + checkpoint_io_seconds`；已测候选使用实测均值，新候选按同方法最慢候选均值预留，
+另计观测调度开销、180正式任务、20%波动余量及1小时准备/报告时间。
+本轮预计验证87.80小时、正式预留5.33小时，训练合计93.13小时；含余量约**112.75小时（4.70天）**。
+证据摘要在`configs/cifar10_five_day_timing_reference.json`，计算和配置生成器为`cifar_budgeted_search.py`；运行不依赖本地历史outputs。
+
+按用户最新要求，**已移除120小时强制截止及其7卡/4090D启动限制**；五天只用于规划候选数量，不控制训练或报告退出。
+仍使用原有GPU兼容性/可用显存预检，可按实际设备数量启动；上述112.75小时仅适用于参考条件，不是完成保证。
+**检查点和断点续跑保留**：`checkpoint_interval=1`，逐轮保存；相同配置和输出目录重启会复用已完成任务及检查点，OOM仍走原恢复流程。
+程序不再创建或读取walltime_budget计时JSON/锁；已有实验输出和检查点不会因移除截止功能被删除。
+
+最终性能规则再次核对并按用户确认保持：受攻击任务第100轮ASR距固定入选六法最低值严格<1个百分点；
+Accuracy仍相对VERT落后≤2个百分点（含无攻击任务），不新增“距六法最高Accuracy<1个百分点”的硬门槛。
+候选须先满足健康和逐任务目标，之后优先最终指标均值双优，再按原Score、最差最终ASR等排序；不承诺训练前即可保证两项均最优。
+
+用户自行提交/推送后，AI Station执行`git pull`，在项目根目录运行：
+
+```bash
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_relative_asr_five_day_v6.json --plan-only
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_relative_asr_five_day_v6.json --devices auto
+```
+
+`--plan-only`不启动GPU或训练。正式实验完整结束后自动生成HTML、均值SVG/PDF。
+Ours未达标则仍停止在验证阶段；报告依赖缺失等情况保留训练数据，可随后单独补报告（此命令不训练）：
+
+```bash
+python run_cifar_six_with_progress.py --report-only \
+  --output outputs/cifar10_six_relative_asr_five_day_v6
+```
+
+本次新增需提交：`cifar_budgeted_search.py`、
+`configs/cifar10_six_relative_asr_five_day_v6.json`、`configs/cifar10_five_day_timing_reference.json`、
+`tests/test_cifar_budgeted_search.py`；本次继续修改`README.md`、`run_cifar_six_with_progress.py`。
+若上轮v5/v6改动尚未提交，还需一并提交两版gate/runner/reanalysis/config/test及`experiment_reporting.py`，否则新配置缺少依赖。
+本地docs、AGENTS和outputs不提交。
+
+## 2026-09-21：CIFAR 相对最低最终ASR门槛（基础v6）
+
+用户确认替换5%绝对ASR限制：每个“分区×恶意比例×seed”的受攻击任务，第100轮必须满足
+`Ours ASR − min(该任务可用六方法的最终ASR) < 0.01`，即**严格小于1个百分点**。
+200个目标样本时，差1个样本（0.5个百分点）通过，差2个样本（1个百分点）不通过。
+比较会恢复float32输出对应的离散样本比例并用有理数判断，避免恰好1个百分点被浮点误差放行。
+
+新入口 `run_cifar_six_relative_asr.py`，配置 `configs/cifar10_six_relative_asr_v6.json`，独立输出 `outputs/cifar10_six_relative_asr_v6`。
+完整健康检查、最终Score及权重、基线选参回退、相对VERT最终Accuracy落后≤2个百分点/ASR高出≤1个百分点，以及均值双优仅排序的规则不变。
+无攻击场景不新增ASR门槛。全部25候选和公共训练/攻击参数不变，仍750验证＋达标后180正式。
+
+各基线使用验证Score选定的固定候选，不在每个场景另选参数。其完整且数值有效的健康失败任务也进入最低ASR比较。
+候选整套不完整时，已完成的任务仍可逐任务作参照：本轮TAD的29组可用，只有缺失的那1组被排除。
+缺失基线不单独阻止Ours推进，但明确记录`missing_methods`；部分比较通过不能写成完整六方法目标通过。
+资源故障、损坏缓存和身份不符仍由原执行完整性规则阻塞。
+
+无需重训即可重算现有验证：
+
+```bash
+python reanalyze_cifar_relative_asr.py \
+  --source outputs/cifar10_six_mnist_gate_compact_plus_v4 \
+  --output outputs/cifar_relative_asr_reanalysis
+```
+
+这是独立事后审计，不覆盖原输出或自动创建正式计划。输出目录须新建或为空。
+2026-09-21重算：014满足5/24个攻击任务的ASR要求，其余健康Ours均为0/24；仍无候选满足全部要求。
+
+按新协议启动时使用进度包装以自动生成最终HTML、均值SVG与PDF：
+
+```bash
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_relative_asr_v6.json --plan-only
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_relative_asr_v6.json --devices auto
+```
+
+v2–v5入口和输出保留历史语义，不要对旧目录启动v6。本次没有改核心检测算法、追加候选或启动训练。
+
+## 2026-09-21：CIFAR 最终轮选参与性能门槛（历史v5）
+
+上一版入口为 `run_cifar_six_final_metrics.py`，配置为
+`configs/cifar10_six_final_metrics_v5.json`，独立输出 `outputs/cifar10_six_final_metrics_v5`。
+根据用户确认，**每个任务仅用第100轮 Accuracy / ASR 决定性能达标**；攻击窗口均值、末10轮与峰值保留为诊断。
+跨 seed、场景仍可对这些最终值等权汇总，这与对训练过程逐轮求平均不同。
+
+- Score 保留权重 `.25/.50/.20/.05`：干净任务最终 Accuracy、攻击任务最终 Accuracy、`1−攻击任务最终 ASR`、`1−诚实权重损失`；最后一项仍按原时间/场景口径。ASR 的平分排序也改用最差任务的最终值。
+- Ours 须通过完整训练健康检查；每个攻击场景、每个 seed 最终 ASR ≤5%。有完整可评分 VERT 时，相同任务最终 Accuracy 落后 ≤2 个百分点、最终 ASR 高出 ≤1 个百分点；干净场景比较最终 Accuracy。原 `max_peak_asr` / `tail_rounds` 配置仅保留作过程诊断，不再决定性能通过。
+- 健康检查仍检查全过程的非有限更新、完整性、撤销状态，以及原有的干净精度检查；最终值正常不能掩盖健康失败。均值双优仍仅为达标 Ours 的优先排序，`require_mean_dual_best=false`。
+- 基线继续逐方法执行：健康最高 Score → 完整可评分失败候选最高 raw Score → 固定首候选；保留失败标签。Ours 不达标仍不创建正式计划。OOM、缺失、损坏证据不能冒充算法失败。
+- 25套候选、公共训练/攻击参数、验证1001–1003和正式1101–1103种子均不变，仍为750验证＋达标后180正式。没有为改善排名调整算法、评分权重或候选。
+- 历史 v2/v3/v4 入口及其训练源码保持原样，供旧实验复核/续跑；不要用旧配置启动并期望自动采用新口径，也不要向旧输出目录写入 v5。
+
+已有 v4 验证可单独重算，无需重新训练750个任务：
+
+```bash
+python reanalyze_cifar_final_metrics.py \
+  --source outputs/cifar10_six_mnist_gate_compact_plus_v4 \
+  --output outputs/cifar_final_metric_reanalysis
+```
+
+该命令只读取匹配身份的 CSV/JSON，复核健康指标与最终值，输出选参审计 JSON、逐任务/无攻击/场景/总体 CSV。
+输出目录必须新建或为空，不能是原实验目录及其父子目录。重算明确标注为事后分析，不覆盖旧结论、不创建正式计划、不把旧实验改称事先采用新规则。
+本地2026-09-21重算显示：12套健康 Ours 仍全部未满足最终 ASR 门槛，因此单改指标口径不会启动正式实验。
+
+需要按新协议开展独立实验时，使用进度入口以便正式实验完成后自动生成报告：
+
+```bash
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_final_metrics_v5.json --plan-only
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_final_metrics_v5.json --devices auto
+```
+
+完整正式实验后的 `final_results/visualizations.html` 总体 ASR 表使用最终轮值，均值曲线仍呈现各轮走势；
+`mean_plots/` 同时输出 SVG、PNG、PDF 合集及可复核 CSV。旧实验 HTML 保持其原指标口径。
+正式任务未执行或缺失时，不生成伪装成正式结果的均值报告。
+
 ## 2026-09-06：正常状态 v3 与当轮隔离
 
 Ours 现在采用 **K-means 学习正常状态，历史偏离识别异常**。它不是“把本轮客户端聚成两个簇，再把小簇判为攻击者”。每个匿名任务标签独立学习一个或多个正常模式，所有簇均作为正常参照，但新更新仍须通过偏离检测；0% 恶意场景也不会被强行分出恶意簇。
