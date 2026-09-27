@@ -4,6 +4,40 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。支持 MNIST/CIFAR-10、IID/Dirichlet Non-IID、NumPy/PyTorch，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-09-27：v7未达标后的交互式正式实验与续跑
+
+原逐任务最终Accuracy、ASR均距可用六法最优值≤2个百分点的规则不变。满足原门槛时自动进入正式阶段；
+若所有Ours均未达标，但存在健康候选，控制台显示最佳健康候选（原Score最高，沿用原平分排序）并询问`Y/N`。
+输入`Y`后，使用该候选和原验证已选出的五个基线运行180个正式任务；输入`N`停止并保留结果。
+没有健康Ours、验证证据缺失/损坏或实验身份不符时，不能通过Y覆盖这些问题。
+
+在AI Station项目根目录，通过Git更新后，继续使用原推荐命令：
+
+```bash
+git pull
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_relative_best_five_day_v7.json --devices auto
+```
+
+使用原输出目录`outputs/cifar10_six_relative_best_five_day_v7`。本轮1290个验证任务已完成时，程序核查保存结果后直接询问，
+不会重新训练验证；本轮最佳健康候选为`sm9rrs-v10-014`。如以前指定了`--output`或`--data-dir`，继续带相同路径。
+首次Y冻结正式选参，**以后每次启动/断点续跑仍重新询问Y/N**；续跑Y复用完整任务与逐轮检查点，不重新选参。
+已完成全部正式任务后重跑也会询问，Y只重建汇总。`--phase validation`只做验证，不询问或启动正式训练。
+OOM恢复保持原机制；包装器自动重新启动控制器时，也需要再次输入Y。
+
+请在可输入的交互终端中运行（例如tmux会话）；提示没有超时默认选择。非法输入会重问，EOF或无交互终端停止，
+不会把管道中的Y或上次的Y当成本次许可。`--plan-only`仍只读展示任务计划；`--report-only`只重建报告，不训练、不询问。
+
+新增控制器`run_cifar_six_interactive.py`由进度包装在schema7下调用；原`run_cifar_six_relative_best.py`及43项冻结科学源码不变，
+继续承担旧协议与worker执行。旧manifest、配置、数据划分、任务指纹和检查点格式均不变。
+直接调用旧`run_cifar_six_relative_best.py`仍是原严格门槛行为；交互续跑请使用上面的包装命令。
+schema2–6、历史MNIST入口和训练逻辑不变。本轮尚未增加Fashion-MNIST加载器或实验配置。
+
+用户继续的决定写入独立`continuation_decision.json`，每次回答写入`continuation_responses/`；
+它们与`final_plan.json`共同固定来源和参数，不修改原manifest。
+原`validation_summary.json`仍记录未达标，正式JSON/HTML也明确标注“用户确认继续；原验证目标未通过”。
+正式结果仅用于评估，不能反过来选择候选。迁移或备份时保留完整输出目录，包括隐藏的`.completed_results.pickle`、检查点和新增决定文件。
+
 ## 2026-09-21：Accuracy与ASR均距六法最优值≤2个百分点（当前推荐v7）
 
 用户最新要求：每个分区×恶意比例×seed任务只比较第100轮，
@@ -11,14 +45,14 @@
 `Ours ASR − min(可用六法ASR) ≤ 0.02`。**等于2个百分点也通过**，例如最高Accuracy80%时Ours至少78%；最低ASR10%时Ours至多12%。
 这不是乘以最优值的2%。两项最优值可来自不同方法，Accuracy不再只与VERT比较；无攻击ASR仍仅作诊断。
 
-使用 `configs/cifar10_six_relative_best_five_day_v7.json`，由进度包装选择新入口 `run_cifar_six_relative_best.py`，
+使用 `configs/cifar10_six_relative_best_five_day_v7.json`，原训练入口为 `run_cifar_six_relative_best.py`（当前包装控制层见上节），
 独立输出 `outputs/cifar10_six_relative_best_five_day_v7`。下面历史v6扩展配置的43套候选完全不变，仍1290验证＋达标后180正式。
 Score及均值双优优先排序、基线选参/fallback、完整健康、数据、公共参数、seed及检查点均保持。
 每个基线仍使用按验证Score选定的固定候选，不逐任务挑不同候选；其完整、数值有效的健康失败任务也参与比较。
 缺失只排除对应任务参照，明确标记比较不完整，不冒称完整六法通过。旧v6门槛与输出保留历史语义。
 
 已取消120小时强制截止，五天仅为估时；检查点、续跑、OOM恢复和自动HTML/SVG/PDF保留。
-新门槛只决定验证是否推进，不能保证新正式seed或更高恶意比例下仍在2个百分点内；不根据正式结果回选参数。
+新门槛决定自动推进资格；9月27日起额外支持用户确认后继续。不能保证新正式seed或更高恶意比例下仍在2个百分点内；不根据正式结果回选参数。
 
 ```bash
 python -u run_cifar_six_with_progress.py \

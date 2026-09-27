@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import select
 import shutil
 import shlex
 import signal
@@ -351,16 +352,92 @@ def cleanup_group(process, reader):
         reader.join(timeout=2.)
 
 
+def _read_choice_line(stream, cancelled):
+    """Read one terminal line without taking input intended for a later run."""
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        # In-memory terminal substitutes are useful for integration tests.
+        return stream.readline()
+    answer = bytearray()
+    while not cancelled.is_set():
+        if not select.select([descriptor], [], [], .1)[0]:
+            continue
+        value = os.read(descriptor, 1)
+        if not value:
+            return answer.decode(getattr(stream, "encoding", None) or "utf-8", errors="replace")
+        answer.extend(value)
+        if value == b"\n":
+            return answer.decode(getattr(stream, "encoding", None) or "utf-8", errors="replace")
+    return None
+
+
 def monitor(command, devices, *, refresh=1., log_interval=15., stream=sys.stdout, mode="auto",
-            oom_devices=None, phase_state=None):
+            oom_devices=None, phase_state=None, input_stream=None):
     """Run the original parent in its own group; forward signals and await it."""
     progress, display = Progress(devices), Display(stream, mode)
     display.message(f"GPU_LANES {len(devices)} " + ", ".join(f"{d} -> {p}" for d, p in progress.mapping.items()))
     display.message("Progress observes unchanged training. done = saved runs, not passed health checks; ETA is approximate.")
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, encoding="utf-8", errors="replace", bufsize=1,
                                start_new_session=True)
+    foreground_input = sys.stdin if input_stream is None else input_stream
     messages = queue.Queue()
+    input_requests, input_answers = queue.Queue(), queue.Queue()
+    input_cancelled = threading.Event()
+    input_reader = None
+    waiting_for_choice = False
+
+    def read_choices():
+        while not input_cancelled.is_set():
+            try:
+                input_requests.get(timeout=.1)
+            except queue.Empty:
+                continue
+            try:
+                answer = _read_choice_line(foreground_input, input_cancelled)
+            except (OSError, ValueError):
+                answer = ""
+            if answer is not None and not input_cancelled.is_set():
+                input_answers.put(answer)
+
+    def close_input():
+        if process.stdin is not None and not process.stdin.closed:
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+
+    def request_choice(event):
+        nonlocal input_reader, waiting_for_choice
+        try:
+            payload = json.loads(event[len("CONTINUATION_PROMPT "):])
+            if (not isinstance(payload, dict) or not isinstance(payload.get("candidate"), str)
+                    or not isinstance(payload.get("message"), str)
+                    or type(payload.get("raw_score")) not in (int, float)
+                    or not math.isfinite(payload["raw_score"])):
+                raise ValueError("invalid continuation prompt")
+        except (TypeError, ValueError):
+            display.message("CONTINUATION_INPUT_REFUSED invalid controller prompt; no consent sent.")
+            close_input()
+            return
+        display.message(payload["message"])
+        display.message(f"CONTINUATION_PROMPT candidate={payload['candidate']} raw_score={payload['raw_score']} [Y/N]")
+        if waiting_for_choice:
+            return
+        waiting_for_choice = True
+        try:
+            interactive = foreground_input.isatty()
+        except (AttributeError, OSError, ValueError):
+            interactive = False
+        if not interactive:
+            display.message("CONTINUATION_INPUT_UNAVAILABLE 当前没有交互终端；未收到 Y，不启动或续跑正式实验。")
+            close_input()
+            return
+        if input_reader is None:
+            input_reader = threading.Thread(target=read_choices, name="cifar-continuation-input", daemon=True)
+            input_reader.start()
+        input_requests.put(True)
     def read_output():
         try:
             for line in process.stdout:
@@ -375,6 +452,7 @@ def monitor(command, devices, *, refresh=1., log_interval=15., stream=sys.stdout
     resource_stop_at, resource_signal_stage = None, 0
     def interrupted(signum, _frame):
         signal_count[0] += 1
+        input_cancelled.set()
         if user_signal[0] is None:
             user_signal[0] = signum
         # First Ctrl+C lets the original parent stop scheduling and reap its
@@ -405,6 +483,11 @@ def monitor(command, devices, *, refresh=1., log_interval=15., stream=sys.stdout
                 # to a failure; otherwise cuda:3PROGRESS becomes a false lane.
                 important_events = []
                 for event in events:
+                    # Only an exact parent event requests terminal input.
+                    # Worker-prefixed output is never an authorization prompt.
+                    if event.startswith("CONTINUATION_PROMPT "):
+                        request_choice(event)
+                        continue
                     if progress.consume(event):
                         important_events.append(event)
                     if phase_state is not None and progress.phase in ("validation", "final"):
@@ -438,6 +521,21 @@ def monitor(command, devices, *, refresh=1., log_interval=15., stream=sys.stdout
                         display.message(f"Progress log unavailable: {exc}; task worker.log remains unchanged.")
                 for event in important_events:
                     display.message(event)
+            try:
+                answer = input_answers.get_nowait()
+            except queue.Empty:
+                answer = None
+            if answer is not None and not signal_count[0] and not resource_stop:
+                waiting_for_choice = False
+                if not answer:
+                    display.message("CONTINUATION_INPUT_EOF 未收到 Y，不启动或续跑正式实验。")
+                    close_input()
+                elif process.poll() is None and process.stdin is not None and not process.stdin.closed:
+                    try:
+                        process.stdin.write(answer if answer.endswith("\n") else answer + "\n")
+                        process.stdin.flush()
+                    except BrokenPipeError:
+                        pass
             now = monotonic()
             if resource_stop_at is not None:
                 stopping_seconds = now - resource_stop_at
@@ -457,7 +555,7 @@ def monitor(command, devices, *, refresh=1., log_interval=15., stream=sys.stdout
                     signal_group(process, signal.SIGTERM)
                 if now - exited_at > ORPHAN_KILL_AFTER:
                     signal_group(process, signal.SIGKILL)
-            if now - last_display >= interval or eof:
+            if not waiting_for_choice and (now - last_display >= interval or eof):
                 display.render(progress)
                 last_display = now
         code = process.wait()
@@ -471,6 +569,10 @@ def monitor(command, devices, *, refresh=1., log_interval=15., stream=sys.stdout
             return 75
         return 128 + (-code) if code < 0 else code
     finally:
+        input_cancelled.set()
+        close_input()
+        if input_reader is not None:
+            input_reader.join(timeout=.3)
         cleanup_group(process, reader)
         if not reader.is_alive():
             process.stdout.close()
@@ -670,7 +772,7 @@ def render_final_report(output, *, training_exit_code=None):
 def runner_for_spec(repo, spec):
     """Keep historical entry points stable when a new study is introduced."""
     if spec.get("schema_version") == 7:
-        return str(repo / "run_cifar_six_relative_best.py")
+        return str(repo / "run_cifar_six_interactive.py")
     if spec.get("schema_version") == 6:
         return str(repo / "run_cifar_six_relative_asr.py")
     if spec.get("schema_version") == 5:

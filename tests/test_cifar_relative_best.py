@@ -195,7 +195,7 @@ class RelativeBestTests(unittest.TestCase):
             self.assertIn("两项最优值可来自不同方法", html)
             self.assertNotIn("相对 VERT 目标", html)
             self.assertNotIn("须严格小于", html)
-        self.assertEqual(Path(runner_for_spec(runner.REPO, self.spec)).name, "run_cifar_six_relative_best.py")
+        self.assertEqual(Path(runner_for_spec(runner.REPO, self.spec)).name, "run_cifar_six_interactive.py")
 
 
 if __name__ == "__main__":

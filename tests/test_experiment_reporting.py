@@ -1,5 +1,6 @@
 """Audit synthetic CSV/JSON studies without datasets, GPUs or plot rendering."""
 import csv
+import hashlib
 from html.parser import HTMLParser
 import json
 from pathlib import Path
@@ -127,6 +128,44 @@ class ExperimentReportingTests(unittest.TestCase):
 
     def load(self):
         return reporting.load_completed_study(self.root)
+
+    def mark_continuation(self):
+        manifest = read_json(self.root / "manifest.json")
+        manifest["spec"].update(
+            performance_target={"accuracy_gap": .02, "asr_gap": .02},
+            accuracy_target={"max_gap": .02}, asr_target={"max_gap": .02},
+            selection_metrics={"asr": "final_round"})
+        write_json(self.root / "manifest.json", manifest)
+        final = read_json(self.root / "final_summary.json")
+        final["validation_final_metric_gate"] = {
+            "status": "unmet", "selected_candidate": None,
+            "qualified_ours_candidates": [], "selected_pass_route": None}
+        final["validation_ours_target"] = {"full_target_passed": False}
+        validation = {"status": "needs_ours_target_development",
+                      "selected": {"vert": "vert-fixed"},
+                      "best_healthy_score_candidate": "sm9rrs-fixed",
+                      "final_metric_gate": {**final["validation_final_metric_gate"],
+                                            "candidate_rows": [{"candidate": "sm9rrs-fixed"}],
+                                            "ours_candidate_targets": {"sm9rrs-fixed": {}}},
+                      "tasks": [{"path": "outputs/source-on-first-host"}]}
+        report_digest = hashlib.sha256(json.dumps(
+            {key: value for key, value in validation.items() if key != "tasks"},
+            sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        metadata = {"schema_version": 1, "decision": "Y",
+                    "mode": "user_selected_after_unmet_validation",
+                    "ours_candidate": "sm9rrs-fixed", "selection_raw_score": .64,
+                    "selected": dict(final["selected"]), "manifest_fingerprint": manifest["fingerprint"],
+                    "validation_report_digest": report_digest,
+                    "source_validation_status": "needs_ours_target_development",
+                    "validation_target_passed": False,
+                    "selection_basis": "best_healthy_score_candidate",
+                    "controller_source_sha256": "original-controller-sha",
+                    "created_at_utc": "2026-09-27T12:00:00+00:00"}
+        final["continuation_decision"] = metadata
+        write_json(self.root / "final_summary.json", final)
+        write_json(self.root / "validation_summary.json", validation)
+        write_json(self.root / "continuation_decision.json", metadata)
+        return metadata
 
     def test_failed_observations_are_retained_with_sample_sd(self):
         study = self.load()
@@ -287,6 +326,67 @@ class ExperimentReportingTests(unittest.TestCase):
                      "mnist_absolute_target_without_scorable_vert", "unassessed",
                      "不是正式测试最优性的保证", "不能宣称完整相对目标已通过"):
             self.assertIn(text, html)
+
+    def test_user_continuation_report_preserves_manifest_and_unmet_validation(self):
+        metadata = self.mark_continuation()
+        self.assertFalse((self.root / "validation_plan.json").exists())
+        self.assertTrue(all(p.name.startswith("final_") for p in (self.root / "tasks").iterdir()))
+        source_before = (self.root / "validation_summary.json").read_bytes()
+        manifest_before = (self.root / "manifest.json").read_bytes()
+        decision_before = (self.root / "continuation_decision.json").read_bytes()
+        self.assertNotIn("continuation_decision", read_json(self.root / "manifest.json"))
+        fake_plots = SimpleNamespace(render_figures=lambda *args, **kwargs: [])
+        with mock.patch.object(reporting, "check_dependencies"), mock.patch.dict(
+                "sys.modules", {"experiment_report_plots": fake_plots}):
+            reporting.generate_report(self.root)
+        for relative in ("visualizations.html", "seed_901/visualizations.html"):
+            html = (self.root / "final_results" / relative).read_text(encoding="utf-8")
+            for text in ("用户确认继续正式实验；原验证目标未通过", "sm9rrs-fixed",
+                         "并非通过原验证门槛后自动推进", "原验证门槛状态", "unmet",
+                         "needs_ours_target_development", "best_healthy_score_candidate",
+                         "0.64", "2026-09-27T12:00:00+00:00"):
+                self.assertIn(text, html)
+            self.assertLess(html.index("用户确认继续正式实验"), html.index("总体指标"))
+        audit = read_json(self.root / "final_results/mean_plots/data_audit.json")
+        self.assertEqual(audit["continuation_decision"], metadata)
+        self.assertEqual(audit["validation_final_metric_gate"]["status"], "unmet")
+        self.assertIn("validation_summary.json", audit["source_sha256"])
+        self.assertIn("continuation_decision.json", audit["source_sha256"])
+        self.assertEqual((self.root / "validation_summary.json").read_bytes(), source_before)
+        self.assertEqual((self.root / "manifest.json").read_bytes(), manifest_before)
+        self.assertEqual((self.root / "continuation_decision.json").read_bytes(), decision_before)
+
+    def test_rejects_inconsistent_continuation_or_relabelled_gate(self):
+        for mutation, message in (
+                (lambda final: final.pop("continuation_decision"), "decision is missing"),
+                (lambda final: final["continuation_decision"].update(selection_raw_score=.8),
+                 "differs between independent record"),
+                (lambda final: final["validation_final_metric_gate"].update(status="passed"),
+                 "original unmet validation gate"),
+                (lambda final: final["selected"].update(sm9rrs="another-candidate"),
+                 "candidate selection differs")):
+            with self.subTest(message=message):
+                self.mark_continuation()
+                final = read_json(self.root / "final_summary.json")
+                mutation(final)
+                write_json(self.root / "final_summary.json", final)
+                with self.assertRaisesRegex(reporting.ReportIncompleteError, message):
+                    self.load()
+
+    def test_continuation_requires_independent_record_and_matching_validation(self):
+        self.mark_continuation()
+        (self.root / "continuation_decision.json").unlink()
+        with self.assertRaisesRegex(reporting.ReportIncompleteError, "decision is missing"):
+            self.load()
+        self.mark_continuation()
+        validation = read_json(self.root / "validation_summary.json")
+        validation["tasks"] = [{"path": "outputs/copied-to-another-host"}]
+        write_json(self.root / "validation_summary.json", validation)
+        self.assertEqual(self.load()["continuation_decision"]["decision"], "Y")
+        validation["best_healthy_score_candidate"] = "another-candidate"
+        write_json(self.root / "validation_summary.json", validation)
+        with self.assertRaisesRegex(reporting.ReportIncompleteError, "validation report digest differs"):
+            self.load()
 
     def test_staging_failure_preserves_existing_report_and_raw_data(self):
         destination = self.root / "final_results"

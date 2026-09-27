@@ -105,12 +105,55 @@ def _mean_sd(values):
     return statistics.mean(values), statistics.stdev(values) if len(values) > 1 else None
 
 
+def _load_continuation_decision(output, manifest, plan, final):
+    """Verify an explicit continuation without modifying the original manifest."""
+    path = output / "continuation_decision.json"
+    recorded = final.get("continuation_decision")
+    if recorded is None and not path.exists():
+        return None
+    _require(isinstance(recorded, dict) and path.is_file(),
+             "Continuation decision is missing from the independent record or final summary")
+    decision = _json(path)
+    _require(decision == recorded,
+             "Continuation decision differs between independent record and final summary")
+    _require(decision.get("schema_version") == 1 and decision.get("decision") == "Y"
+             and decision.get("mode") == "user_selected_after_unmet_validation"
+             and decision.get("validation_target_passed") is False
+             and decision.get("selection_basis") == "best_healthy_score_candidate",
+             "Continuation must record user approval after an unmet validation target")
+    _require(decision.get("manifest_fingerprint") == manifest.get("fingerprint"),
+             "Continuation decision belongs to a different manifest")
+    selected = decision.get("selected")
+    _require(isinstance(selected, dict)
+             and set(selected) == set(manifest["spec"]["candidates"])
+             and selected == final.get("selected") == plan.get("selected")
+             and selected.get("sm9rrs") == decision.get("ours_candidate")
+             and bool(decision.get("ours_candidate")),
+             "Continuation candidate selection differs from the final plan or summary")
+    _number(decision.get("selection_raw_score"), "continuation.selection_raw_score")
+    validation = _json(output / "validation_summary.json")
+    validation_digest = hashlib.sha256(json.dumps(
+        {key: value for key, value in validation.items() if key != "tasks"},
+        sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    _require(decision.get("validation_report_digest") == validation_digest,
+             "Continuation validation report digest differs from the original record")
+    _require(validation.get("status") == decision.get("source_validation_status")
+             == "needs_ours_target_development",
+             "Continuation source validation status differs from the original record")
+    gate = {key: value for key, value in validation.get("final_metric_gate", {}).items()
+            if key not in ("candidate_rows", "ours_candidate_targets")}
+    _require(gate.get("status") == "unmet" and final.get("validation_final_metric_gate") == gate,
+             "Continuation must retain the original unmet validation gate")
+    return decision
+
+
 def load_completed_study(output):
     """Validate the declared final matrix, every round and merged observations."""
     output = Path(output).resolve()
     manifest = _json(output / "manifest.json")
     plan = _json(output / "final_plan.json")
     final = _json(output / "final_summary.json")
+    continuation = _load_continuation_decision(output, manifest, plan, final)
     _require(final.get("full_execution_completed") is True,
              "Formal execution is incomplete; no complete mean report was generated")
     _require(plan.get("manifest_fingerprint") == manifest.get("fingerprint"),
@@ -216,7 +259,8 @@ def load_completed_study(output):
             "target_source": shared["attack_source_label"], "target_label": shared["attack_target_label"],
             "target_count": shared["attack_target_count"], "methods": methods, "groups": groups,
             "runs": runs, "raw_curves": curves, "health_failed_runs": len(actual_failures),
-            "manifest": manifest, "final_summary": final, "output": str(output)}
+            "manifest": manifest, "final_summary": final, "output": str(output),
+            "continuation_decision": continuation}
 
 
 def aggregate_study(study, seeds=None):
@@ -287,6 +331,9 @@ def _validation_gate_html(data):
     relative_asr = data["manifest"]["spec"].get("asr_target")
     target = data["final_summary"].get("validation_ours_target", {})
     relative_accuracy = data["manifest"]["spec"].get("accuracy_target")
+    continuation = data.get("continuation_decision")
+    status_label = "原验证门槛状态" if continuation else "推进状态"
+    route_label = "原验证推进分支" if continuation else "实际推进分支"
     if relative_accuracy:
         return ("<section><h2>验证推进条件：最终 Accuracy / ASR 距六方案最优值不超过2个百分点</h2>"
             "<p>逐 seed、逐场景比较第100轮：最高 Accuracy 减去 Ours Accuracy ≤ 2 个百分点；"
@@ -295,8 +342,8 @@ def _validation_gate_html(data):
             "六法使用各自固定入选候选；完整且数值有效的健康失败任务也参与。缺失仅排除对应任务参照，"
             "并标注比较不完整，不能声称完整六方法目标已通过。</p>"
             + _table(["项目", "验证记录"], [
-                ["推进状态", gate.get("status", "—")],
-                ["实际推进分支", gate.get("selected_pass_route", "—")],
+                [status_label, gate.get("status", "—")],
+                [route_label, gate.get("selected_pass_route", "—")],
                 ["Accuracy 相对最高值通过", target.get("accuracy_maximum_target_passed", False)],
                 ["ASR 相对最低值通过", target.get("asr_minimum_target_passed", False)],
                 ["完整逐场景目标通过", target.get("full_target_passed", False)],
@@ -304,8 +351,8 @@ def _validation_gate_html(data):
                 ["比较范围", gate.get("comparison_scope", "—")]])
             + "<p>这是验证阶段推进条件，不保证正式测试排名。Ours须通过完整健康检查；"
             "其它方案保留原健康最高Score、完整失败最高raw Score、固定fallback顺序。</p></section>")
-    rows = [["推进状态", gate.get("status", "—")],
-            ["实际推进分支", gate.get("selected_pass_route", gate.get("pass_route", "—"))],
+    rows = [[status_label, gate.get("status", "—")],
+            [route_label, gate.get("selected_pass_route", gate.get("pass_route", "—"))],
             ["完整逐场景目标通过", target.get("full_target_passed", False)],
             ["相对 VERT 目标", target.get("relative_target_status", "unassessed")],
             ["VERT 参照健康通过", gate.get("reference_health_qualified", "—")],
@@ -334,6 +381,26 @@ def _validation_gate_html(data):
             + "<p>这些是验证阶段的推进记录，不是正式测试最优性的保证。失败但可评分的 VERT 仍参与相对比较；"
             "无可评分 VERT 时，相对要求保留为未评估，不能宣称完整相对目标已通过。"
             "其它方案没有健康候选时，保留其最高完整 raw Score 候选及失败标记。</p></section>")
+
+
+def _continuation_decision_html(data):
+    decision = data.get("continuation_decision")
+    if not decision:
+        return ""
+    return ("<section class='notice'><h2>用户确认继续正式实验；原验证目标未通过</h2>"
+            f"<p>Ours 固定使用健康候选中 Score 最高的 <strong>{escape(str(decision['ours_candidate']))}</strong>，"
+            "本次正式执行来自用户确认继续实验，并非通过原验证门槛后自动推进。"
+            "原逐场景 Accuracy / ASR 目标仍为 unmet；正式结果不会改写该验证结论，"
+            "也不用于重新选择参数。</p>"
+            + _table(["项目", "执行来源"], [
+                ["用户决定", decision["decision"]],
+                ["执行方式", decision["mode"]],
+                ["原验证状态", decision["source_validation_status"]],
+                ["原验证目标通过", decision["validation_target_passed"]],
+                ["选参依据", decision["selection_basis"]],
+                ["验证 raw Score", decision["selection_raw_score"]],
+                ["决定记录时间（UTC）", decision.get("created_at_utc", "—")]])
+            + "</section>")
 
 
 def _html(data, figures, *, mean_page):
@@ -378,6 +445,7 @@ def _html(data, figures, *, mean_page):
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)}</title><style>body{{margin:auto;padding:32px;max-width:1440px;background:#f5f7fa;color:#202936;font:16px/1.65 system-ui,sans-serif}}h1,h2{{line-height:1.3}}a{{color:#175c9f}}section,.panel{{background:white;border:1px solid #dce2eb;border-radius:10px;padding:24px;margin:24px 0}}.notice{{border-left:5px solid #b57416;background:#fff7e6;padding:18px}}img{{display:block;width:100%;height:auto}}table{{border-collapse:collapse;width:100%;font-size:14px}}th,td{{text-align:left;padding:9px;border-bottom:1px solid #ddd;white-space:nowrap}}th{{background:#eaf0f6}}.scroll{{overflow-x:auto}}code{{background:#eee;padding:2px 4px}}.muted{{color:#596577}}</style></head><body>
 <h1>{escape(title)}</h1><p>{navigation}</p>
+{_continuation_decision_html(data)}
 <p>正式 seed：{seed_text}；本页 {len(data['runs'])} 组完整任务；通信轮次 0–{data['rounds']}；攻击窗口 {data['attack_start']}–{data['rounds']}（含端点）。目标 {data['target_source']} → {data['target_label']}，{data['target_count']} 个评价目标样本。</p>
 <div class="notice"><strong>执行完成 ≠ 全部健康通过。</strong>本页保留全部已记录的完整运行，其中 {data['health_failed_runs']} 组未通过健康检查。图表中的有限观测值仍纳入均值；未筛掉失败 seed，未插补缺失值。结果反映当前实现与配置，不能据此断言原论文算法普遍失效。</div>
 <section><h2>完成状态与选参来源</h2>{_table(['方法','固定候选','完整运行','健康通过','健康失败','非有限更新数','验证选参状态'], counts)}
@@ -399,6 +467,9 @@ def generate_report(output):
     """Validate first, render in staging, then publish derived report files."""
     check_dependencies()
     source_names = ["manifest.json", "final_plan.json", "final_summary.json", "final_results/summary.csv", "final_results/rounds.csv"]
+    for name in ("validation_summary.json", "continuation_decision.json"):
+        if (Path(output) / name).is_file():
+            source_names.append(name)
     def source_hashes():
         return {name: hashlib.sha256((Path(output) / name).read_bytes()).hexdigest() for name in source_names}
     original_hashes = source_hashes()
@@ -422,6 +493,9 @@ def generate_report(output):
                  "singleton_sd": None, "attack_window_inclusive": [data["attack_start"], data["rounds"]],
                  "source_sha256": original_hashes,
                  "figures": figures}
+        if data.get("continuation_decision"):
+            audit["continuation_decision"] = data["continuation_decision"]
+            audit["validation_final_metric_gate"] = data["final_summary"]["validation_final_metric_gate"]
         (mean_dir / "data_audit.json").write_text(json.dumps(audit, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         for seed in data["seeds"]:
             individual = aggregate_study(study, [seed])
