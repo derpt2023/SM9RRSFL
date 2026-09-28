@@ -4,6 +4,46 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。支持 MNIST/CIFAR-10、IID/Dirichlet Non-IID、NumPy/PyTorch，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-09-28：v7磁盘写入失败后的任务初始化恢复
+
+若日志出现 `task artifacts exist without their immutable identity`，表示任务目录存在残留文件但缺少
+`task.json`，worker在训练前拒绝启动。ENOSPC可能使身份临时文件未提交，并留下失败记录；这些记录又会阻止后续初始化。
+这类报错不代表算法性能或健康失败。`completed_snapshots`仅统计文件存在，不能单独证明快照完整或任务健康。
+
+先确认存储写入恢复，并停止本输出目录的runner和worker。通过GitHub更新后使用独立工具；它不修改43项冻结科学源码、
+配置、验证结果、候选选择或正式计划，不重新训练、不创建任务身份，也不加载结果pickle。
+
+```bash
+# 默认只检查；原来指定过自定义输出时，两条命令都加同一个 --output 路径
+python repair_cifar_orphan_tasks.py \
+  --config configs/cifar10_six_relative_best_five_day_v7.json
+
+# 仅在检查得到 status=ready 后处理可安全隔离的启动残留
+python repair_cifar_orphan_tasks.py \
+  --config configs/cifar10_six_relative_best_five_day_v7.json --apply
+```
+
+工具校验manifest/源码/配置、验证与正式计划、原用户继续决定，并取得原runner锁、检查遗留worker进程。
+只处理缺少 `task.json` 且仅有 `worker.log`、失败JSON或身份/失败临时JSON的正式任务目录；已有完整临时身份必须匹配原计划，
+可解析失败记录必须属于该任务且没有训练上下文，日志不能包含已执行轮次。含检查点、结果、训练上下文、未知文件、
+符号链接、损坏或冲突的正式 `task.json` 时输出 `blocked`，整批不移动；请保留输出进一步诊断。
+
+`--apply`将符合条件的目录整体原子移动到原输出内的 `orphan_recovery/<批次>/<原task_id>/`，
+保留所有原字节，并写入文件SHA、冻结元数据SHA和逐任务移动记录 `audit.json`。没有删除实验数据或回填身份文件。
+备份占用仍计入原存储空间，工具不解决底层容量/配额/存储池问题。若工具中途失败，已移动目录仍在备份、其余留在tasks，
+排除原因后可重新检查/执行；不要删除备份或使用旧v2的另建输出恢复脚本。
+
+得到 `status=quarantined`（或无需处理的 `no_action`）后，按原命令、原输出续跑：
+
+```bash
+python -u run_cifar_six_with_progress.py \
+  --config configs/cifar10_six_relative_best_five_day_v7.json --devices auto
+```
+
+本次仍输入Y；原runner会再次验证正式身份及快照，复用有效完整任务、恢复有身份的有效检查点，
+为被隔离的启动残留对应任务按原冻结计划重新初始化。恢复工具的统计不代替原runner的完整性与健康检查。
+如果再次ENOSPC，保留日志并排查实际写入限制；小文件写入成功不保证并发大检查点可持续写入。
+
 ## 2026-09-27：v7未达标后的交互式正式实验与续跑
 
 原逐任务最终Accuracy、ASR均距可用六法最优值≤2个百分点的规则不变。满足原门槛时自动进入正式阶段；
