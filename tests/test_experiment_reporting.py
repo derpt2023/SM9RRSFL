@@ -129,6 +129,92 @@ class ExperimentReportingTests(unittest.TestCase):
     def load(self):
         return reporting.load_completed_study(self.root)
 
+    def fail_one_run(self):
+        final = read_json(self.root / "final_summary.json")
+        state = next(t for t in final["tasks"] if t["task_id"] == "final_vert_0.4_901")
+        state.update(status="failed", metrics=None, failure_record="/old/server/path/failure.json")
+        final["full_execution_completed"] = False
+        final["methods"]["vert"]["completed_runs"] -= 1
+        final["methods"]["vert"]["healthy_runs"] -= 1
+        final["health_failures"].append({"task_id": state["task_id"], "reasons": ["failed"]})
+        write_json(self.root / "final_summary.json", final)
+        folder = self.root / "tasks" / state["task_id"]
+        (folder / "metrics.json").unlink()
+        write_json(folder / "failure.json", {"task_id": state["task_id"], "exception": "FloatingPointError",
+            "message": "invalid confidence", "execution_context": {"last_completed_round": 1}})
+        for name in ("summary.csv", "rounds.csv"):
+            path = self.root / "final_results" / name
+            write_csv(path, [r for r in read_csv(path) if not (
+                r["method"] == "vert" and float(r["malicious_ratio"]) == .4 and int(r["seed"]) == 901)])
+
+    def test_partial_report_preserves_failed_health_seeds_and_actual_sample_sizes(self):
+        self.fail_one_run()
+        with self.assertRaisesRegex(reporting.ReportIncompleteError, "Formal execution is incomplete"):
+            self.load()
+        study = reporting.load_completed_study(self.root, allow_partial=True)
+        data = reporting.aggregate_study(study)
+        row = next(s for s in data["scenarios"] if s["method"] == "vert" and s["malicious_ratio"] == .4)
+        self.assertEqual((row["n"], row["expected_n"], row["missing_seeds"]), (2, 3, [901]))
+        self.assertAlmostEqual(row["final_accuracy_mean"], .7)
+        self.assertEqual(row["failed_runs"], 1)
+        html = reporting._html(data, [], mean_page=True)
+        for text in ("11/12", "不完整实验报告", "final_vert_0.4_901", "存活样本偏差", "不计算总体均值"):
+            self.assertIn(text, html)
+        from experiment_report_plots import _prepare, _health_note, _sample_note
+        scenarios, _, _ = _prepare(data)
+        self.assertIn("VERT 40% n=2/3", _health_note(data["groups"][0], scenarios))
+        individual = reporting.aggregate_study(study, [901])
+        scenarios, _, _ = _prepare(individual)
+        absent = next(s for s in individual["scenarios"] if s["method"] == "vert" and s["malicious_ratio"] == .4)
+        self.assertEqual(absent["n"], 0)
+        self.assertIsNone(absent["final_accuracy_mean"])
+        self.assertIn("VERT 40% n=0/1", _health_note(individual["groups"][0], scenarios))
+        self.assertIn("sample SD unavailable", _sample_note(individual, individual["groups"][0], scenarios))
+
+    def test_partial_report_still_rejects_corrupt_complete_run(self):
+        self.fail_one_run()
+        path = self.root / "final_results/rounds.csv"
+        write_csv(path, read_csv(path)[1:])
+        with self.assertRaisesRegex(reporting.ReportIncompleteError, "Round CSV is incomplete"):
+            reporting.load_completed_study(self.root, allow_partial=True)
+
+    def test_partial_report_requires_failure_evidence_and_matching_completion_flag(self):
+        final = read_json(self.root / "final_summary.json")
+        final["full_execution_completed"] = False
+        write_json(self.root / "final_summary.json", final)
+        with self.assertRaisesRegex(reporting.ReportIncompleteError, "completion flag"):
+            reporting.load_completed_study(self.root, allow_partial=True)
+        self.fail_one_run()
+        (self.root / "tasks/final_vert_0.4_901/failure.json").unlink()
+        with self.assertRaisesRegex(reporting.ReportIncompleteError, "Cannot read report input"):
+            reporting.load_completed_study(self.root, allow_partial=True)
+
+    def test_partial_report_does_not_publish_a_complete_audit_or_modify_sources(self):
+        self.fail_one_run()
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        fake = SimpleNamespace(render_figures=lambda *args, **kwargs: [])
+        with mock.patch.object(reporting, "check_dependencies"), mock.patch.dict("sys.modules", {"experiment_report_plots": fake}):
+            result = reporting.generate_report(self.root)
+        self.assertFalse(result["complete_matrix_verified"])
+        self.assertEqual(result["missing_run_count"], 1)
+        audit = read_json(self.root / "final_results/mean_plots/data_audit.json")
+        self.assertFalse(audit["complete_matrix_verified"])
+        self.assertEqual((audit["planned_run_count"], audit["run_count"], audit["round_row_count"]), (12, 11, 44))
+        self.assertIn("tasks/final_vert_0.4_901/failure.json", audit["source_sha256"])
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_recovered_complete_run_can_retain_historical_failure_record(self):
+        final = read_json(self.root / "final_summary.json")
+        task = final["tasks"][0]
+        task["failure_record"] = "/old/host/failure.json"
+        write_json(self.root / "final_summary.json", final)
+        write_json(self.root / "tasks" / task["task_id"] / "failure.json",
+                   {"task_id": task["task_id"], "exception": "OSError", "message": "previous ENOSPC"})
+        study = self.load()
+        self.assertEqual(len(study["runs"]), 12)
+        self.assertEqual(study["historical_failures"][0]["task_id"], task["task_id"])
+
     def mark_continuation(self):
         manifest = read_json(self.root / "manifest.json")
         manifest["spec"].update(

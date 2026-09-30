@@ -736,8 +736,12 @@ def render_final_report(output, *, training_exit_code=None):
         from experiment_reporting import check_dependencies, generate_report
         check_dependencies()
         result = generate_report(output)
-        status.update(status="completed", report=result)
+        partial = result.get("complete_matrix_verified") is False
+        status.update(status="completed_partial" if partial else "completed", report=result)
         print("REPORT_COMPLETED " + json.dumps(result, ensure_ascii=False, default=str), flush=True)
+        if partial:
+            print(f"REPORT_INCOMPLETE {result['run_count']}/{result['planned_run_count']} complete tasks; "
+                  "missing tasks and actual sample sizes are disclosed; no missing values were imputed.", flush=True)
         succeeded = True
     except Exception as exc:
         status.update(status="failed", error_type=type(exc).__name__, error=str(exc))

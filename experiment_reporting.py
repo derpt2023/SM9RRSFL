@@ -147,14 +147,15 @@ def _load_continuation_decision(output, manifest, plan, final):
     return decision
 
 
-def load_completed_study(output):
+def load_completed_study(output, *, allow_partial=False):
     """Validate the declared final matrix, every round and merged observations."""
     output = Path(output).resolve()
     manifest = _json(output / "manifest.json")
     plan = _json(output / "final_plan.json")
     final = _json(output / "final_summary.json")
     continuation = _load_continuation_decision(output, manifest, plan, final)
-    _require(final.get("full_execution_completed") is True,
+    partial = final.get("full_execution_completed") is not True
+    _require(not partial or (allow_partial and final.get("all_scheduled_tasks_attempted") is True),
              "Formal execution is incomplete; no complete mean report was generated")
     _require(plan.get("manifest_fingerprint") == manifest.get("fingerprint"),
              "Final plan belongs to a different manifest")
@@ -166,7 +167,31 @@ def load_completed_study(output):
     summaries = _index(_csv(output / "final_results/summary.csv"), _key, "summary row")
     statuses = _index(final["tasks"], lambda t: t["task_id"], "task status")
     _require(set(statuses) == set(by_id), "Final task status matrix differs from plan")
-    _require(set(summaries) == set(planned), "Final summary CSV has missing or extra runs")
+    missing_tasks = []
+    for key, task in planned.items():
+        state = statuses[task["task_id"]]
+        if state["status"] == "complete":
+            continue
+        _require(partial and allow_partial and state["status"] == "failed"
+                 and state.get("error") is None and state.get("metrics") is None
+                 and state.get("failure_record"), f"Task not completed: {task['task_id']}")
+        folder = output / "tasks" / task["task_id"]
+        _require(_json(folder / "task.json") == task, f"Missing-task identity differs: {task['task_id']}")
+        failure = _json(folder / "failure.json")
+        _require(failure.get("task_id") == task["task_id"]
+                 and isinstance(failure.get("exception"), str) and isinstance(failure.get("message"), str),
+                 f"Invalid missing-task failure evidence: {task['task_id']}")
+        _require(not (folder / ".completed_results.pickle").exists(),
+                 f"Failed task has a completed snapshot; rebuild the training summary first: {task['task_id']}")
+        missing_tasks.append({"task_id": task["task_id"], "method": task["method"],
+            "partition": key[0], "dirichlet_alpha": key[1], "num_clients": key[2],
+            "malicious_ratio": key[4], "seed": key[5], "exception": failure["exception"],
+            "message": failure["message"],
+            "last_completed_round": (failure.get("execution_context") or {}).get("last_completed_round")})
+    available = {k: t for k, t in planned.items() if statuses[t["task_id"]]["status"] == "complete"}
+    _require(bool(available), "No complete observations available to report")
+    _require(partial == bool(missing_tasks), "Execution completion flag disagrees with task coverage")
+    _require(set(summaries) == set(available), "Final summary CSV has missing or extra runs")
     seeds = sorted(int(s) for s in spec["final"]["seeds"])
     _require(len(set(seeds)) == len(seeds), "Duplicate final seeds")
     methods = [m for m in METHODS if any(t["method"] == m for t in tasks)]
@@ -186,7 +211,7 @@ def load_completed_study(output):
     _require(expected_count == len(planned), "Manifest final run count differs from final plan")
     per_round = _index(_csv(output / "final_results/rounds.csv"),
                        lambda r: (*_key(r), int(r["round"])), "round observation")
-    expected_rounds = {(*key, r) for key in planned for r in range(rounds + 1)}
+    expected_rounds = {(*key, r) for key in available for r in range(rounds + 1)}
     _require(set(per_round) == expected_rounds,
              "Round CSV is incomplete or contains unexpected rows (expected rounds 0 through final)")
     group_keys = sorted({_group(t["config"]) for t in tasks}, key=lambda g: (g[0] != "iid", g))
@@ -195,11 +220,16 @@ def load_completed_study(output):
                + f" | {g[2]} clients", "partition": g[0], "dirichlet_alpha": g[1], "num_clients": g[2],
                "ratios": sorted({k[4] for k in planned if k[:3] == g})} for g in group_keys]
     runs, curves = [], []
-    for key, task in planned.items():
+    historical_failures = []
+    for key, task in available.items():
         config, row, state = task["config"], summaries[key], statuses[task["task_id"]]
         context = task["task_id"]
-        _require(state["status"] == "complete" and state.get("error") is None
-                 and state.get("failure_record") is None, f"Task not completed: {context}")
+        _require(state["status"] == "complete" and state.get("error") is None, f"Task not completed: {context}")
+        if state.get("failure_record"):
+            historical = _json(output / "tasks" / context / "failure.json")
+            _require(historical.get("task_id") == context, f"Historical failure identity differs: {context}")
+            historical_failures.append({"task_id": context, "exception": historical.get("exception"),
+                                        "message": historical.get("message")})
         _require(_json(output / "tasks" / context / "task.json") == task,
                  f"Task identity differs from final plan: {context}")
         metrics = _json(output / "tasks" / context / "metrics.json")
@@ -247,18 +277,22 @@ def load_completed_study(output):
                      "crypto_wall_seconds": crypto, "peak_rss_mib": rss})
         curves.extend(raw)
     actual_failures = {r["task_id"]: r["failure_reasons"] for r in runs if not r["healthy"]}
+    actual_failures.update({r["task_id"]: [statuses[r["task_id"]]["status"]] for r in missing_tasks})
     reported_failures = {r["task_id"]: r["reasons"] for r in final["health_failures"]}
     _require(actual_failures == reported_failures, "Health failure list differs from individual task metrics")
     for method in methods:
         observed = [r for r in runs if r["method"] == method]
         info = final["methods"][method]
-        _require(info["expected_runs"] == info["completed_runs"] == len(observed)
+        _require(info["expected_runs"] == sum(t["method"] == method for t in tasks)
+                 and info["completed_runs"] == len(observed)
                  and info["healthy_runs"] == sum(r["healthy"] for r in observed), f"Method counts inconsistent: {method}")
     return {"dataset_label": {"cifar10": "CIFAR-10", "mnist": "MNIST"}.get(spec["dataset"]["name"], spec["dataset"]["name"]),
             "seeds": seeds, "rounds": rounds, "attack_start": attack_start,
             "target_source": shared["attack_source_label"], "target_label": shared["attack_target_label"],
             "target_count": shared["attack_target_count"], "methods": methods, "groups": groups,
-            "runs": runs, "raw_curves": curves, "health_failed_runs": len(actual_failures),
+            "runs": runs, "raw_curves": curves, "health_failed_runs": sum(not r["healthy"] for r in runs),
+            "missing_tasks": missing_tasks, "historical_failures": historical_failures,
+            "planned_run_count": len(planned), "complete_matrix_verified": not partial,
             "manifest": manifest, "final_summary": final, "output": str(output),
             "continuation_decision": continuation}
 
@@ -269,14 +303,25 @@ def aggregate_study(study, seeds=None):
     result["seeds"] = list(study["seeds"] if seeds is None else seeds)
     _require(bool(result["seeds"]) and set(result["seeds"]) <= set(study["seeds"]), "Invalid report seeds")
     result["runs"] = [r for r in study["runs"] if r["seed"] in result["seeds"]]
+    result["missing_tasks"] = [r for r in study.get("missing_tasks", []) if r["seed"] in result["seeds"]]
+    result["planned_run_count"] = len(result["runs"]) + len(result["missing_tasks"])
+    result["complete_matrix_verified"] = not result["missing_tasks"]
     result["health_failed_runs"] = sum(not r["healthy"] for r in result["runs"])
     buckets = defaultdict(list)
     for row in result["runs"]:
         buckets[(row["group_slug"], row["method"], row["malicious_ratio"])].append(row)
     scenarios = []
-    for (group, method, ratio), rows in buckets.items():
-        _require(sorted(r["seed"] for r in rows) == sorted(result["seeds"]), "Incomplete scenario seed group")
+    expected = [(g["slug"], method, ratio) for g in study["groups"]
+                for method in study["methods"] for ratio in g["ratios"]]
+    for group, method, ratio in expected:
+        rows = buckets[(group, method, ratio)]
+        observed_seeds = sorted(r["seed"] for r in rows)
+        _require(len(set(observed_seeds)) == len(rows), "Duplicate scenario seed")
+        if result["complete_matrix_verified"]:
+            _require(observed_seeds == sorted(result["seeds"]), "Incomplete scenario seed group")
         record = {"group_slug": group, "method": method, "malicious_ratio": ratio, "n": len(rows),
+                  "expected_n": len(result["seeds"]), "observed_seeds": observed_seeds,
+                  "missing_seeds": sorted(set(result["seeds"]) - set(observed_seeds)),
                   "failed_runs": sum(not r["healthy"] for r in rows),
                   "failure_reasons": sorted({reason for r in rows for reason in r["failure_reasons"]})}
         for metric in METRICS:
@@ -293,12 +338,17 @@ def aggregate_study(study, seeds=None):
         if row["seed"] in result["seeds"]:
             buckets[(row["group_slug"], row["method"], row["malicious_ratio"], row["round"])].append(row)
     curves = []
-    for (group, method, ratio, round_), rows in buckets.items():
-        _require(len(rows) == len(result["seeds"]), "Incomplete curve seed group")
-        record = {"group_slug": group, "method": method, "malicious_ratio": ratio, "round": round_, "n": len(rows)}
-        for metric in ("accuracy", "asr"):
-            record[metric + "_mean"], record[metric + "_sd"] = _mean_sd(r[metric] for r in rows)
-        curves.append(record)
+    sizes = {(s["group_slug"], s["method"], s["malicious_ratio"]): s["n"] for s in scenarios}
+    for group, method, ratio in expected:
+        for round_ in range(study["rounds"] + 1):
+            rows = buckets[(group, method, ratio, round_)]
+            _require(len(rows) == sizes[(group, method, ratio)], "Incomplete curve seed group")
+            record = {"group_slug": group, "method": method, "malicious_ratio": ratio,
+                      "round": round_, "n": len(rows), "expected_n": len(result["seeds"])}
+            for metric in ("accuracy", "asr"):
+                record[metric + "_mean"], record[metric + "_sd"] = (
+                    _mean_sd(r[metric] for r in rows) if rows else (None, None))
+            curves.append(record)
     result.update(scenarios=scenarios, curves=curves)
     return result
 
@@ -408,6 +458,9 @@ def _html(data, figures, *, mean_page):
     asr_label = "最终 ASR 均值 ± seed SD (%)" if final_only else "攻击窗口 ASR 均值 ± seed SD (%)"
     asr_note = "每个任务仅取最终轮 ASR。过程统计仅作诊断。" if final_only else "先在单任务攻击窗口内求均值。"
     title = f"{data['dataset_label']} · " + ("三种子均值报告" if len(data['seeds']) == 3 else "实验报告")
+    missing = data.get("missing_tasks", [])
+    if missing:
+        title = f"{data['dataset_label']} · 不完整实验报告（{len(data['runs'])}/{data['planned_run_count']}）"
     seed_text = ", ".join(map(str, data["seeds"]))
     prefix = "mean_plots/" if mean_page else "plots/"
     navigation = ("<a href='mean_plots/mean_figures.pdf'>下载均值图 PDF 合集</a> · " + " · ".join(
@@ -419,6 +472,9 @@ def _html(data, figures, *, mean_page):
         counts.append([LABELS[method], info["selected_candidate"], len(rows), sum(r["healthy"] for r in rows),
                        sum(not r["healthy"] for r in rows), sum(r["nonfinite_updates"] for r in rows),
                        info.get("validation_selection_status", "—")])
+        if any(r["method"] == method for r in missing):
+            overall.append([LABELS[method], "—（场景缺失，不计算总体均值）", "—（场景缺失）"])
+            continue
         seed_acc, seed_asr = [], []
         for seed in data["seeds"]:
             selected = [r for r in rows if r["seed"] == seed]
@@ -431,6 +487,16 @@ def _html(data, figures, *, mean_page):
                         _format(*_mean_sd(seed_asr), scale=100) if seed_asr else "—"])
     failures = [[r["task_id"], LABELS[r["method"]], r["seed"], f"{100*r['malicious_ratio']:g}%",
                  ", ".join(r["failure_reasons"]), r["nonfinite_updates"]] for r in data["runs"] if not r["healthy"]]
+    missing_html = ""
+    if missing:
+        missing_html = '<section class="notice"><h2>未完成任务与缺失数据</h2><p>' + (
+            f"计划 {data['planned_run_count']} 组，完整 {len(data['runs'])} 组，缺失 {len(missing)} 组。"
+            "受影响场景只展示现有完整 seed 的描述性均值，图内标注实际 n；"
+            "它不能替代完整 seed 组的结果，可能存在存活样本偏差。n=0 留空，不填0、不沿用失败前轮次。"
+            "存在缺失的方法不计算总体指标。原实验完成状态保持不变。</p>") + _table(
+                ["任务", "方法", "seed", "最后完成轮", "异常", "原因"],
+                [[r["task_id"], LABELS[r["method"]], r["seed"], r["last_completed_round"],
+                  r["exception"], r["message"]] for r in missing]) + '</section>'
     cards = "".join(f"<section class='figure' id='{escape(f['name'])}'><h2>{escape(f['title'])}</h2>"
                     f"<p><a href='{prefix}{escape(str(f['svg']))}'>SVG 矢量图</a> · "
                     f"<a href='{prefix}{escape(str(f['png']))}'>PNG 预览</a></p>"
@@ -440,14 +506,15 @@ def _html(data, figures, *, mean_page):
                       _format(s["final_asr_mean"], s["final_asr_sd"], 100),
                       _format(s["attack_asr_mean"], s["attack_asr_sd"], 100)] for s in data["scenarios"]]
     downloads = ("<p>可复核数据：" + " · ".join(f"<a href='mean_plots/{f}'>{f}</a>" for f in
-                 ("scenario_mean_sd.csv", "curve_mean_sd.csv", "per_run.csv", "health_failures.csv", "data_audit.json")) +
+                 ("scenario_mean_sd.csv", "curve_mean_sd.csv", "per_run.csv", "health_failures.csv", "missing_tasks.csv", "data_audit.json")) +
                  " · <a href='summary.csv'>原始 summary.csv</a> · <a href='rounds.csv'>原始 rounds.csv</a></p>") if mean_page else ""
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)}</title><style>body{{margin:auto;padding:32px;max-width:1440px;background:#f5f7fa;color:#202936;font:16px/1.65 system-ui,sans-serif}}h1,h2{{line-height:1.3}}a{{color:#175c9f}}section,.panel{{background:white;border:1px solid #dce2eb;border-radius:10px;padding:24px;margin:24px 0}}.notice{{border-left:5px solid #b57416;background:#fff7e6;padding:18px}}img{{display:block;width:100%;height:auto}}table{{border-collapse:collapse;width:100%;font-size:14px}}th,td{{text-align:left;padding:9px;border-bottom:1px solid #ddd;white-space:nowrap}}th{{background:#eaf0f6}}.scroll{{overflow-x:auto}}code{{background:#eee;padding:2px 4px}}.muted{{color:#596577}}</style></head><body>
 <h1>{escape(title)}</h1><p>{navigation}</p>
 {_continuation_decision_html(data)}
+{missing_html}
 <p>正式 seed：{seed_text}；本页 {len(data['runs'])} 组完整任务；通信轮次 0–{data['rounds']}；攻击窗口 {data['attack_start']}–{data['rounds']}（含端点）。目标 {data['target_source']} → {data['target_label']}，{data['target_count']} 个评价目标样本。</p>
-<div class="notice"><strong>执行完成 ≠ 全部健康通过。</strong>本页保留全部已记录的完整运行，其中 {data['health_failed_runs']} 组未通过健康检查。图表中的有限观测值仍纳入均值；未筛掉失败 seed，未插补缺失值。结果反映当前实现与配置，不能据此断言原论文算法普遍失效。</div>
+<div class="notice"><strong>完整运行 ≠ 健康通过。</strong>本页保留全部已记录的完整运行，其中 {data['health_failed_runs']} 组未通过健康检查。图表中的有限观测值仍纳入均值；完整运行不因健康失败被剔除，未完成任务另列，未插补缺失值。结果反映当前实现与配置，不能据此断言原论文算法普遍失效。</div>
 <section><h2>完成状态与选参来源</h2>{_table(['方法','固定候选','完整运行','健康通过','健康失败','非有限更新数','验证选参状态'], counts)}
 <p>best_scored_unqualified 表示验证候选未通过健康门槛，但按预设规则从完整可评分候选中选出最高 raw Score；不代表健康通过。正式结果不参与重选参数。原始 ours_target 中的 incomplete 属于过滤不健康参照后的比较状态，不等于任务未运行完。</p></section>
 {_validation_gate_html(data)}
@@ -470,10 +537,15 @@ def generate_report(output):
     for name in ("validation_summary.json", "continuation_decision.json"):
         if (Path(output) / name).is_file():
             source_names.append(name)
+    for task in _json(Path(output) / "final_plan.json")["tasks"]:
+        for name in ("task.json", "metrics.json", "failure.json"):
+            relative = f"tasks/{task['task_id']}/{name}"
+            if (Path(output) / relative).is_file():
+                source_names.append(relative)
     def source_hashes():
         return {name: hashlib.sha256((Path(output) / name).read_bytes()).hexdigest() for name in source_names}
     original_hashes = source_hashes()
-    study = load_completed_study(output)
+    study = load_completed_study(output, allow_partial=True)
     data = aggregate_study(study)
     from experiment_report_plots import render_figures
     destination = Path(output).resolve() / "final_results"
@@ -486,9 +558,16 @@ def generate_report(output):
         _write_csv(mean_dir / "curve_mean_sd.csv", data["curves"])
         _write_csv(mean_dir / "per_run.csv", data["runs"])
         _write_csv(mean_dir / "health_failures.csv", [r for r in data["runs"] if not r["healthy"]], data["runs"][0].keys())
+        _write_csv(mean_dir / "missing_tasks.csv", data["missing_tasks"],
+                   ("task_id", "method", "partition", "dirichlet_alpha", "num_clients", "malicious_ratio",
+                    "seed", "exception", "message", "last_completed_round"))
         audit = {"generated_at_utc": datetime.now(timezone.utc).isoformat(), "dataset": data["dataset_label"],
                  "seeds": data["seeds"], "run_count": len(data["runs"]), "round_row_count": len(data["raw_curves"]),
-                 "health_failed_runs": data["health_failed_runs"], "complete_matrix_verified": True,
+                 "health_failed_runs": data["health_failed_runs"],
+                 "complete_matrix_verified": data["complete_matrix_verified"],
+                 "planned_run_count": data["planned_run_count"], "missing_tasks": data["missing_tasks"],
+                 "historical_failures": data["historical_failures"],
+                 "missing_data_policy": "available_complete_seeds_with_explicit_n; no_imputation; incomplete_method_overall_suppressed",
                  "all_health_failed_observations_retained": True, "standard_deviation_ddof": 1,
                  "singleton_sd": None, "attack_window_inclusive": [data["attack_start"], data["rounds"]],
                  "source_sha256": original_hashes,
@@ -514,6 +593,8 @@ def generate_report(output):
             os.replace(path, target)
     return {"html_path": str(destination / "visualizations.html"),
             "pdf_path": str(destination / "mean_plots/mean_figures.pdf"),
+            "complete_matrix_verified": data["complete_matrix_verified"],
+            "planned_run_count": data["planned_run_count"], "missing_run_count": len(data["missing_tasks"]),
             "run_count": len(data["runs"]), "health_failed_runs": data["health_failed_runs"], "figure_count": len(figures)}
 
 

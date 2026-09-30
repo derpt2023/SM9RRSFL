@@ -4,6 +4,31 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。支持 MNIST/CIFAR-10、IID/Dirichlet Non-IID、NumPy/PyTorch，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-09-29：已结束但有任务失败的实验也生成可视化
+
+报告层现在支持“所有任务已尝试，但部分任务有明确失败记录”的正式实验。原先只接受
+`full_execution_completed=true`，会使179/180完成的实验在自动报告阶段报 `Formal execution is incomplete`。
+现在仍逐项检查冻结身份、原始CSV、完整轮次和指标一致性；有明确失败证据的缺失任务在报告单独列出，
+不会把损坏的已完成任务静默排除。训练、选参、性能门槛、完成/健康状态和43项科学源码保持原样。
+
+HTML首页和各图明确标注不完整状态。受影响场景按可用完整seed计算描述性均值并标注实际n，例如TAD
+Non-IID 80%只有两个完整seed时显示n=2/3；这不是完整三seed结果，可能有存活样本偏差。
+单seed页面对应任务缺失时留空（n=0/1），不补零、不用中止前结果替代最终值。存在缺失的方法不计算总体指标。
+所有完整但健康失败的运行仍纳入统计；恢复成功后保留的历史failure.json也不再被误判为当前任务未完成。
+
+原包装入口正常结束正式调度时自动生成报告；部分报告会额外打印 `REPORT_INCOMPLETE`，
+`report_generation_status.json`记录 `completed_partial`，不把原实验改成完整成功。
+既有输出通过下面命令补图，无须重新训练或再次确认Y：
+
+```bash
+python -u run_cifar_six_with_progress.py --report-only \
+  --output outputs/cifar10_six_relative_best_five_day_v7
+```
+
+路径包含空格时用引号包围，例如本地导入副本 `--output "outputs/cifar10_six_relative_best_five_day_v7 2"`。
+产物位于 `final_results/visualizations.html`、`final_results/mean_plots/`及各 `seed_*/`，包含SVG/PNG、均值PDF、
+实际样本数与缺失seed的统计CSV、`missing_tasks.csv`和源文件SHA审计。报告生成仅写派生文件，保留原实验CSV/JSON和检查点。
+
 ## 2026-09-28：v7磁盘写入失败后的任务初始化恢复
 
 若日志出现 `task artifacts exist without their immutable identity`，表示任务目录存在残留文件但缺少

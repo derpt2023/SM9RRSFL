@@ -476,6 +476,31 @@ class ReportHookTests(unittest.TestCase):
             self.assertEqual(status["training_exit_code"], 0)
             self.assertEqual(status["report"]["health_failed_runs"], 35)
 
+    def test_automatic_partial_report_discloses_coverage_without_retrying_training(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.prepare_output(directory)
+            summary = output / "final_summary.json"
+            summary.write_text(json.dumps({"full_execution_completed": False,
+                                           "all_scheduled_tasks_attempted": True}))
+            original_summary = summary.read_bytes()
+            module = self.report_module()
+            module.generate_report.return_value.update(
+                run_count=179, planned_run_count=180, missing_run_count=1, complete_matrix_verified=False)
+            def complete(*args, **kwargs):
+                kwargs["phase_state"]["phase"] = "final"
+                return 0
+            with mock.patch.dict(sys.modules, {"experiment_reporting": module}), \
+                    mock.patch.object(progress, "discover_gpus", return_value=[gpu(0)]), \
+                    mock.patch.object(progress, "monitor", side_effect=complete) as monitor, \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as console:
+                self.assertEqual(progress.main(["--output", str(output)]), 0)
+            monitor.assert_called_once()
+            module.generate_report.assert_called_once_with(output.resolve())
+            self.assertEqual(summary.read_bytes(), original_summary)
+            status = json.loads((output / "report_generation_status.json").read_text())
+            self.assertEqual(status["status"], "completed_partial")
+            self.assertIn("REPORT_INCOMPLETE 179/180", console.getvalue())
+
     def test_validation_gate_and_nonzero_exits_do_not_generate_reports(self):
         cases = [("validation", "validation", 0), ("all", "validation", 0),
                  ("all", None, 0), ("all", "final", 1), ("all", "final", 75),

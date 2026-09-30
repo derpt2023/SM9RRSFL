@@ -95,9 +95,14 @@ def _prepare(data):
             raise ValueError(f"Duplicate scenario: {key}")
         n = int(row["n"])
         failed = int(row["failed_runs"])
-        if n != row["n"] or not 1 <= n <= len(seeds) or not 0 <= failed <= n:
+        minimum_n = 0 if data.get("complete_matrix_verified") is False else 1
+        if n != row["n"] or not minimum_n <= n <= len(seeds) or not 0 <= failed <= n:
             raise ValueError(f"Invalid seed/failure count for {key}")
         for metric in PROBABILITY_METRICS + OVERHEAD_METRICS:
+            if n == 0:
+                if row[metric + "_mean"] is not None or row[metric + "_sd"] is not None:
+                    raise ValueError("A missing scenario must have no metric values")
+                continue
             # A clean scenario has no attack window. Do not invent a window
             # statistic merely because rounds share the same numerical range.
             if (key[2] == 0 and metric in ("attack_accuracy", "attack_asr")
@@ -113,7 +118,13 @@ def _prepare(data):
         key, t = _key(row), int(row["round"])
         if key not in curves or t in curves[key] or t != row["round"]:
             raise ValueError(f"Unexpected or duplicate curve row: {key}, round {t}")
+        if row.get("n", scenarios[key]["n"]) != scenarios[key]["n"]:
+            raise ValueError("Curve/scenario sample counts differ")
         for metric in ("accuracy", "asr"):
+            if scenarios[key]["n"] == 0:
+                if row[metric + "_mean"] is not None or row[metric + "_sd"] is not None:
+                    raise ValueError("A missing curve must have no observations")
+                continue
             _finite(row[metric + "_mean"], metric, probability=True)
             _check_sd(row[metric + "_sd"], scenarios[key]["n"], metric + "_sd")
         curves[key][t] = row
@@ -138,9 +149,10 @@ def _group_scenarios(group, scenarios):
 
 def _sample_note(data, group, scenarios):
     counts = sorted({row["n"] for row in _group_scenarios(group, scenarios)})
-    if counts == [1]:
+    if counts == [1] or len(data["seeds"]) == 1:
         seed = f" {data['seeds'][0]}" if len(data["seeds"]) == 1 else " per scenario"
-        return f"Single seed{seed}; sample SD unavailable"
+        missing_note = "; missing scenarios left blank" if 0 in counts else ""
+        return f"Single seed{seed}; sample SD unavailable" + missing_note
     count = str(counts[0]) if len(counts) == 1 else f"{counts[0]}-{counts[-1]}"
     seeds = ", ".join(str(seed) for seed in data["seeds"])
     return f"Mean ± 1 sample SD; seeds {seeds} (n={count})"
@@ -150,14 +162,17 @@ def _health_note(group, scenarios):
     rows = _group_scenarios(group, scenarios)
     total = sum(row["n"] for row in rows)
     failed = sum(row["failed_runs"] for row in rows)
+    missing = [f"{LABELS[r['method']]} {r['malicious_ratio']*100:g}% n={r['n']}/{r['expected_n']}"
+               for r in rows if r.get("expected_n", r["n"]) > r["n"]]
+    coverage = (" INCOMPLETE: " + "; ".join(missing) + ". Available seeds only; no imputation.") if missing else ""
     if not failed:
-        return f"Health-failed runs: 0/{total}. All observations retained."
+        return f"Health-failed runs: 0/{total}. All complete observations retained." + coverage
     counts = {}
     for row in rows:
         if row["failed_runs"]:
             counts[row["method"]] = counts.get(row["method"], 0) + row["failed_runs"]
     details = ", ".join(f"{LABELS[m]} {counts[m]}" for m in LABELS if m in counts)
-    return f"Health-failed runs retained: {failed}/{total} ({details})."
+    return f"Health-failed runs retained: {failed}/{total} ({details})." + coverage
 
 
 def _handles(methods):
@@ -185,7 +200,8 @@ def _footer(fig, lines, *, x=.08, width=116):
 
 
 def _title(data, group, suffix):
-    return f"{data['dataset_label']} | {group['label']} | {suffix}"
+    partial = " [INCOMPLETE]" if data.get("complete_matrix_verified") is False else ""
+    return f"{data['dataset_label']} | {group['label']} | {suffix}{partial}"
 
 
 def _curve_figure(data, group, metric, scenarios, curves):
@@ -203,6 +219,8 @@ def _curve_figure(data, group, metric, scenarios, curves):
         ax = axes.flat[i]
         for j, method in enumerate(methods):
             key = (group["slug"], method, float(ratio))
+            if scenarios[key]["n"] == 0:
+                continue
             rows = curves[key]
             mean = np.array([rows[r][metric + "_mean"] for r in t]) * 100
             if scenarios[key]["n"] > 1:
@@ -219,6 +237,11 @@ def _curve_figure(data, group, metric, scenarios, curves):
             ax.axvline(data["attack_start"], color="#777777", linestyle=(0, (2, 3)), linewidth=.7, zorder=0)
         ratio_label = "0% (clean)" if ratio == 0 else f"{ratio*100:g}% malicious"
         ax.set_title(f"({chr(97+i)}) {ratio_label}", fontsize=8.8, loc="left", pad=6)
+        missing = [f"{LABELS[m]} n={scenarios[(group['slug'], m, float(ratio))]['n']}/{len(data['seeds'])}"
+                   for m in methods if scenarios[(group['slug'], m, float(ratio))]["n"] < len(data["seeds"])]
+        if missing:
+            ax.text(.02, .02, "; ".join(missing), transform=ax.transAxes, fontsize=6.5,
+                    bbox={"facecolor": "white", "alpha": .85, "edgecolor": "none"})
         ax.set_xlim(0, max(1, data["rounds"]))
         ax.set_xlabel("Communication round", labelpad=3)
         if i % ncols == 0:
@@ -262,7 +285,7 @@ def _summary_figure(data, group, scenarios):
         x = np.array(ratios) * 100
         for method in methods:
             rows = [scenarios[(group["slug"], method, float(r))] for r in ratios]
-            mean = np.array([row[metric + "_mean"] for row in rows]) * 100
+            mean = np.array([row[metric + "_mean"] for row in rows], dtype=float) * 100
             ax.plot(x, mean, color=COLORS[method], linestyle=STYLES[method], linewidth=1.2,
                     marker=MARKERS[method], markersize=3, markerfacecolor="white", markeredgewidth=.7,
                     zorder=6 if method == "sm9rrs" else 5 if method == "vert" else 3)
@@ -308,7 +331,7 @@ def _overhead_figure(data, group, metric, scenarios, runs):
     for j, method in enumerate(methods):
         x = centers + (j-(len(methods)-1)/2)*width
         rows = [scenarios[(group["slug"], method, float(r))] for r in ratios]
-        means = np.array([row[metric + "_mean"] for row in rows])
+        means = np.array([row[metric + "_mean"] for row in rows], dtype=float)
         ax.bar(x, means, width=width*.92, color=COLORS[method], edgecolor="white", linewidth=.3)
         indices = [k for k, row in enumerate(rows) if row["n"] > 1]
         if indices:
