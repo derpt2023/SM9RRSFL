@@ -4,6 +4,113 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。支持 MNIST/CIFAR-10、IID/Dirichlet Non-IID、NumPy/PyTorch，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-09-30：双种子自适应搜索 → 单种子六法正式实验（独立v8）
+
+新增 `run_cifar_adaptive.py` 与 `configs/cifar10_resnet18_gn_tpe_v8.json`。这是独立的新实验，
+使用 **CIFAR版ResNet-18＋GroupNorm（每层2组）**，六法统一模型、公共训练和攻击条件；
+每任务150轮，攻击从所选K＋2轮开始。旧v7、MNIST的入口、配置、43项科学源码与输出身份不变，
+旧实验仍用原命令。不要用新入口指向旧输出，也不要把新结果写成旧CNN实验的复现。
+
+由用户提交并推送本次文件后，在AI Station项目根目录执行：
+
+```bash
+git pull
+python -u run_cifar_adaptive.py \
+  --config configs/cifar10_resnet18_gn_tpe_v8.json --devices auto
+```
+
+默认输出 `outputs/cifar10_resnet18_gn_tpe_v8`。自动选取最多7张空闲CUDA GPU、每卡1个任务；
+需要明确卡号时用 `--devices cuda:0 cuda:1 cuda:2 cuda:3 cuda:4 cuda:5 cuda:6`。
+使用现有PyTorch/NumPy/Matplotlib环境，无需新增Optuna依赖。新模型不允许回退为NumPy或旧CNN。
+如数据不在现有默认缓存位置，追加 `--data-dir /实际数据目录`，续跑保持同一路径。
+请在可输入Y/N的终端或tmux会话运行，保留整个输出目录及隐藏文件。
+
+```bash
+# 只核查协议/搜索范围，不加载数据、不占GPU、不开始训练
+python run_cifar_adaptive.py --plan-only
+# 只搜索并保存best_parameters.json，不启动正式训练
+python -u run_cifar_adaptive.py --devices auto --phase search
+# 搜索结束后，或正式阶段中断后，使用原目录继续
+python -u run_cifar_adaptive.py --devices auto --phase final
+```
+
+验证seed为2026093001、2026093002；正式seed为2026093011，均在配置中预先声明、互不重叠。
+验证覆盖IID/Dirichlet α=.5下0/10/30/50/70%恶意，候选每套20任务；
+正式覆盖两种分区下0/20/40/60/80%恶意，共60任务。采用原CIFAR-10划分：45,000训练、
+2,500验证、2,500攻击辅助数据，官方10,000测试仅进入正式阶段。正式训练重新初始化，不继承验证模型权重，
+正式结果不回流选参。此前已观察过官方测试结果，换seed不等于获得全新的未见测试集。
+
+### 学习什么，如何对六法保持同等条件
+
+搜索器是本项目实现的条件化product-KDE TPE：先评估声明默认值和一个随机起点，
+有至少两个完整可评分观察后，用好/差结果分别拟合密度，按密度比提出下一组参数。
+它属于基于历史实验结果的自适应超参数优化，不是穷举网格，也不是在前K轮把所有超参数训练出来。
+原理参考[Bergstra等，2011](https://papers.nips.cc/paper/4443-algorithms-for-hyper-parameter-optimization)。
+每次提案、随机数状态、拟合样本数、损失及失败原因保存到 `search_state.json`，不会把随机起点标成学习所得。
+
+| 层次 | 搜索参数与范围 |
+| --- | --- |
+| 公共条件 | K=6…20；学习率0.01…0.1（对数尺度）；batch=32/50/64；本地epoch=1/2/3；boost=2…15（对数尺度）；攻击epoch=1/2/3 |
+| Ours | warning、severe、漂移记忆/allowance/threshold、历史准入阈值及确认次数、恢复确认次数、正常簇数、子空间维数、参考预算、裁剪、权重上限、降权/恢复系数及撤销次数 |
+| VERT | 历史窗口5/7/10/15/20；预测epoch=5/10/20/30；预测学习率0.0001…0.003；投影128、无恶意比例先验保持固定 |
+| AlignIns | sparsity=0.1…0.5；TDA/MPSA radius各0.5…1.5 |
+| Krum/TAD/FedAvg | 当前原始实现无独立候选调参项，每种公共条件下仍重新评估；不重复运行完全相同固定候选 |
+
+精确范围、先验和条件转换见JSON的 `search_spaces`；Ours约束severe>warning、allowance≤warning、
+history阈值<warning，避免生成无效组合。初始公共值为K10/lr0.05/batch50/local epoch1/boost5/attack epoch1，
+Ours初始防御值来自014，但旧Score或旧结果不作为本次新模型资格。
+学习率衰减0.99、stealth步数1、distance权重0.0001、源类别5→目标7、200攻击评估样本等固定项仍显式保存。
+
+外层按Ours相对五个固定选定基线的逐场景Acc/ASR差距优化，包含健康惩罚；内层每种方法按原健康与Score规则调参。
+**每种公共条件都重新建立Ours、VERT、AlignIns各自的TPE**，每法最多4套候选，
+Krum/TAD/FedAvg各1套，共300个验证任务/公共条件。每一波同时增加三种可调方法各1套候选；
+第1波还评估三个固定方法。基线不能沿用另一公共条件下的验证资格或Score。
+所有方法共用所选K、学习率、batch、epoch、boost和攻击起始轮，
+新模型参数量11,173,962，CIFAR 3×3 stride1 stem、无ImageNet maxpool、无BatchNorm运行统计。
+
+这是**在验证集上搜索有利于Ours的公共条件后的比较**，不声称为任意条件下的普遍优势。
+K变化同时改变攻击起始轮和受攻击轮数；boost/epoch/batch同时影响实际攻击优化强度和计算量，
+必须随结果报告。五个基线各按原最终Score选定固定候选，不能逐场景挑不同候选。
+
+### 48小时预算、门槛及续跑
+
+默认搜索累计活动墙钟预算48小时，最多16组公共条件；停机期间不计时，重启不会重新获得48小时。
+预算覆盖五个基线评估、Ours评估、调度和选参；正式60任务另计时。
+截止后停止派发新搜索任务，运行中的任务在下一完整轮保存检查点后退出，可能因该轮耗时超过48小时。
+每轮保存检查点，完成结果缓存复用；OOM/环境/IO问题最多原配置重试一次，之后阻塞并保留原始失败，
+不能把它们作为算法差或自动缩小batch来改变协议。已确认的数值失败保留为失败证据。
+
+**48小时是预算，不保证找到全局最优、达到2pp，或完成足够多试验进入外层TPE。**
+只有两个完整公共条件评估后才有外层第3次自适应提案；ResNet-18在本项目七卡上的实际吞吐尚未实测。
+预算截止只从已完整尝试的连续波次前缀选参，部分波次整体排除，即使其中个别Ours已经训练完成。
+每个可用前缀内三种可调方法的候选数相同；不同公共条件的实际搜索次数可能不同，报告明确披露。
+若连第1波完整证据都没有，或者没有健康Ours，则停止且不生成正式资格。
+`search_summary.json`报告实际完成波次与TPE提案数，`best_parameters.json`给出预算内所选明确参数。
+
+正式自动准入沿用逐场景最终轮双指标：`max(六法可用Acc)−Ours Acc≤0.02`，
+攻击场景还须 `Ours ASR−min(六法可用ASR)≤0.02`，含等号，按离散样本率进行精确比较。
+仍要求Ours健康及原clean效用门槛；过程指标只参与健康/诊断，不替代第150轮性能。
+完整可评分的健康失败基线也参与参照；缺失仅逐任务排除并显式标注比较不完整，沿用原规则。
+若所有Ours未达标但有健康候选，询问是否采用原Score最好的健康候选进入主实验：Y继续，N/EOF停止。
+**每次正式续跑仍要重新输入Y**；过去的Y只冻结选择。达标路径自动推进，不询问。
+
+原命令再次运行即恢复：核对模型/源码/配置/数据身份、验证结果和固定计划，复用完成任务并从有效检查点继续。
+预算已耗尽时不继续搜索，只评估已完成前缀；冻结正式选参后禁止扩搜或回流正式结果。
+配置、代码、数据发生科学身份变化时拒绝复用原输出，应保留原版本/目录，另建新实验。
+末波保存与选参之间中断也可恢复，不会多生成提案。不要手改 `search_state.json` 或继续决定文件。
+
+正式阶段自动生成 `final_summary.json` 和 `final_results/visualizations.html`，包含CSV、PNG/SVG、
+参数来源和SHA审计。只使用完整150轮结果；失败任务不补0、不用早期轮次代替，健康失败的完整结果保留。
+单正式seed明确n=1，不能报告跨seed标准差；缺任务的方法不计算总体指标。新报告不改旧报告器。
+
+### 旧输出归档
+
+提供 `archive_experiment_outputs.py`，默认只读，`--apply`才移动；先检查进程和活动锁、记录全文件SHA，
+再在同文件系统重命名进入 `outputs/old`，不删除结果。2026-09-30本地已保留最新
+`cifar10_six_relative_best_five_day_v7 2` 和 `mnist_v7_target_fair_tuning`，另22目录完成校验归档。
+映射记录在本地 `outputs/old/archive_manifest_20260930T024556_709097.json`。
+这些本地移动不会随Git同步，AI Station输出不受影响；旧实验若在本地续跑应使用移动后的实际完整路径。
+
 ## 2026-09-29：已结束但有任务失败的实验也生成可视化
 
 报告层现在支持“所有任务已尝试，但部分任务有明确失败记录”的正式实验。原先只接受
