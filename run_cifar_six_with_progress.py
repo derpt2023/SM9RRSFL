@@ -790,6 +790,21 @@ def runner_for_spec(repo, spec):
 
 def main(argv=None):
     repo = Path(__file__).resolve().parent
+    # Adaptive runners have a different event stream and a no-newline prompt.
+    # Route before the historical parser rejects --phase search or consumes
+    # display flags; the independent wrapper owns its CLI and GPU preflight.
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    dispatch = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    dispatch.add_argument("--config", type=Path,
+                          default=repo / "configs/cifar10_six_original_v2.json")
+    route, _ = dispatch.parse_known_args(arguments)
+    routed_spec = read_json(route.config)
+    if isinstance(routed_spec, dict) and routed_spec.get("schema_version") == 8:
+        if routed_spec.get("protocol") not in (
+                "cifar-resnet18-gn-tpe-v1", "fashion-mnist-resnet18-gn-tpe-v1"):
+            dispatch.error("unsupported schema-8 protocol; use a known CIFAR or Fashion adaptive config")
+        from run_adaptive_with_progress import main as adaptive_main
+        return adaptive_main(arguments)
     parser = argparse.ArgumentParser(description=__doc__, add_help=False, allow_abbrev=False,
         epilog="Wrapper default: --devices auto selects all compatible visible GPUs. "
                "Explicit --devices cuda:0 cuda:1 selects exactly those cards. "

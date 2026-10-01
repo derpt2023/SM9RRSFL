@@ -22,5 +22,7 @@ if __name__ == "__main__":
 
     os.chdir(project_root)
     from sm9rrsfl.fair_tuning import main
+    from fair_tuning_progress_display import progress_display
 
-    main(sys.argv[1:])
+    with progress_display():
+        main(sys.argv[1:])

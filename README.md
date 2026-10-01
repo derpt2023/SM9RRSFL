@@ -2,7 +2,113 @@
 
 文档同步约定：仅根目录 `README.md` 随 Git 同步；其余 Markdown 为本地工作文档。下文标注的本地参考不包含在 Git 克隆中，运行所需说明以本 README 和仓库配置为准。
 
-六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。支持 MNIST/CIFAR-10、IID/Dirichlet Non-IID、NumPy/PyTorch，以及真实 SM9 或快速仿真密码模式。
+六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
+
+## 2026-10-01：三数据集进度显示修复
+
+MNIST继续使用原入口 `python -u run_fair_tuning_from_config.py`，并保留原配置参数。
+修复动态进度与阶段、CUDA及恢复日志粘连、窄终端折行残影；终端按宽度裁剪，重定向日志时自动使用普通文本。
+MNIST仍按完成的实验配置计数，不将此修复描述为新增逐轮进度。
+
+新版CIFAR-10和Fashion-MNIST使用统一显示入口，原控制器、训练函数及检查点身份保持不变：
+
+```bash
+# CIFAR-10：独立v8双种子搜索 → 单种子六法正式
+python -u run_adaptive_with_progress.py \
+  --config configs/cifar10_resnet18_gn_tpe_v8.json --devices auto
+# Fashion-MNIST：独立选参及正式实验
+python -u run_adaptive_with_progress.py \
+  --config configs/fashion_mnist_resnet18_gn_tpe_v8.json --devices auto
+```
+
+正式阶段显示完整任务数（默认60）、已保存轮数（默认9000）、失败/暂停/排队任务、每张卡当前轮次、
+本次耗时及近似ETA。搜索显示当前公共条件/波次和累计已评估任务，不把自适应搜索虚构为固定总量；
+ETA只估当前波次或正式计划，恢复的历史轮次不当作本次吞吐。
+`done`表示完整结果，不表示通过健康或2pp门槛；数值失败、预算暂停、尚未核验的快照单独计数。
+
+无换行Y/N提示立即显示，等待输入期间停止重绘；输入仍由原控制器接收，每次续跑重新询问的规则保留。
+Ctrl+C或终止信号先交给原控制器清理worker和保存检查点，再退出。
+`--progress-mode auto`默认终端动态刷新、非终端每15秒追加摘要；可用`--progress-interval 1`
+调整终端刷新、`--progress-log-interval 15`调整日志间隔，或显式`--progress-mode log`。
+原始控制台日志在身份匹配的输出目录下另存`progress_display_logs/adaptive_*.log`；逐轮worker日志保持原位置。
+可选进度日志创建或追加失败时提示并停用该日志，训练继续；训练自身的存储错误仍由原控制器处理。
+
+继续原实验时，保留原`--config`、`--output`、`--data-dir`和设备参数，仅替换显示入口。
+支持`--phase search`、`--phase final`、`--plan-only`；后者只转交计划检查，不创建显示日志或启动训练。
+直接执行`run_cifar_adaptive.py`/`run_fashion_adaptive.py`仍保持原任务日志形式；要使用新增进度视图，使用上述命令。
+旧`run_cifar_six_with_progress.py --config <v8配置>`也会转交统一入口，schema2–7的旧实验仍沿原路径运行。
+
+本次进度补丁的提交文件为README.md、`run_fair_tuning_from_config.py`、`run_cifar_six_with_progress.py`、
+`fair_tuning_progress_display.py`、`adaptive_progress.py`、`run_adaptive_with_progress.py`，以及
+`tests/test_fair_tuning_progress_display.py`、`tests/test_adaptive_progress.py`、
+`tests/test_adaptive_progress_dispatch.py`、`tests/test_adaptive_progress_monitor.py`。
+Fashion实现尚未提交时，下节新增的数据集模块、配置和三份测试也须一并由用户提交推送；docs/AGENTS不提交。
+
+## 2026-10-01：新增Fashion-MNIST独立选参与正式实验
+
+Fashion-MNIST使用新入口 `run_fashion_adaptive.py` 和独立配置
+`configs/fashion_mnist_resnet18_gn_tpe_v8.json`。由用户提交并推送本次文件后，在AI Station项目根目录运行：
+
+```bash
+git pull
+python -u run_adaptive_with_progress.py \
+  --config configs/fashion_mnist_resnet18_gn_tpe_v8.json --devices auto
+```
+
+默认输出 `outputs/fashion_mnist_resnet18_gn_tpe_v8`，数据缓存 `data/fashion_mnist`。
+首次运行下载作者官方四个IDX gzip文件，后续复用缓存；每次加载校验官方MD5，manifest另记录SHA256。
+Fashion与MNIST的原始文件名相同，必须分开缓存；发现内容不符会报错并保留原文件，不静默覆盖。
+离线环境可预先将作者官方四个gzip文件放入该目录，再用相同命令；自定义路径用 `--data-dir /实际Fashion目录`。
+不需要新增Python依赖。可指定 `--devices cuda:0 cuda:1 ...`；最多7卡、每卡一个任务，规则与CIFAR新入口相同。
+
+```bash
+# 不下载数据、不占GPU，只检查配置与展示计划
+python run_fashion_adaptive.py --plan-only
+# 仅完成独立搜索
+python -u run_adaptive_with_progress.py --config configs/fashion_mnist_resnet18_gn_tpe_v8.json --devices auto --phase search
+# 搜索结束后进入正式阶段，或恢复正式任务
+python -u run_adaptive_with_progress.py --config configs/fashion_mnist_resnet18_gn_tpe_v8.json --devices auto --phase final
+```
+
+完整命令再次运行会复用本Fashion目录的结果和逐轮检查点；原来指定过自定义config/output/data-dir时保持一致。
+搜索未结束时`--phase final`拒绝提前选参，应使用原完整命令继续。所有Ours未达标但有健康候选时，
+按原Score选择最佳健康候选并询问Y/N；每次正式续跑仍需本次Y，N/EOF停止，旧Y仅冻结选择。
+没有健康候选、证据缺失/损坏或身份不匹配时，不以Y覆盖。
+
+该实验沿用下文CIFAR新协议的搜索规则，具体为：
+
+- 验证seed **2026100101/2026100102**，正式seed **2026100111**；验证每候选20任务，正式六法共60任务。
+- IID/Dirichlet α=.5，验证恶意比例0/10/30/50/70%，正式0/20/40/60/80%，100客户端、150轮、攻击开始K＋2。
+- K、warning等防御参数、学习率、batch、本地epoch、boost、攻击epoch均在声明范围内独立搜索。
+  沿用预先声明的搜索范围和起点，重新评估Fashion验证结果；不导入CIFAR的已选参数、Score、TPE拟合状态或模型权重。
+  每组公共条件下也为基线重新选参，同条件下三种可调方法的候选预算匹配。
+- 以Ours相对优势选择公共条件的研究背景保留；两验证seed选定参数后冻结，正式结果不回流选参。
+- 最终第150轮逐场景 `max(可用六法Acc)−Ours Acc≤0.02`；受攻击场景还须
+  `Ours ASR−min(可用六法ASR)≤0.02`。按离散样本率精确比较，含等号；原健康和clean效用条件保持。
+- 本Fashion搜索单独累计48活动小时，含五个基线评估，正式任务另计时；每轮保留检查点。
+  截止只从连续完整、公平匹配的波次前缀选参，部分波次不参与选择。没有足够观察时可能尚未进入TPE学习阶段。
+  48小时不保证全局最优、达到2pp或完成指定数量的公共配置；运行中的任务保存下一完整轮可能使实际墙钟超出预算。
+
+Fashion模型为**原生1×28×28输入的ResNet-18＋GN2**：与CIFAR新模型保持相同骨干，首卷积适配单通道，
+共11,172,810参数；没有缩放到32×32、通道复制、数据增强或预训练权重。六法使用完全相同的Fashion模型。
+图像固定转换为float32后除以255，与旧MNIST采用相同像素缩放；不从正式测试集估计预处理统计量。
+
+完整60,000训练样本按固定seed20261001分层划分为 **54,000联邦训练＋3,000验证＋3,000攻击辅助**，
+三个部分不重叠；官方10,000测试样本只用于正式评估。验证Accuracy门槛据3,000样本计算，
+正式Accuracy据10,000样本计算，不沿用CIFAR的2,500验证样本分母。
+固定定向攻击为标签 **5（Sandal）→7（Sneaker）**，ASR使用200个源类评估样本；
+数字与CIFAR相同、类别语义不同，数据身份和报告中明确记录。
+数据规模、形状、标签和官方文件校验值参见[Fashion-MNIST作者仓库](https://github.com/zalandoresearch/fashion-mnist)。
+
+正式结束生成 `final_results/visualizations.html`、CSV、PNG/SVG及来源SHA审计，图文明确标注Fashion-MNIST、
+实际搜索预算和类别语义。只统计完整150轮结果；健康失败的完整结果保留，缺失不补0/不取早期轮，
+缺任务方法不算总体，单正式seed不报告跨seed标准差。
+
+兼容边界：本次仅新增根目录Fashion模块、独立配置与测试，原CIFAR v8的49份科学源码和配置、
+旧MNIST/CIFAR v7的43份冻结源码保持原字节。共用现有通用TPE/健康/门槛和底层训练函数，
+数据、模型适配器、调度入口与报告分别保存，避免改变已运行实验的源码身份。
+Fashion和CIFAR的manifest、搜索状态、正式计划与缓存不能混用，两种入口会拒绝对方的协议配置。
+旧实验继续使用原命令及原输出；添加Fashion代码不会自动开始、重跑或改写它们。
 
 ## 2026-09-30：双种子自适应搜索 → 单种子六法正式实验（独立v8）
 
@@ -15,7 +121,7 @@
 
 ```bash
 git pull
-python -u run_cifar_adaptive.py \
+python -u run_adaptive_with_progress.py \
   --config configs/cifar10_resnet18_gn_tpe_v8.json --devices auto
 ```
 
@@ -29,9 +135,9 @@ python -u run_cifar_adaptive.py \
 # 只核查协议/搜索范围，不加载数据、不占GPU、不开始训练
 python run_cifar_adaptive.py --plan-only
 # 只搜索并保存best_parameters.json，不启动正式训练
-python -u run_cifar_adaptive.py --devices auto --phase search
+python -u run_adaptive_with_progress.py --config configs/cifar10_resnet18_gn_tpe_v8.json --devices auto --phase search
 # 搜索结束后，或正式阶段中断后，使用原目录继续
-python -u run_cifar_adaptive.py --devices auto --phase final
+python -u run_adaptive_with_progress.py --config configs/cifar10_resnet18_gn_tpe_v8.json --devices auto --phase final
 ```
 
 验证seed为2026093001、2026093002；正式seed为2026093011，均在配置中预先声明、互不重叠。
