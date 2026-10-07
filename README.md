@@ -4,6 +4,73 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-10-07：CIFAR 分阶段诊断，第一阶段 clean 学习对照
+
+当前新增入口 `run_cifar_diagnostic.py` 只执行第一阶段：24项无攻击 FedAvg，
+用于判断旧CNN与ResNet18-GN2的公共学习条件。独立协议 `cifar-v8-clean-diagnostic-v1`，
+默认输出 `outputs/cifar_v8_diagnostic_v1/clean`，不复用或覆盖原v7/v8实验。
+这批不是六方法正式实验，不自动启动Ours/TPE、第二阶段或模型回调。
+
+| 设置 | 模型 | lr | local_epochs | lr_decay |
+| --- | --- | --- | --- | --- |
+| C0 | 原v7 CNN | .05 | 1 | .99 |
+| R0 | ResNet18-GN2 | .05 | 1 | .99 |
+| R1 | ResNet18-GN2 | .02 | 1 | .99 |
+| R2 | ResNet18-GN2 | .10 | 1 | .99 |
+| R3 | ResNet18-GN2 | .05 | 2 | .99 |
+| R4 | ResNet18-GN2 | .05 | 1 | .995 |
+
+每设置×IID/Dirichlet(.5)×开发seed `2026093001/2026093002`，均150轮、100客户端、
+batch50、全量45k训练/2.5k校准/2.5k攻击辅助划分。沿用原实现的认证、优化器与初始化seed策略；
+不加入数据增强、momentum或weight decay。开发评估只使用校准集，官方test不用于选择。
+`malicious_ratio=0`，配置保留原攻击字段以复现背景源5→目标7的混淆，实际没有恶意客户端。
+
+本地由用户提交推送后，AI Station在原项目目录操作：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+# 无数据下载、GPU探测或训练；应显示24项/150轮
+python run_cifar_diagnostic.py --plan-only
+# 当前物理卡占用只读核查
+nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.free,utilization.gpu --format=csv
+# 自动选择通过CUDA初始化、至少16GiB空闲、同型的显卡，最多6张
+python -u run_cifar_diagnostic.py --devices auto --max-gpus 6
+```
+
+`auto`在当前`CUDA_VISIBLE_DEVICES`可见集合内选择；日志`cuda:N`是逻辑编号。
+可通过外层`CUDA_VISIBLE_DEVICES=GPU-当前UUID,...`限定已确认可用的物理卡，再运行同一命令。
+不要照搬历史卡号或UUID。若需显式逻辑卡，可用`--devices cuda:0 cuda:1`，显式卡未通过准入会拒绝启动。
+16GiB为本阶段FedAvg的保守准入阈值，不是峰值保证或独占预留；运行中执行故障会暂停该卡本次派发，
+其他正常卡继续。不会因OOM改batch、轮数或自动进入无限重试。无可用卡时保留输出并停止。
+
+每15秒显示总进度及每卡任务/完成轮数；逐轮日志在`tasks/<task_id>/worker.log`。
+Ctrl+C尝试先保存当前轮，最多等待30秒再终止；原样重跑启动命令可从最后持久化检查点恢复。
+完整快照按身份复用，数值失败保留为失败证据；损坏检查点、缺失身份和源码改变不会悄悄重训。
+成功任务先写完整结果，再完成检查点提交。完整结果已存在但缺诊断证据时，摘要会报错，需检查而非删目录重跑。
+
+运行完成或异常停止后，执行以下只读回传命令，把BEGIN至END之间的全部内容发回：
+
+```bash
+python run_cifar_diagnostic.py --summary --output outputs/cifar_v8_diagnostic_v1/clean
+```
+
+摘要命令不下载数据、不探测GPU、不训练、不写报告或修补结果，默认读取实际快照而非缓存摘要。
+正常结束还会保存`diagnostic_summary.json`；未完成/证据异常退出码为2，仍打印可复制摘要。
+若在manifest创建前就报错，摘要只能显示尚无实验身份，需一并提供启动命令末尾报错。
+
+记录第50/100/150轮Acc、最终背景混淆、loss、worker耗时、CUDA峰值已分配显存和nonfinite。
+`local_train_loss`是客户端报告的minibatch训练loss按客户端样本数加权，不是最终全局模型在45k上的loss；
+`calibration_loss`是全局模型在2.5k校准集上的交叉熵，复用原accuracy前向，不增加训练步骤或随机抽样。
+每轮loss与模型一起进入检查点；观察文件保留完整曲线。worker耗时包含该次数据载入/训练/结果写出，
+包含失败尝试；被强杀而无结束记录的尝试单独标记，不能把不完整耗时当精确总成本。
+
+先按四任务最终Acc均值选择完整健康的ResNet设置；任何设置仍有执行缺失时不确定赢家。
+若赢家不是R0，摘要建议下一步为CNN补同一公共设置4项，**不会自动启动**。
+若R0胜出，可直接配对C0：平均至少高2个百分点、每个seed/分区不低于CNN超过1个百分点，
+再结合实测成本决定是否保留ResNet。这只是开发投入参考，不是统计显著性或原六方法双≤2pp资格。
+下一步需结合这批实测结果决定；本轮不改变旧协议、旧选择和MNIST/Fashion科学源码。
+
 ## 2026-10-07：v8已完成实验的独立报告恢复
 
 如果60个正式worker均正常退出，但控制器最后在报告阶段报
