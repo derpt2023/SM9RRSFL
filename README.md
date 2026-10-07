@@ -4,6 +4,45 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-10-07：v8已完成实验的独立报告恢复
+
+如果60个正式worker均正常退出，但控制器最后在报告阶段报
+`ReportIntegrityError: finished result contains invalid malicious_weight_mass`，
+先检查实际值。冻结报告要求聚合权重诊断严格≤1，而原健康检查允许≤`1+1e-9`；
+浮点求和产生的`1.0000000000000002`会因此被误拒。该报错本身不能证明越界只有浮点误差，
+也不能证明任务均已完整、健康或通过双指标门槛。
+
+新增独立恢复工具，支持CIFAR-10和Fashion-MNIST的schema 8。用户提交并推送本次文件、
+AI Station在原项目`git pull`后执行（自定义输出目录须保留原路径）：
+
+```bash
+# 默认仅审计：不写输出、不占GPU、不训练、不重新选参
+python recover_adaptive_report.py --output outputs/cifar10_resnet18_gn_tpe_v8
+# 审计通过后，只重建已有60项正式结果的报告
+python recover_adaptive_report.py --output outputs/cifar10_resnet18_gn_tpe_v8 --write
+# Fashion-MNIST的对应用法
+python recover_adaptive_report.py --output outputs/fashion_mnist_resnet18_gn_tpe_v8 --write
+```
+
+恢复前核验冻结manifest和科学源码SHA、原始验证证据、冻结参数、正式计划与全部60个完成快照，
+未达标手动继续的实验还须存在对应的历史Y记录。正在运行的控制器持锁时拒绝恢复。
+只恢复既有正式结果的报告无需再次授权训练；**原训练入口每次续跑仍询问Y/N**。
+任务缺失、损坏、身份不符、非有限值或真正超出容差都会拒绝，不能用此命令绕过训练失败。
+
+仅`honest_weight_loss`和`malicious_weight_mass`两项诊断在校验时接受`1 < value ≤ 1+1e-9`。
+原快照、逐任务CSV、参数和检查点不改；导出的报告CSV也保留原始数值。
+Accuracy、ASR、健康判断、150轮、K+2和双≤2pp规则不变。
+报告写入原`final_results/visualizations.html`和`final_summary.json`，
+已有这两项会整体备份到`report_recovery_backups/<时间与唯一标识>/`。
+`final_results/report_recovery.json`记录接受的原值、偏差及输入/恢复代码SHA；
+生成失败不替换原报告。恢复成功不等于Ours达标，报告仍显示实际健康失败与原验证未达标状态。
+
+本补丁不改CIFAR的49项及Fashion的54项冻结科学源码，因此能核验并复用原实验身份。
+**原控制器的自动报告路径仍冻结**；遇到上述旧校验问题使用此独立入口，无需重复训练。
+本次提交文件：`README.md`、`recover_adaptive_report.py`、`adaptive_report_validation.py`、
+`tests/test_adaptive_report_recovery.py`、`tests/test_adaptive_report_validation.py`。
+本地docs/AGENTS不提交。
+
 ## 2026-10-01：三数据集进度显示修复
 
 MNIST继续使用原入口 `python -u run_fair_tuning_from_config.py`，并保留原配置参数。
