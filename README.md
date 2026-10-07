@@ -4,6 +4,52 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-10-08：第一阶段回传后的4项CNN E2配对补充
+
+本批24项回传摘要显示全部完成且健康：C0最终均Acc61.64%、R0 51.66%、R3 61.60%；
+R3将本地训练从1增至2个epoch，比R0提高9.94个百分点，但与C0公共训练量不同，不能直接完成模型选择。
+新增独立 `run_cifar_matched_cnn.py`，只补 **C3＝旧CNN、lr=.05、local_epochs=2、lr_decay=.99**，
+同IID/Dirichlet(.5)×两个开发seed2026093001/02，共4项、150轮。
+每项公共配置完整复制对应R3，只更换模型和任务身份；沿用冻结的训练、loss观测、校准集和检查点实现。
+
+新输出为 `outputs/cifar_v8_diagnostic_v1/cnn_e2_match`。原24项只读核验、不重训、不重新写入。
+配置绑定本次原manifest `96cac3f9131837d9e21f7b4a1bda7775c35d8d60f8acbf5dc3937c46d4f8e3c5`，
+启动前从实际快照重新检查24项完整健康、R3选择、源码、数据契约，并核对逐任务数值环境；
+把参考快照、loss、身份、环境和成本记录的SHA冻结到新manifest。不会只相信缓存摘要或跨目录拷贝成绩。
+新worker沿用原R3的数值库/设备类型要求，可选择同型GPU的其他逻辑/物理编号。
+
+用户提交推送新文件后，在AI Station执行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+# 只展示固定计划，不需要GPU/数据；应显示4项、150轮、C3、local_epochs=2
+python run_cifar_matched_cnn.py --plan-only
+nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.free,utilization.gpu --format=csv
+# 默认参考原24项目录；最多4张同型卡，空闲显存准入仍16GiB
+python -u run_cifar_matched_cnn.py --devices auto --max-gpus 4
+```
+
+原24项位于其他位置时，增加 `--reference-output 原24项目录`；自定义新增目录用`--output`。
+两目录必须互不包含，不能将补充实验写入旧目录。计划展示中的`reference_audited=false`仅说明plan-only不读原结果；
+真实启动和摘要均会做完整只读审计。参考不符时应保留错误证据，不修改指纹绕过检查。
+
+运行结束或中断后，执行并复制BEGIN至END的全部输出：
+
+```bash
+python run_cifar_matched_cnn.py --summary
+```
+
+标记为 `CIFAR_CNN_MATCH_BEGIN/END`，包含原C0/R3的8项及新增C3的4项、实际完成/健康数、
+50/100/150轮Acc、loss、背景5→7混淆、R3−C3逐配对差值、C3−C0变化和worker成本比。
+若使用自定义目录，启动/摘要均传相同`--reference-output`和`--output`。
+摘要不下载数据、不探测GPU、不训练、不修补任一目录；控制器正常结束时另保存 `matched_summary.json`。
+源码、参考或环境变化、任务缺失/不健康时不给模型判断；未结束/缺失的成本记录不被当作精确耗时。
+
+该补充沿用15秒进度、逐轮检查点、已完成复用和故障卡暂停派发。中断后可用相同启动命令恢复，
+不用重跑旧24项。结果回来后，按同E2条件比较ResNet与CNN：ResNet均Acc至少高2pp且每项不低于CNN超过1pp，
+再审阅成本是否值得继续。这仍是开发投入参考，不是正式资格或统计显著性结论；本入口不自动启动攻击、Ours或TPE。
+
 ## 2026-10-07：CIFAR 分阶段诊断，第一阶段 clean 学习对照
 
 当前新增入口 `run_cifar_diagnostic.py` 只执行第一阶段：24项无攻击 FedAvg，

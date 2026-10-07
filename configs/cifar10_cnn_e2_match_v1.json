@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "protocol": "cifar-v8-cnn-e2-match-v1",
+  "output_dir": "outputs/cifar_v8_diagnostic_v1/cnn_e2_match",
+  "reference_manifest_fingerprint": "96cac3f9131837d9e21f7b4a1bda7775c35d8d60f8acbf5dc3937c46d4f8e3c5",
+  "reference_setting": "R3",
+  "setting": {
+    "id": "C3",
+    "model": "v7_cnn",
+    "lr": 0.05,
+    "local_epochs": 2,
+    "lr_decay": 0.99
+  }
+}
