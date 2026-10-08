@@ -4,6 +4,90 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-10-08：CNN配对结果回传后的第二阶段 K/攻击时点诊断
+
+当前下一批采用 **原CNN、lr=.05、local_epochs=1、lr_decay=.99、150轮**。
+新增4项C3回传为完整健康、非有限更新0，摘要中的来源、参考和数值环境检查均通过。
+两批clean结果如下，时间为每任务worker平均耗时：
+
+| 设置 | 最终平均Acc | 最终校准交叉熵 | 平均耗时 |
+| --- | --- | --- | --- |
+| C0：CNN，E1 | 61.64% | 1.1055 | 2.45分钟 |
+| C3：CNN，E2 | 61.67% | 1.2754 | 4.56分钟 |
+| R3：ResNet，E2 | 61.60% | 1.0652 | 31.21分钟 |
+
+同E2下，R3较C3均Acc低0.07个百分点，最差配对低2.96个百分点，耗时为C3约6.85倍；
+增加CNN本地训练至E2只提高0.03个百分点，耗时增至约1.86倍，且C3校准交叉熵在100至150轮上升。
+因此本阶段选择C0的CNN E1条件，先排查检测窗口和攻击时点。该选择属于开发阶段投入判断，
+不是防攻击能力结论，也不将客户端局部训练loss直接解释为全局模型过拟合证据。
+本地收到的是远端摘要；新入口会在AI Station从实际快照核验上述参考，不只依赖摘要文本。
+
+新增独立入口 `run_cifar_timing_diagnostic.py`，配置 `configs/cifar10_cnn_timing_v1.json`，
+协议 `cifar-cnn-timing-diagnostic-v1`，默认输出 `outputs/cifar_v8_diagnostic_v1/timing_cnn_e1`。
+固定开发seed `2026093001`、IID/Dirichlet(.5)、100客户端、batch50；
+数据保持45k训练/2.5k校准/2.5k攻击辅助，官方test不参与选择。
+Ours采用原014参数；基线算法、检测实现、优化器、攻击强度和原正式双≤2pp门槛均不改。
+
+| 方法/条件 | K | 首攻击轮 | 恶意比例 | 分区 | 任务数 |
+| --- | --- | --- | --- | --- | --- |
+| Ours014 A | 10 | 12 | 0/.1/.7 | IID、Dirichlet | 6 |
+| Ours014 B | 10 | 25 | 0/.1/.7 | IID、Dirichlet | 6 |
+| Ours014 C | 20 | 25 | 0/.1/.7 | IID、Dirichlet | 6 |
+| FedAvg FA12 | 10 | 12 | .1/.7 | IID、Dirichlet | 4 |
+| FedAvg FA25 | 10 | 25 | .1/.7 | IID、Dirichlet | 4 |
+
+共 **18项Ours＋8项FedAvg＝26项**，每项150轮。恶意比例0时没有实际攻击，源5→目标7只是背景混淆。
+clean A/B虽预期等价，仍分别运行并保留真实身份，不复制成绩充作新任务。
+**A→B同时延后攻击并把攻击暴露从139轮降为126轮，不能仅凭ASR下降断言检测修复**；
+需结合FedAvg FA12→FA25和攻击早期机制。B→C保持攻击起点与暴露长度相同，仅将K从10增至20。
+这里只有一个开发seed，过程指标用于诊断，不替代后续完整验证或统计结论。
+
+启动前只读审计原24项clean与4项CNN E2，包括冻结manifest、逐任务快照/身份、观测/成本SHA、
+源码、数据契约和数值环境。两个原目录均不重训、不重写；参考核验不符时停止，不更改指纹绕过。
+新任务继承参考的数值环境要求，允许同型GPU逻辑/物理编号改变；本入口不自动进入TPE、正式实验或下一阶段。
+
+用户提交推送本批文件后，在AI Station执行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+# 只展示计划，不读旧结果、不下载数据、不探测GPU；应显示26项、CNN E1、150轮
+python run_cifar_timing_diagnostic.py --plan-only
+nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.free,utilization.gpu --format=csv
+# 最多6张通过初始化的同型GPU，默认空闲显存准入16GiB
+python -u run_cifar_timing_diagnostic.py --devices auto --max-gpus 6
+```
+
+旧结果不在默认目录时，分别增加 `--clean-output 原24项目录`、`--matched-output 原4项目录`；
+新增输出可指定`--output`，三个目录必须互不包含。`auto`只选择当前`CUDA_VISIBLE_DEVICES`可见卡，
+`cuda:N`为逻辑编号；显式卡可用`--devices cuda:0 cuda:1`。准入不等于独占显存或峰值保证。
+每15秒显示任务/轮次；逐任务日志在`tasks/<task_id>/worker.log`。执行故障暂停该卡本次派发，
+其余正常卡继续；数值失败保留证据，不盲目重试。中断后在原目录使用同一启动命令续跑，
+已完成快照复用、逐轮检查点恢复；不删除输出，不向旧24/4项目录写入新任务。
+
+运行结束或异常停止后，执行只读摘要并复制BEGIN至END的全部输出：
+
+```bash
+python run_cifar_timing_diagnostic.py --summary
+```
+
+标记为 `CIFAR_TIMING_BEGIN/END`。若使用自定义目录，摘要传入相同`--clean-output`、`--matched-output`、`--output`。
+摘要不下载数据、不探测GPU、不训练、不修补任何目录；控制器结束时另写本阶段的 `timing_summary.json`。
+启动在manifest创建前失败时，摘要只会说明尚无有效研究，请同时保留并回传启动末尾错误。
+
+报告包含实际完整/健康数、50/100/150轮Acc、攻击最终ASR与clean背景混淆、累计误撤销、
+首攻击轮及首5轮的聚合接纳/历史准入/权重、完整攻击期汇总、A/B/C配对变化和worker成本/峰值显存。
+**客户端接纳率和历史准入率以实际有限且通过验证的在线更新观测为分母**，并列原始客户端数、
+此前已撤销数及剩余但未观测数；不能把缺少诊断记录等同于检测拒绝，分母0记为不可计算。
+history准入使用`history_admitted`；攻击前预指定恶意身份仍在诚实训练，不把其warmup历史称为攻击历史污染。
+`malicious_weight_mass`是恶意客户端实际聚合系数之和，并非重新归一后的恶意占比。
+诚实误撤销率使用原始诚实客户端数，累计计数不按轮求和。
+
+clean Ours相对同seed/分区C0的最终Acc下降是否≤3个百分点作为**单列效用诊断**，
+不新增健康门槛、不改变健康标签或正式资格。完整健康失败照实保留；缺失最终轮不填0、不沿用最后可见轮作150轮结果。
+本阶段不套用clean FedAvg每轮45000样本的loss observer，因为攻击训练和撤销改变该观测口径；
+直接读取原始RoundRecord/客户端诊断，不增加训练步骤。收到这26项结果后再判断下一批应做什么。
+
 ## 2026-10-08：第一阶段回传后的4项CNN E2配对补充
 
 本批24项回传摘要显示全部完成且健康：C0最终均Acc61.64%、R0 51.66%、R3 61.60%；

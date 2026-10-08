@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "protocol": "cifar-cnn-timing-diagnostic-v1",
+  "output_dir": "outputs/cifar_v8_diagnostic_v1/timing_cnn_e1",
+  "clean_manifest_fingerprint": "96cac3f9131837d9e21f7b4a1bda7775c35d8d60f8acbf5dc3937c46d4f8e3c5",
+  "matched_manifest_fingerprint": "2eff6875f5b571171f8fcb9a2b4b952ab6ba92fbfdb873687fd4f71264798c22",
+  "chosen_setting": "C0",
+  "public": {
+    "model": "v7_cnn",
+    "lr": 0.05,
+    "local_epochs": 1,
+    "lr_decay": 0.99,
+    "rounds": 150,
+    "num_clients": 100,
+    "batch_size": 50,
+    "dirichlet_alpha": 0.5
+  },
+  "attack": {
+    "attack": "alternating_minimization",
+    "attack_boost": 5.0,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 1,
+    "attack_distance_weight": 0.0001,
+    "attack_source_label": 5,
+    "attack_target_label": 7,
+    "attack_target_count": 200
+  },
+  "ours_parameters": {
+    "detector_subspace_dim": 2,
+    "detector_normal_clusters": 2,
+    "detector_distance_threshold": 1.25,
+    "detector_reject_threshold": 6.0,
+    "detector_drift_memory": 0.8,
+    "detector_drift_allowance": 1.25,
+    "detector_drift_threshold": 6.0,
+    "detector_history_confirm": 2,
+    "detector_history_threshold": 1.0,
+    "detector_recovery_confirm": 2,
+    "detector_reference_budget": 3.5,
+    "detector_clip_factor": 2.0,
+    "detector_weight_cap": 2.0,
+    "suspicion_penalty_factor": 0.5,
+    "suspicion_recovery_factor": 1.25,
+    "suspicion_remove_after": 5
+  },
+  "seed": 2026093001,
+  "partitions": [
+    "iid",
+    "dirichlet"
+  ],
+  "ours_ratios": [
+    0.0,
+    0.1,
+    0.7
+  ],
+  "fedavg_ratios": [
+    0.1,
+    0.7
+  ],
+  "arms": [
+    {
+      "id": "A",
+      "detector_window": 10,
+      "attack_start_round": 12
+    },
+    {
+      "id": "B",
+      "detector_window": 10,
+      "attack_start_round": 25
+    },
+    {
+      "id": "C",
+      "detector_window": 20,
+      "attack_start_round": 25
+    }
+  ]
+}
