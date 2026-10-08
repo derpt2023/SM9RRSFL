@@ -4,6 +4,41 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-10-08：第二阶段回传截断后的只读紧凑摘要
+
+最新回传只含22条完整TASK；开头的全局身份/来源/环境信息、2条C0参考及A组前4条任务未完整收到。
+这不代表远端丢失或少跑4项；当前先补齐只读证据，不重训、不开始下一批搜索。
+可见B/C全部6项中，B两clean因误撤销14%/24%失败，C降至0%/2%且6项健康；
+但Dirichlet70的最终Acc/ASR由B的52.80%/7.00%变为C的47.80%/53.00%。
+C该场景全攻击期恶意接纳1349/1669、历史准入1005，说明首轮少量漏入并不代表持续防御有效。
+附件缺失部分及全局状态待下列命令核验；不能把可见22项统计当成26项总体结论。
+
+新增独立只读入口 `summarize_cifar_timing.py`，复用冻结报告的实际快照核验，输出紧凑JSONL：
+来源与三个研究身份、实际完整/健康数、C0参考、全部26项结果及首1/5轮与全攻击期机制计数。
+窗口中恶意/诚实接纳和历史准入的分母仍为实际已验证有限在线更新，保留存活/缺观测原计数；
+省去逐轮coverage长列表与重复解释，不舍入原指标，不以0代替缺失，不生成新赢家。
+FedAvg客户端诊断保持不可用，微小浮点越界原值与冻结报告相同。
+
+工具另审计两分区clean A/B的实际配置差异、规范化数值环境、round0指标和首个科学指标差异轮。
+ratio0、同K10时，攻击起点没有已知改变训练/检测/RNG的路径；可见Dir clean有0.4pp差异，
+不能解释为延后攻击的clean收益，也不能未经证据直接归因GPU非确定性。
+该审计只比较科学指标，不比较密码随机字节或耗时；审计不推断原因。
+
+用户提交并推送本批3文件（本README、独立入口及`tests/test_cifar_timing_brief.py`）后，在AI Station运行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+python summarize_cifar_timing.py > /tmp/cifar_timing_brief.txt
+cat /tmp/cifar_timing_brief.txt
+```
+
+复制 `CIFAR_TIMING_BRIEF_BEGIN` 至 `CIFAR_TIMING_BRIEF_END` 的完整内容；若命令报错，另附末尾错误。
+工具不下载、不探测GPU、不训练、不修补、不修改任何实验输出；shell重定向只写上述临时文本。
+默认原24、4及26项目录不变，自定义时仍传`--clean-output`、`--matched-output`、`--output`。
+来源不符或无法审核明确保留错误，先根据回传解决；勿改manifest或删除实验目录。
+原58项来源文件保持不变，新摘要入口不影响已有任务身份和断点续跑。
+
 ## 2026-10-08：CNN配对结果回传后的第二阶段 K/攻击时点诊断
 
 当前下一批采用 **原CNN、lr=.05、local_epochs=1、lr_decay=.99、150轮**。
