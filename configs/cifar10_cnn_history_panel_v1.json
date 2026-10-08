@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "protocol": "cifar-cnn-history-ablation-v1",
+  "output_dir": "outputs/cifar_v8_diagnostic_v1/history_cnn_e1_k20",
+  "threshold_manifest_fingerprint": "53b480049d8f18a81fb45f518dfbbe8a88cded441cf66f9256e8dda2f522e0ff",
+  "chosen_candidate": "P0",
+  "public": {
+    "model": "v7_cnn",
+    "lr": 0.05,
+    "local_epochs": 1,
+    "lr_decay": 0.99,
+    "rounds": 150,
+    "num_clients": 100,
+    "batch_size": 50,
+    "dirichlet_alpha": 0.5
+  },
+  "attack": {
+    "attack": "alternating_minimization",
+    "attack_boost": 5.0,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 1,
+    "attack_distance_weight": 0.0001,
+    "attack_source_label": 5,
+    "attack_target_label": 7,
+    "attack_target_count": 200
+  },
+  "ours_parameters": {
+    "detector_subspace_dim": 2,
+    "detector_normal_clusters": 2,
+    "detector_distance_threshold": 1.25,
+    "detector_reject_threshold": 6.0,
+    "detector_drift_memory": 0.8,
+    "detector_drift_allowance": 1.25,
+    "detector_drift_threshold": 6.0,
+    "detector_history_confirm": 2,
+    "detector_history_threshold": 1.0,
+    "detector_recovery_confirm": 2,
+    "detector_reference_budget": 3.5,
+    "detector_clip_factor": 2.0,
+    "detector_weight_cap": 2.0,
+    "suspicion_penalty_factor": 0.5,
+    "suspicion_recovery_factor": 1.25,
+    "suspicion_remove_after": 5
+  },
+  "detector_window": 20,
+  "attack_start_round": 25,
+  "seed": 2026093001,
+  "partitions": [
+    "iid",
+    "dirichlet"
+  ],
+  "malicious_ratios": [
+    0.0,
+    0.1,
+    0.7
+  ],
+  "arms": [
+    {
+      "id": "H0",
+      "variant": "original",
+      "history_freeze_start_round": null
+    },
+    {
+      "id": "H1",
+      "variant": "Ours-FrozenHistory-v1",
+      "history_freeze_start_round": 25
+    }
+  ],
+  "both_arms_fresh": true,
+  "freeze_applies_to_clean": true,
+  "automatic_tpe": false,
+  "next_stage_automatic": false
+}
