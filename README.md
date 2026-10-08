@@ -4,7 +4,96 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
-## 2026-10-08：第二阶段回传截断后的只读紧凑摘要
+## 2026-10-08：第二阶段完整结果与第三阶段24项固定参数对照
+
+紧凑回传已补齐：第二阶段26项全部完成150轮，21项健康，原24项clean、4项CNN配对及26项时点实验的
+身份、来源和数值环境核验通过。原26项manifest为
+`20837b56e9a8d35ed0922a0e2ce41c821a1fcbebf8f609f21e04a47bfc479a60`，58项原科学来源保持冻结。
+此前“只收到22条完整TASK、全局状态待核验”已由本次完整回传覆盖，不需要重复训练第二阶段。
+
+| 条件 | 健康任务 | clean误撤销：IID/Dirichlet | 四个攻击任务均Acc | 四个攻击任务均ASR |
+| --- | --- | --- | --- | --- |
+| A：K10、start12 | 3/6 | 14% / 31% | 56.49% | 13.625% |
+| B：K10、start25 | 4/6 | 14% / 24% | 57.74% | 10.00% |
+| C：K20、start25 | 6/6 | 0% / 2% | 57.53% | 21.75% |
+| FedAvg start12 | 4/4 | 本批未新增clean | 57.40% | 16.75% |
+| FedAvg start25 | 4/4 | 本批未新增clean | 57.65% | 20.00% |
+
+五项健康失败为：A的IID/Dirichlet clean、B的IID/Dirichlet clean均因永久误撤销超过10%；
+A的IID70因7次非有限更新失败。表中攻击均值保留这项已完整但不健康的结果，没有将它移除后重算有利均值。
+整个26项只有这7次非有限更新，总计约15.399 worker小时，不是并行墙钟时长。
+上述ASR均值只包含四个攻击任务，不混入clean背景；A的正确均值为13.625%。
+
+**下一批以C作为健康开发条件，不将C称为最佳或正式合格。** C恢复了clean健康，但Dirichlet70的最终
+Acc/ASR为47.80%/53.00%，相比B为−5/+46个百分点。C的四攻击任务首轮仅接纳7/160个已验证有限恶意更新，
+全攻击期却接纳8266/8964、历史准入7081；其中IID70历史准入6076、Dirichlet70为1005。
+因此下一步要检查持续漏检和历史污染，不能只凭首轮低接纳率判断防御成功。
+
+clean A/B只改变攻击起点，记录的规范化环境一致。IID的151轮、所比较12项科学指标相同；
+Dirichlet首次在第3轮出现目标类置信度差异（约.093634与.093961），最终Acc相差0.4个百分点。
+该轮仍在共同K10可信预热期，无实际攻击，不能归因为延后攻击的收益；来源/环境相符也没有定位差异原因，
+不能直接断言CUDA非确定性。保留该重复性问题，本批不静默调整PyTorch确定性标志、优化器或密码随机性。
+
+新增独立入口 `run_cifar_cnn_threshold_panel.py`，配置 `configs/cifar10_cnn_threshold_panel_v1.json`，
+协议 `cifar-cnn-fixed-threshold-panel-v1`，默认输出 `outputs/cifar_v8_diagnostic_v1/threshold_cnn_e1_k20`。
+固定原CNN、E1、lr=.05、lr_decay=.99、K20、首攻击轮25、150轮、100客户端、batch50，
+开发seed `2026093001`，每候选IID/Dirichlet(.5)×恶意比例0/.1/.7，共6项。
+数据保持45k训练/2.5k校准/2.5k攻击辅助，官方test不参与开发选择。
+
+| 候选 | warning | κ | h | 目的 |
+| --- | --- | --- | --- | --- |
+| P0 | 1.25 | 1.25 | 6 | 原014在C条件下重新运行，同期基准和重复性检查 |
+| P1 | 1.50 | 1.25 | 6 | 仅提高瞬时阈值，观察误伤与漏检取舍 |
+| P2 | 1.50 | .85 | 1.5 | 相对P1调整漂移，检查持续亚阈值偏离 |
+| P3 | 1.75 | 1.00 | 2 | 第二组瞬时阈值与漂移折中 |
+
+共 **4候选×6场景＝24项Ours**。除表中三个参数外，其他均沿用014：q2、clusters2、漂移记忆.8、
+severe6、历史阈值1/确认2、恢复确认2、参考预算3.5、clip2、weight cap2、penalty.5、recovery1.25、remove_after5。
+攻击固定boost5、attack_epochs1、stealth_steps1、distance_weight=.0001、source5/target7、target_count200。
+本批不修改Ours核心实现、基线算法、公共优化器或原正式健康及最终双≤2pp规则，不运行其他数据集。
+
+P0六项在新研究内全部真实训练；旧C六项仅为只读重复性参照，不能复制或改名充作本批结果。
+原24＋4＋26＝54项任务均只读审计、不重训、不修补；新身份冻结参考来源、原始结果和数值环境。
+原58项科学来源保持不变，新增模块不会改写旧manifest或重置旧预算。
+**本入口只跑上述24项，不自动启动TPE、正式实验或下一阶段。** 收到结果后先比较P0与旧C，
+再检查候选相对同期P0的健康、clean效用、最终Acc/ASR和全攻击期接纳/历史准入。
+若P0的健康或关键机制明显漂移，应先核查重复性再继续选参；微小单seed改善不能当作因果或统计显著性结论。
+
+仍由用户在本地主项目提交并推送代码，随后在AI Station执行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+# 仅展示计划，应显示24项、P0–P3、CNN E1、K20/start25、150轮
+python run_cifar_cnn_threshold_panel.py --plan-only
+nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.free,utilization.gpu --format=csv
+# 自动选择通过初始化和空闲显存准入的同型卡，最多6张
+python -u run_cifar_cnn_threshold_panel.py --devices auto --max-gpus 6
+```
+
+原目录不在默认位置时，启动和摘要均传相同的`--timing-output 原26项目录`、`--clean-output 原24项目录`、
+`--matched-output 原4项目录`；自定义新目录用`--output`，四个目录必须互不包含。
+`auto`使用当前CUDA可见逻辑卡，默认空闲显存准入16GiB；准入不是独占资源或峰值保证。
+保留15秒任务/轮次进度、逐轮检查点及故障卡暂停派发；中断后用相同启动命令在本批新目录续跑。
+已完成任务按身份复用，数值失败保留，不自动改batch或删目录重训。
+
+运行完成或异常停止后，执行紧凑只读摘要：
+
+```bash
+python run_cifar_cnn_threshold_panel.py --summary > /tmp/cifar_threshold_summary.txt
+cat /tmp/cifar_threshold_summary.txt
+```
+
+复制 `CIFAR_THRESHOLD_BEGIN` 至 `CIFAR_THRESHOLD_END` 的全部内容；命令报错时另附末尾错误。
+摘要不下载数据、不探测GPU、不训练、不修补任何实验目录；shell只将回传文本写入上述临时文件。
+报告保留24项逐场景结果、实际健康/完整数、同期P0对照及P0对旧C的重复性证据，
+首1/5轮和全攻击期计数继续使用已验证有限在线观测分母，缺失不填0、不把背景混淆当攻击ASR。
+控制器结束时另在本批新目录保存`threshold_summary.json`；启动尚未创建manifest就失败时，
+摘要会明确尚无有效研究，应同时回传启动末尾错误。
+
+## 2026-10-08历史步骤：第二阶段回传截断后的只读紧凑摘要
+
+本节保留首次截断回传的处理过程；证据现已补齐，当前结论和下一批命令以上节为准。
 
 最新回传只含22条完整TASK；开头的全局身份/来源/环境信息、2条C0参考及A组前4条任务未完整收到。
 这不代表远端丢失或少跑4项；当前先补齐只读证据，不重训、不开始下一批搜索。
