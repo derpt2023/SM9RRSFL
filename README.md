@@ -4,7 +4,66 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
-## 2026-10-09：冻结历史结果与只读机制诊断（当前步骤）
+## 2026-10-09最新：机制取证已回传，下一步同卡三轮重复性探针
+
+AI Station已同步至9dc52ca，上一轮5文件的只读取证完整通过：12项机制与12个前缀配对完整，
+原始90项引用链/66源码与读取前后证据核验通过；未训练或改写原输出。
+
+现在可以确认：H0/H1诚实永久撤销总数为19/137，全部由累计可疑计数达到阈值触发；撤销当轮全部为
+warning越界，没有诚实客户端由strong单次异常即时撤销，诚实更新的drift越界总数也为0。
+H1 Dir clean的49次误撤销发生在52–150轮；Dir70的25次发生在32–58轮。
+这指向“正常更新反复触发warning，随后被永久删除”的失效路径，而非仅调小κ/h就能修复。
+同时恶意更新仍可低分通过：H1 Dir70最后30轮接纳267/270个恶意在线更新。关闭永久撤销即使能减少误伤，
+也不自动解决这类漏检，因此本批尚不实施NoPermanent。
+
+重复性仍需定位：IID的所有前24轮客户端诊断一致；Dir三种比例的准确率均从第2轮出现差异，
+第21轮开始检测分数和聚类数量不同，随后接纳/权重/历史准入改变，早于第25轮冻结。
+历史环境deterministic/cudnn_deterministic=false、TF32=true，配对分配在不同逻辑GPU且未记录UUID；
+这些是待检验因素，不能直接宣称CUDA是根因。
+
+新增独立 `run_cifar_prefix_probe.py`：IID/Dirichlet clean各3次新进程重复，每次3轮，共6任务/18训练轮。
+只使用原H0 Ours、CNN E1、seed2026093001、100客户端、batch50、lr .05/decay .99、K20/start25。
+任务保留原完整150轮配置作来源，新配置仅rounds改为3；不修改原数值flags、算法、数据、健康或正式门槛。
+因为只到第3轮，不评估K20后的防御、完整健康或正式资格，亦不启动TPE、H1、NoPermanent或后续实验。
+
+启动时只读审计原90项，在兼容且利用率≤5%、空闲显存≥16GiB的卡中选一张，以完整NVIDIA UUID固定；
+六项串行，后续任务和续跑均不自动换卡。原数据/环境/源码契约核验不通过会阻止训练。
+输出独立为 `outputs/cifar_v8_diagnostic_v1/prefix_probe_v1`，不复用旧模型或checkpoint。
+完成任务复用；失败attempt和日志保留并停止，检查原因后才可显式 `--retry-failed` 生成新attempt。
+这类三轮探针不从中间轮恢复，以保证每次比较都是独立新进程的相同前缀。
+
+记录初始化、数据和客户端划分、每客户端输入模型/更新/索引和本地损失、实际聚合系数和顺序、聚合向量、
+聚合后模型，以及原评估forward的logits/预测指纹；不导出模型向量或SM9秘密。
+批次排列指纹由同一seed重建，明确不是新增训练RNG观测。指纹复制可能同步设备、扰动调度；
+本次相等不能证明原多卡长实验逐位可复现，也不把检测到差异自动归因某个CUDA算子。
+
+用户提交推送本批文件后，在AI Station运行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+python run_cifar_prefix_probe.py --gpu auto
+```
+
+执行完后输入以下命令并回传 `CIFAR_PREFIX_PROBE_BEGIN` 到 `CIFAR_PREFIX_PROBE_END` 全部内容：
+
+```bash
+python run_cifar_prefix_probe.py --summary > /tmp/cifar_prefix_probe_summary.txt
+cat /tmp/cifar_prefix_probe_summary.txt
+```
+
+`--summary`只读、不探测GPU或加载训练数据。`--plan-only`只显示6×3轮计划。
+如无空闲兼容卡，命令会停止；可用 `--gpu GPU-完整UUID` 指定一张符合条件的卡。
+外层 `CUDA_VISIBLE_DEVICES` 如果已设，须为完整UUID列表；数字掩码会明确拒绝，以免混淆物理与逻辑编号。
+输出或原五个目录移位时传对应 `--output/--history-output/--threshold-output/--timing-output/--clean-output/--matched-output`。
+六目录须分离，旧证据保留原样。失败时一并回传报错及提示的worker.log末尾，不自行删除重跑。
+
+本地46项新增与29项旧取证回归共75项通过；真实小型CPU观测前后参数/逐轮结果/RNG一致，
+原66来源及其中v8的49来源SHA不变。真实CIFAR/GPU探针尚待AI Station执行；合成6任务摘要13JSONL约6.6KB。
+
+## 2026-10-09历史步骤：冻结历史结果与只读机制诊断
+
+本节取证已完成，保留结果和复现命令；当前只需执行上节短探针，无需再次取证或重跑12项。
 
 12项历史对照已全部完成，11项健康；原66来源、参考链、数值环境与观测覆盖通过核验，manifest为
 `3c6566877fe4ea96ec9a6d464828c6d4c050937e1b1cf7dea82b2eb4db640eed`。
