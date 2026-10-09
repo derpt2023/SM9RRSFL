@@ -4,7 +4,69 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
-## 2026-10-09最新：首轮差异仅在两名单样本尾批客户端，进入逐批次定位
+## 2026-10-09最新：首次分歧在单样本尾批梯度，进行局部确定性对照
+
+三个局部探针已完整回传：同一GPU、每次执行原初始化/round0评估/客户端0–84，均在聚合前停止。
+本地HEAD为482f0fe，原9文件已提交；回传78源码map与本地一致，但附件没有远端Git日志，不推断远端HEAD。
+三组两两比较均首先在client-19的第15批（索引14、1个样本）发现梯度差，client-84的第7批（索引6、1个样本）也相同。
+此前批次、实际输入索引/特征/标签、前向参数、logits和loss均一致；旧上下文及非目标更新复现。
+
+- 差异只涉及`conv1_w`/`conv1_b`；其余8个参数块没有数值差异。
+- 最大全梯度绝对差约`2.8983e-6`，相对L2最大约`6.5724e-7`；最终客户端更新最大绝对差约`1.4156e-7`。
+- 这是首次**已观测**反向梯度边界，尚非具体CUDA算子的证明；上游输入梯度也可能传播至conv1。
+  这组短探针不能证明微小扰动造成了Ours长期性能下降，更不能据此判定防御已修好。
+
+新增独立入口`run_cifar_tail_determinism.py`，预定六个fresh子进程按A1/B1/A2/B2/A3/B3串行：
+A保留原设置，B仅在client-19和84两个单样本尾批的原`Tensor.backward`调用期间临时设置
+`torch.backends.cudnn.deterministic=True`，完成后立即恢复。A/B均使用同一观测器与flags核验。
+不改forward、数据/批次、SGD、TF32、cuDNN enabled/benchmark或全局deterministic_algorithms。
+这是显式数值策略诊断变体，不是对历史实验或公共训练协议的静默修改。
+[PyTorch 2.3卷积反向源码](https://github.com/pytorch/pytorch/blob/v2.3.0/aten/src/ATen/native/Convolution.cpp#L1877-L1943)
+在backward时读取确定性设置；远端NVIDIA定制构建仍需实测，不能用上游源码或flag getter替代具体内核证据。
+
+每个进程仍保留完整原config（horizon=3），执行第1轮0–84号客户端、在85入口停止，
+共510次客户端训练调用、0个完整训练轮、无聚合。每worker记录两次作用域前/内/后flags，其他边界校验原flags；
+末批公开数值快照约56MB/worker、六份约340MB，不含SM9秘密或检查点。
+保留原78源码，四个新模块另冻结为82来源；原3个step、6个prefix、90项历史引用均只读。
+新输出为`outputs/cifar_v8_diagnostic_v1/tail_determinism_v1`，不覆盖任何旧目录。
+固定原GPU UUID，每次准入仍要求空闲显存≥16384MiB、利用率≤5%，每10秒查询、最多等600秒。
+完成项复用，失败保留并停止；检查失败后才显式`--retry-failed`启动新的fresh attempt。
+
+用户自行提交推送README、4个tail_determinism模块及4个对应测试，共9文件后，在AI Station运行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+python run_cifar_tail_determinism.py
+```
+
+完成或停止后运行：
+
+```bash
+python run_cifar_tail_determinism.py --summary > /tmp/cifar_tail_determinism_summary.txt
+cat /tmp/cifar_tail_determinism_summary.txt
+```
+
+回传完整`CIFAR_TAIL_DETERMINISM_BEGIN`至`CIFAR_TAIL_DETERMINISM_END`，失败时另附控制台报错和提示的worker.log末尾。
+`--summary`仅读取、不查询GPU/加载数据/训练/写实验目录；`--plan-only`只显示计划。
+`--step-output`可指定已完成局部探针路径，`--output`指定独立新目录，`--data-dir`指定原数据位置。
+续跑不能改变冻结引用；`--wait-seconds`0–600、`--poll-seconds`大于0且≤60只调整等待时间。
+
+判读按每个目标客户端分别进行：先核全部干预前边界、旧上下文与非目标更新，再比较组内三对及跨组三对。
+原A复现同边界差异、B三次一致且干预前状态相同，才支持当前环境下局部策略消除所观测差异；
+A也一致时标为本批未复现，B仍不同则标为该策略不足，干预前不同时不作局部因果解释。
+即使成功也只验证这两次backward，之后仍须逐批决定短训练复现与防御机制对照；不自动推进NoPermanent、TPE或150轮。
+新增观测/同步可能改变时序，三次一致也不是长期确定性保证。
+
+本地55项新增＋22项原观测/报告回归，共77项通过。覆盖真实小型CPU双卷积十参数CNN的原分支逐位一致与RNG不变、
+仅两次原backward开关生效/所有forward保持原flags、异常恢复、原99项序列化引用链、坏快照及篡改policy拒绝发布/复用、
+六fresh交错同UUID控制，以及独立客户端判读/只读报告。旧78源码逐SHA不变。
+这些测试不是实际CIFAR/GPU运行；本批六项仍待AI Station实测。
+
+## 2026-10-09历史步骤：首轮差异仅在两名单样本尾批客户端，进入逐批次定位
+
+本节三项局部探针已完成，结果及当前命令见最上方；无需重跑本节。
+
 
 用户已提交上一批3文件，AI Station pull到474bb3e，本地主项目同HEAD且本轮起始干净。
 只读客户端明细217条JSON完整，200客户端、六组首轮配对、全部分母及来源校验通过，六份原artifact身份未变。
