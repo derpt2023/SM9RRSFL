@@ -4,7 +4,67 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
-## 2026-10-09最新：六项短探针完成，先只读定位首轮客户端差异
+## 2026-10-09最新：首轮差异仅在两名单样本尾批客户端，进入逐批次定位
+
+用户已提交上一批3文件，AI Station pull到474bb3e，本地主项目同HEAD且本轮起始干净。
+只读客户端明细217条JSON完整，200客户端、六组首轮配对、全部分母及来源校验通过，六份原artifact身份未变。
+
+| 第1轮观测 | IID | Dirichlet |
+| --- | --- | --- |
+| 三次已记录输入 | 全100人一致 | 全100人一致 |
+| 三次平均本地loss | 全100人一致 | 全100人一致 |
+| 任意一对更新不同的客户端 | 0/100 | 仅client-19、client-84，2/100 |
+| 最后一批恰为1个样本 | 0人 | 仅19（701样本）、84（301样本） |
+
+Dirichlet三组两两比较均只有这两人更新不同，其他98人均一致；尾批1组为2/2不同，其他批次形状合计0/98不同。
+本地真实标签重算与远端200人的样本/批次大小一致；此次回传不含远端分区索引SHA，不能扩大为本地和远端索引逐位核验。
+第2轮开始已使用不同全局模型，后续大范围差异需与首轮定位分开。平均loss一致与最后一次反向/更新才分歧相容，
+但尚未证明最后批次、梯度或某个CUDA算子就是原因；更新SHA也不能量化误差。
+
+新增独立入口`run_cifar_client_step_probe.py`：三次fresh进程、原物理GPU UUID串行，保持原Dirichlet H0配置、
+初始化和round0评估，执行第1轮客户端0–84，在85开始训练前停止；共255次客户端训练调用，不完成聚合或一个完整训练轮。
+仅目标19/84逐批次细查：实际执行索引、特征/标签、进入批次的参数、原forward输出/loss、原backward梯度、
+原SGD后的参数，以及最终客户端更新。使用原训练函数，不重写SGD、不重新forward，不改数值flags或随机数。
+每批次保留指纹；两目标末批和最终delta额外保存公开数值数组，用于max-absolute/relative-L2/不等元素比例比较。
+其他批次没有完整数值快照时只定位指纹边界，不补造误差幅度。三份快照按当前CNN大小合计约170MB，不含SM9秘密或检查点。
+
+新增观测会增加CPU读回/同步，可能扰动执行时序；报告另核旧前缀上下文及非目标客户端更新。
+如原差异不再复现，只能说明当前观测条件下未复现，不能据此宣称问题解决。
+不设置deterministic、不关闭TF32、不丢弃尾批、不改变baseline/public训练参数。
+此批不评估防御健康/性能资格，也不推进NoPermanent、TPE或150轮实验。
+
+新输出独立为`outputs/cifar_v8_diagnostic_v1/client_step_probe_v1`，原六项prefix及90项引用只读。
+原72源码不改；新协议独立冻结78来源（增加reader、GPU等待适配器和4个step模块）。
+固定原UUID，显存仍≥16GiB、利用率≤5%，每次准入最多等待600秒；无自动换卡/降低门槛。
+完成项复用，失败attempt保留且默认停；只有检查失败原因后显式`--retry-failed`才从头运行新attempt。
+
+用户自行提交推送README、4个step模块和4个对应测试共9文件后，在AI Station执行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+python run_cifar_client_step_probe.py
+```
+
+执行完成或停止后：
+
+```bash
+python run_cifar_client_step_probe.py --summary > /tmp/cifar_client_step_probe_summary.txt
+cat /tmp/cifar_client_step_probe_summary.txt
+```
+
+回传完整`CIFAR_CLIENT_STEP_PROBE_BEGIN`至`CIFAR_CLIENT_STEP_PROBE_END`；失败时附控制台报错和提示的worker.log末尾。
+`--summary`只读、无GPU查询/数据加载；`--plan-only`只显示计划。`--prefix-output`和`--output`可指定原引用及新输出位置，
+但两者及原五个参考目录必须分离，续跑不能改变已冻结引用；可用`--data-dir`指定同一数据。
+`--wait-seconds`范围0–600，`--poll-seconds`大于0且≤60，均不改变准入阈值。
+
+本地46项新增和22项原观测/等待回归共68项通过；包含真实小型CPU十参数CNN的有/无观测更新一致、
+随机数状态不变、实际批次捕获、异常恢复，以及原96任务引用链、坏快照拒绝复用和同UUID控制流程。
+旧72源码逐SHA不变；这些检查不是实际CIFAR/GPU执行，三次远端局部探针仍待运行和回传。
+
+## 2026-10-09历史步骤：六项短探针完成，只读定位首轮客户端差异
+
+本节只读结果已回传，当前按最上方逐批次探针操作，无需重新运行本节诊断。
 
 新回传已确认6/6完成，旧两项完成记录保留，72来源、原90项引用链及摘要读取前后证据核验通过。
 本地主项目HEAD为5b0e683；此次附件只有摘要，没有远端Git或续跑控制日志，因此不据此推断远端HEAD或适配器执行过程。
