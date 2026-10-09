@@ -4,7 +4,68 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
-## 2026-10-09最新：首次分歧在单样本尾批梯度，进行局部确定性对照
+## 2026-10-09最新：局部确定性对照成功，验证完整三轮重复性
+
+上一批6项尾批对照已完整回传：A原设置三对均在client-19/84单样本末批梯度出现差异，
+B仅两次原backward打开cuDNN deterministic后三次全部已观测边界逐字节一致。
+两组的历史上下文及干预前实际输入/参数/logits/loss均相同，作用域/恢复/9个flags核验通过。
+82源码map匹配本地HEAD4d8047e，附件只有summary，没有远端Git日志，不据此推断远端HEAD。
+
+B得到稳定但不同的数值结果：跨组finaldelta最大绝对差约19的1.3281e-6、84的2.5202e-6，
+高于A内部波动并不说明损坏，也不说明B更准确。当前仅证明这两处局部观测的重复性改善，
+尚未证明具体内核、聚合与后续轮次的稳定性或Accuracy/ASR提高。两份可选安装源码均不可用，
+torch_git_version=Unknown；报告没有把源码/实际内核证明标为成功。
+
+新增独立`run_cifar_deterministic_prefix.py`：Dirichlet clean的A/B各3个fresh进程，
+按A1/B1/A2/B2/A3/B3在原GPU UUID串行，每次完整3轮、100客户端，共18全局轮/1800客户端训练调用。
+A保留原数值设置；B将已验证的局部策略延伸到每轮：仅实际单样本末批的原本地训练backward期间，
+临时设`cudnn.deterministic=True`并恢复。按实际batch识别，在该冻结分区预期每轮19、84各1次，3轮共6次。
+原配置/seed、TF32、forward、SGD及其余flags不变，B明确是新数值策略诊断变体。
+本入口只接受本次三轮clean Ours配置，不泛化至攻击、其他方法或正式训练，不重新运行已稳定的IID。
+
+保留原prefix观测器，核每轮全部客户端更新、系数、聚合、轮后模型、评估和科学诊断；
+另核真实执行批次数量/大小和6个singleton批次的实际阶段指纹。只保存指纹/公开标量，不新增NPZ、
+完整参数数组、训练检查点或密码秘密。原82源码冻结，新4模块独立形成86来源；
+输出`outputs/cifar_v8_diagnostic_v1/deterministic_prefix_v1`，旧105任务引用链只读，不覆盖旧结果。
+同UUID准入仍为free≥16384MiB、util≤5%，每10秒查一次、每次最多等待600秒。
+完成项校验后复用，失败保留并停；仅检查原因后显式`--retry-failed`新建fresh attempt。
+
+组内各3对必须逐位比较完整三轮路径。跨组只要求共同初始条件及第1轮首次干预前条件相同；
+**第2轮起A/B全局模型输入不同是干预后的传播，不能误判为初始条件失配。**
+同时报告新B第1轮的两目标梯度/post/delta是否匹配旧B三次，A随机delta不要求匹配旧值。
+若A仍分歧且B全三轮一致，则停止算子层面追查，下一批返回Ours机制对照；
+A也一致则本批未复现原波动，不能把稳定归功于B；B仍异则只定位其首个新分歧，不自动扩大flags。
+三轮处于clean warmup，不评健康、性能资格或防御成功，不自动启动30/150轮、NoPermanent或TPE。
+
+用户自行提交推送README、4个deterministic_prefix模块和4个对应测试共9文件后，在AI Station执行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+python run_cifar_deterministic_prefix.py
+```
+
+完成或停止后执行：
+
+```bash
+python run_cifar_deterministic_prefix.py --summary > /tmp/cifar_deterministic_prefix_summary.txt
+cat /tmp/cifar_deterministic_prefix_summary.txt
+```
+
+回传完整`CIFAR_DETERMINISTIC_PREFIX_BEGIN`至`CIFAR_DETERMINISTIC_PREFIX_END`，失败另附控制台报错/提示worker.log末尾。
+旧Dir三轮每项约105–106秒，六项同量级约11分钟；这是参考量级，不含GPU等待/核验开销，也不保证新策略耗时。
+`--summary`只读，无GPU查询/数据加载/训练；`--plan-only`只显示计划。`--tail-output`指定上一批已完成输出，
+`--output`必须与全部引用分离；续跑不改冻结引用。`--data-dir`指定原数据；等待时间选项沿用上一批范围。
+
+本地52项新增（protocol11/runtime11/report15/runner15）＋52项原prefix/tail回归，共104项通过。
+包含真实小CPU两种CNN分支完整三轮原结果/RNG不变、实际单样本范围/异常恢复、105任务封存引用链、
+篡改与缺项拒绝、完整轨迹及后续传播判读、同UUID交错调度与fresh标记核验。旧82源逐SHA未改。
+本批尚未实际CIFAR/GPU训练，三轮重复性仍待远端结果。
+
+## 2026-10-09历史步骤：首次分歧在单样本尾批梯度，进行局部确定性对照
+
+本节六项已完成，结果和当前操作见最上方；无需重跑本节。
+
 
 三个局部探针已完整回传：同一GPU、每次执行原初始化/round0评估/客户端0–84，均在聚合前停止。
 本地HEAD为482f0fe，原9文件已提交；回传78源码map与本地一致，但附件没有远端Git日志，不推断远端HEAD。
