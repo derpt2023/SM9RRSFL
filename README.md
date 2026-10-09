@@ -4,7 +4,57 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
-## 2026-10-09最新：机制取证已回传，下一步同卡三轮重复性探针
+## 2026-10-09最新：两项短探针完成，等待原GPU并续跑剩余四项
+
+AI Station与本地均已同步至86c85bc。短探针2/6完成，两个IID任务各3轮/300次客户端观测完整，
+两次所有已观测边界完全一致；两次均与旧H0的第0–3轮标量记录相同。
+IID第三次和三项Dirichlet尚未启动，本次还不能判断Dirichlet训练差异的源头。
+原90项引用链、72来源和摘要读取前后证据核验通过，完成项无需重训。
+
+中断发生在第三项START之前：原控制器单次筛选固定GPU未通过后立即退出。
+当时没有保存free/util快照，无法确定是哪项条件未满足，不能断言OOM、算法失败或其他进程抢占。
+错误文字“no training started”只适用于这次未启动的下一项，不表示已完成两项没有运行。
+
+新增独立 `resume_cifar_prefix_probe.py`，只在父控制器中等待原准入条件：
+
+- 固定原manifest中的同一GPU UUID，空闲显存仍≥16384MiB、利用率仍≤5%；仅显存/利用率暂不合格时等待。
+- 默认每10秒采样，单次准入最多等待600秒；打印实际UUID、显存、利用率和未通过条件。
+- UUID缺失、型号或可见性掩码不符、坏库存或查询错误明确停止，不自动换卡或放宽条件。
+- 超时保留结果并输出原摘要；达到期限后即使迟到的采样变为可用，也不启动该worker。
+- 原72来源、manifest、参数、已完成结果均不改；原worker入口、串行执行和失败检查沿用。
+  完成项直接REUSE；该次未启动任务不需要 `--retry-failed`，本适配器不自动重试失败worker。
+
+适配器先核验既有研究及完成证据，不创建新的训练计划；新控制侧记录写入原输出的
+`controller_resumes/`，独立保存适配器SHA和等待采样，不覆盖科学文件。
+程序设置和恢复仅限父进程准入处理，不修改训练的确定性、TF32或随机数设置。
+
+用户提交推送README、新续跑入口和对应测试共3文件后，在AI Station执行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+python resume_cifar_prefix_probe.py
+```
+
+它会复用已有两项，只补剩余四项，共12轮训练。等待超时也不要删除已有结果。
+执行结束后（含等待超时），输入：
+
+```bash
+python run_cifar_prefix_probe.py --summary > /tmp/cifar_prefix_probe_summary.txt
+cat /tmp/cifar_prefix_probe_summary.txt
+```
+
+回传完整 `CIFAR_PREFIX_PROBE_BEGIN` 到 `CIFAR_PREFIX_PROBE_END`；如果仍中断，附最后几条
+`PREFIX_RESUME` 的等待/超时/错误行。`resume_cifar_prefix_probe.py --summary`也可只读输出同一摘要。
+适配器可接受 `--output`和`--data-dir`，原五个参考目录自动从manifest读取。
+`--wait-seconds`允许0–600（0为不等待），`--poll-seconds`允许大于0且不超过60；两者均不改变GPU准入阈值。
+
+本地14项新增与38项原prefix回归共52项通过，冻结72来源SHA与86c85bc及远端回传一致；
+适配器尚待AI Station实际续跑，不能把本地模拟worker检查当成剩余四项已经完成。
+
+## 2026-10-09历史步骤：机制取证与同卡三轮重复性探针
+
+本节保留探针设计；已执行两项，当前续跑命令以上节为准。
 
 AI Station已同步至9dc52ca，上一轮5文件的只读取证完整通过：12项机制与12个前缀配对完整，
 原始90项引用链/66源码与读取前后证据核验通过；未训练或改写原输出。
