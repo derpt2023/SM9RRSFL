@@ -4,7 +4,73 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
-## 2026-10-09最新：局部确定性对照成功，验证完整三轮重复性
+## 2026-10-10最新：三轮重复性成立，进入30轮 clean 历史机制面板
+
+最新完整回传6/6任务、9/9配对、18轮1800次客户端调用：原策略A三对均首先在
+第1轮client-19第15批（单样本）梯度出现差异；局部确定性策略B三对在全部三轮已观测
+客户端更新、聚合、模型、评估及单样本边界逐位相同。共同初始/首轮干预前条件、旧尾批B效果、
+9个数值flags及恢复均通过。86源码map `eb9ea786c6c26f837aa962df9966aa267c4967c30f5360c27a2bfa835a76e385`
+匹配本地HEAD9297281；回传只有summary，不据此反推远端HEAD或声称本地持有原始远端快照。
+
+B的第3轮Accuracy为28.24%，A为26.92/27.04/27.28%；这仅是三轮clean轨迹，不能据此宣称精度提高、
+长期防御有效或具体CUDA/cuDNN内核已定位。B第2/3轮与A输入不同是第1轮干预的传播，不能误判为初始条件失配。
+
+新增独立 `run_cifar_mechanism_panel.py`，只运行 **Dir clean、H0/H1各2次fresh、每次30轮**，
+顺序H0r1/H1r1/H0r2/H1r2，共最多120轮、12000次客户端调用（合法撤销后调用数会减少）。
+全部使用相同的 `singleton_backward_cudnn_deterministic` 策略：仅实际单样本普通本地训练的原backward内
+临时设置cuDNN deterministic=True，并在finally恢复；forward、TF32、其他flags、SGD、种子与参数保持原样。
+H0原历史准入；H1复用原 `Ours-FrozenHistory-v1`，从第25轮commit停止历史准入，保留检测、权重、撤销和密码流程。
+只将原诊断horizon从3扩到30，固定CNN E1/.05/.99/K20/seed2026093001/100client/batch50。
+本批无攻击，未扩展到攻击优化路径或五基线；不新增NoPermanent/TPE/150轮或自动进入后续阶段。
+
+比较规则：
+
+- 两臂各自两次运行需比较完整已观测链，确认检测开始后的重复性。
+- H0/H1第0–24轮全部科学观测应相同；第25轮commit前的检测/系数以及当轮聚合/模型/评估也应相同。
+  实际顺序为检测/权重/撤销→系数→commit→聚合→评估；第25轮history_admitted及commit后历史状态可以不同。
+- 第26轮本地训练仍读取相同的第25轮末模型，须核输入、实际batch、singleton梯度、更新及loss一致；
+  首次受不同历史影响的是第26轮检测。此后记录为干预后差异，不自动证明传播；若更早边界已异，不能作历史机制归因。
+- 分开汇总1–20、21–24、25、26–30轮实际观测分母、接纳/历史准入、warning/drift/strong触发和撤销路径；
+  保存公开历史/live-normal/anchor/norm-limit指纹，核验H1真实冻结。原diagnostic.history_frozen仍是权重管理器状态。
+- 只报告30轮内健康诊断、Accuracy和背景源→目标率，不作完整健康资格或攻击ASR评估。旧H1 clean误撤销在52–150轮，
+  本批零误撤销不证明晚期问题已修复。合法全部撤销提前终止保留为完整执行证据及健康失败，不能伪称完成30轮。
+
+新输出 `outputs/cifar_v8_diagnostic_v1/mechanism_clean_v1`；旧86科学源冻结，新91来源；
+启动前从真实文件重新审核111项旧任务引用链及六prefix的9对比较，不能只相信复制的summary。
+新目录不得覆盖或嵌套旧目录；JSON公开指纹，不保存新NPZ、完整模型/更新向量、检查点或SM9秘密。
+同原物理UUID串行：`GPU-a7e9bd6c-6d58-d52a-7f17-f235370dae1a`，空闲≥16384MiB、util≤5%，
+每10秒等候、每项准入最多600秒；不换卡/不降门槛。完成项严核后复用；失败保留，检查后显式 `--retry-failed` 才新开fresh attempt。
+
+用户自行提交、推送本节末列出的10个文件后，在AI Station执行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+python run_cifar_mechanism_panel.py --plan-only
+python run_cifar_mechanism_panel.py
+```
+
+完成或停止后回传完整 `CIFAR_MECHANISM_BEGIN` 至 `CIFAR_MECHANISM_END`：
+
+```bash
+python run_cifar_mechanism_panel.py --summary > /tmp/cifar_mechanism_summary.txt
+cat /tmp/cifar_mechanism_summary.txt
+```
+
+若报错，同时附控制台错误和所指worker.log末尾。`--summary`只读，不查询GPU或加载数据，不会启动训练。
+旧六项prefix无需重跑。本地验证结果及提交清单见本节末；实际新面板仍待AI Station运行。
+
+本地64项新增＋38项旧回归，共102项不同测试通过。包括真实小型CPU30轮H0/H1原结果/RNG一致、
+CIFAR双卷积分支、实际单样本flags/恢复、111任务真实序列化引用链、25/26因果边界、合法撤销/提前停止、
+非有限更新/无聚合及篡改计数拒绝、只读报告和控制器串行/等待/中断/显式retry。
+这些是本地验证，不是实际CIFAR/GPU实验；旧86科学源码逐SHA未改。
+
+提交文件：README.md；cifar_mechanism_protocol.py、cifar_mechanism_observer.py、cifar_mechanism_runtime.py、
+cifar_mechanism_report.py、run_cifar_mechanism_panel.py；tests/test_cifar_mechanism_protocol.py、
+tests/test_cifar_mechanism_runtime.py、tests/test_cifar_mechanism_report.py、tests/test_cifar_mechanism_runner.py。
+本地docs/AGENTS/outputs不提交；助手不执行Git提交/推送或真实CIFAR训练。
+
+## 2026-10-09历史步骤：局部确定性对照成功，验证完整三轮重复性
 
 上一批6项尾批对照已完整回传：A原设置三对均在client-19/84单样本末批梯度出现差异，
 B仅两次原backward打开cuDNN deterministic后三次全部已观测边界逐字节一致。
