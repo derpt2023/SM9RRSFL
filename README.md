@@ -4,7 +4,70 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
-## 2026-10-10最新：30轮机制回传完整，提取第26轮分数与权重明细
+## 2026-10-10最新：明细已定位短期变化，扩展80轮 clean 对照
+
+第26轮机制明细完整回传：5JSON，91源map及两个reader SHA均匹配本地；两次重复的
+明细SHA相同，原始结果仍在AI Station。H0/H1当轮100个本地更新相同，冻结改变87个
+history/live-normal状态，恰有87个客户端的连续分数变化；86个没有离散决策翻转。
+唯一新增warning是诚实client-31：novelty（此例由class_score主导）1.2091644594491677→
+1.2764566993559474，越过warning=1.25；共同warning仍是client-37。
+client-31的anchor/norm/clip相同，live normal模式数2→1；weight1→0.5、count0→1，
+最终系数0.004737392185002834→0，属于当轮临时排除，没有trace或永久撤销。
+到第30轮其count为0.625，仍低于撤销阈值5。
+
+第26轮99个系数不同，但只有client-31改变接纳决定，其他系数通过归一化改变。
+系数ΔL1=0.009474784370005682、最大差0.004737392185002834，正系数客户端99→98；
+honest_weight_loss上升0.004385356579249655。后27–30轮本地模型输入已经不同，
+后期分数不再作同输入比较。当前证据不支持直接采用冻结历史，也未证明新数值策略下
+会发生旧52轮后的累计误撤销；不再追加只读往返或算子排查。
+
+下一批独立 `run_cifar_clean_horizon_panel.py`：**Dir clean，H0/H1各2次fresh，每次80轮**，
+按H0r1/H1r1/H0r2/H1r2在原物理UUID串行，共最多320轮、32000次客户端调用。
+80轮覆盖旧H1 clean第52轮误撤销起点之后28轮，但仍不认证原150轮完整健康或攻击防御。
+CNN E1/.05/.99/K20/B50/seed2026093001/100client、原检测阈值和撤销路径保持原配置；
+两臂继续相同的actual singleton普通本地训练backward局部deterministic策略，其他flags/forward/SGD不变。
+H0原历史，H1仍仅从25commit抑制历史准入；不调阈值、不增加攻击、NoPermanent、TPE或150轮。
+
+新目录 `outputs/cifar_v8_diagnostic_v1/clean_horizon80_v1`，与全部旧研究分离。
+旧91科学源及两个明细reader冻结为93个来源，新增protocol/report/runner后为96；
+启动和读取时重审旧四项机制结果及111项祖先，共115项真实引用链。
+新每项完整科学观察仍记录实际活跃客户端、单样本边界、检测/权重/commit及公开状态指纹，
+无新NPZ、完整模型/更新向量、恢复检查点或密码秘密。
+每项最多160次单样本开关；19/84若撤销，则后续事件按实际调用减少，不能硬填160。
+同UUID `GPU-a7e9bd6c-6d58-d52a-7f17-f235370dae1a`，free≥16384MiB/util≤5%，
+每10秒采样、每项等待最多600秒；无换卡/降阈值，失败保留且只在显式 `--retry-failed` 后fresh重试。
+
+新报告核对两臂组内80轮全部已观测链；每个新任务前30轮与旧同臂两次逐位比较，共8项前缀核验。
+跨臂共同0–24、第25轮干预前/模型评估、第26轮本地训练仍须相同；以后允许干预后不同。
+分开汇总31–51与52–80轮的实际在线分母、永久缺席客户端轮数、warning/drift/strong、
+count与撤销阈值余量、首次撤销及路径、history/state删除、honest_weight_loss和轨迹。
+合法全体诚实撤销提前停会保留为完成的实际执行及健康失败，后期缺失不补零，不称完成80轮。
+前缀或重复性不符则明确不能作本次配对机制解释；不自动采用H1或进入下一阶段。
+
+用户自行提交推送本节末列出的7文件后，在AI Station运行：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+python run_cifar_clean_horizon_panel.py --plan-only
+python run_cifar_clean_horizon_panel.py
+```
+
+结束或停止后回传完整 `CIFAR_CLEAN_HORIZON_BEGIN` 至 `CIFAR_CLEAN_HORIZON_END`：
+
+```bash
+python run_cifar_clean_horizon_panel.py --summary > /tmp/cifar_clean_horizon_summary.txt
+cat /tmp/cifar_clean_horizon_summary.txt
+```
+
+四项旧30轮和明细无需重跑。新80轮未远端启动，真实晚期健康/Accuracy未知。
+本地50项新增＋29项旧回归，共79项不同测试通过；原93来源逐SHA不变。
+提交清单：README.md、cifar_clean_horizon_protocol.py、cifar_clean_horizon_report.py、
+run_cifar_clean_horizon_panel.py、tests/test_cifar_clean_horizon_protocol.py、
+tests/test_cifar_clean_horizon_report.py、tests/test_cifar_clean_horizon_runner.py。
+docs/AGENTS/outputs忽略不提交；助手不执行Git提交/推送或真实训练。
+
+## 2026-10-10历史步骤：30轮机制回传完整，提取第26轮分数与权重明细
 
 完整回传4/4任务、4/4配对，共120轮、12000次客户端调用。Dir clean的H0/H1各自两次
 fresh运行在全部30轮已观测链上逐位一致；历史0–3轮、共同0–24轮、第25轮干预前条件及
