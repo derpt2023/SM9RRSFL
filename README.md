@@ -4,7 +4,53 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
-## 2026-10-10最新：三轮重复性成立，进入30轮 clean 历史机制面板
+## 2026-10-10最新：30轮机制回传完整，提取第26轮分数与权重明细
+
+完整回传4/4任务、4/4配对，共120轮、12000次客户端调用。Dir clean的H0/H1各自两次
+fresh运行在全部30轮已观测链上逐位一致；历史0–3轮、共同0–24轮、第25轮干预前条件及
+当轮模型/评估、第26轮本地训练均一致。首差是第25轮client-1的commit.admitted：
+H0当轮准入87次，H1为0；首次后续差异是第26轮读取history/live-normal状态。
+91源码map `9c5004d1c8f1505832dc5f1fb6283117082a704b19d106489395d9228c7d361b`
+匹配本地HEADa80ba13；附件只有summary，远端HEAD未知，原始四项artifact仍在AI Station。
+
+四项在30轮内均无误撤销、无非有限更新。第30轮Accuracy为H0 **49.92%**、H1 **49.68%**；
+第26–30轮H0接纳492/500、H1为490/500，warning分别8/10次，未触发drift或strong。
+H1的第25–30轮600次已观测commit均无history/live-normal变化，真实冻结成立。
+这说明当前短程条件下历史干预可以重复地影响检测和后续模型，尚无短期收益；
+同seed两次重复不能给出跨seed效应估计，30轮也没有覆盖旧H1第52–150轮误撤销。
+clean源→目标背景率不作为攻击ASR，完整健康和最终双≤2pp资格规则保留。
+
+新增独立只读入口 `diagnose_cifar_mechanism.py`，使用现有四项完成结果：
+
+- 核对完整30轮重复性、共同25/26边界、原91源码及111项上游引用链，并在读取前后核验所有证据与新reader SHA。
+- 提取第25轮实际准入和history/live-normal变化；第26轮按实际检测顺序给出首个决策差异。
+- 对第26轮匹配客户端汇总原始分数差、严格阈值余量与警告/决策翻转；警告增减客户端分别列出。
+- 分开报告可靠性权重、最终聚合系数的L1/最大差/正系数集合及诚实权重损失。
+  系数还受全局归一化、cap和clip影响，不能把所有系数变化归于该客户端自身警告。
+- 对翻转案例保留第21–30轮公开分数、计数和权重轨迹；第27–30轮明确核对本地输入/更新是否已不同，
+  后期分数变化不能沿用第26轮的相同输入解释。缺失或无观测分母显示不可用，不补零。
+
+旧91源码与全部实验目录保持冻结；两个新reader的SHA单独记录。该入口不训练、不查询GPU、
+不读恢复检查点、不写实验文件，不扩展数值策略到攻击优化路径。
+本批仅分析既有结果；无新NoPermanent、TPE、150轮或自动后续阶段。
+
+用户自行提交推送以下5文件后，在AI Station执行一次只读命令，无需重跑四项30轮：
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+python diagnose_cifar_mechanism.py > /tmp/cifar_mechanism_details.txt
+cat /tmp/cifar_mechanism_details.txt
+```
+
+回传完整 `CIFAR_MECHANISM_DETAILS_BEGIN` 至 `CIFAR_MECHANISM_DETAILS_END`。
+若证据缺失、变化、重复性或共同边界未通过，入口退出2并输出错误，保留原实验。
+本地42项新增＋31项既有回归，共73项不同测试通过；原91科学源码逐SHA与HEADa80ba13一致。
+本轮提交清单：README.md、cifar_mechanism_details.py、diagnose_cifar_mechanism.py、
+tests/test_cifar_mechanism_details.py、tests/test_cifar_mechanism_diagnose.py。
+docs/AGENTS/outputs为本地忽略文档和审计，不提交；助手不执行Git提交/推送或真实训练。
+
+## 2026-10-10历史步骤：三轮重复性成立，进入30轮 clean 历史机制面板
 
 最新完整回传6/6任务、9/9配对、18轮1800次客户端调用：原策略A三对均首先在
 第1轮client-19第15批（单样本）梯度出现差异；局部确定性策略B三对在全部三轮已观测
