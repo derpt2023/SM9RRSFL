@@ -42,7 +42,7 @@
     "lr": 0.05,
     "lr_decay": 0.99,
     "compute_backend": "torch",
-    "device": "cuda:0",
+    "device": "cuda",
     "partition": "dirichlet",
     "dirichlet_alpha": 0.5,
     "attack": "alternating_minimization",

@@ -94,7 +94,7 @@ def run_quick_validation():
         "--suspicion-remove-after", "3",
         "--crypto-mode", "simulated",
         "--compute-backend", "torch",
-        "--device", "cuda:0",
+        "--device", "cuda",
         "--output-dir", config['output_dir'],
         "--no-early-stop",
         "--eval-interval", "1",
