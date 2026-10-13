@@ -20,7 +20,6 @@
     "attack": "alternating_minimization",
     "attack_boost": 15.0,
     "attack_epochs": 1,
-    "attack_scale": 5.0,
     "attack_source_label": 5,
     "attack_target_label": 7,
     "attack_target_count": 200,
