@@ -35,26 +35,28 @@
   },
 
   "tuning": {
-    "algorithm": "leave_one_attacked_ratio_out",
+    "algorithm": "grid",
 
     "validation_fraction": 0.15,
     "split_seed": 20261013,
     "validation_seeds": [301, 302, 303],
     "final_seeds": [401, 402, 403],
 
-    "trials_per_tunable_method": 20,
+    "trials_per_tunable_method": 5,
 
     "run_final_evaluation": true,
     "final_jobs": "auto",
 
     "max_clean_accuracy_drop": 0.05,
 
-    "objective": {
-      "clean_accuracy_weight": 0.15,
-      "robust_accuracy_weight": 0.15,
-      "attack_success_weight": 0.30,
-      "honest_weight_loss_weight": 0.40
+    "performance_target": {
+      "clean_accuracy": 0.54,
+      "tolerance": 0.02,
+      "best_attack_success_rate": 0.08,
+      "fallback_on_missing": "highest_objective_score"
     },
+
+    "objective": "auto",
 
     "method_spaces": {
       "sm9rrs": {
