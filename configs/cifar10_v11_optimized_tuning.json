@@ -30,7 +30,7 @@
     "attack_source_label": 5,
     "attack_target_label": 7,
     "attack_target_count": 200,
-    "attack_start_round": 12,
+    "attack_start_round": 25,
     "K": 20,
     "ours_parameter_mode": "fixed",
     "calibration_candidate_budget": 30,
