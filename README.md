@@ -4,6 +4,33 @@
 
 六种方法：Ours（内部名 `sm9rrs`）、VERT、AlignIns、Krum、TAD（`ding13`）、FedAvg。原入口支持 MNIST/CIFAR-10、NumPy/PyTorch；新增独立Fashion-MNIST入口使用PyTorch。支持IID/Dirichlet Non-IID，以及真实 SM9 或快速仿真密码模式。
 
+## 2026-10-12：清理已退役诊断和未使用的密码示例
+
+本次移除20个已跟踪文件（含9个旧测试），共3914行。删除依据是现行入口、
+测试共享fixture和实验源码指纹均不再依赖这些文件，具体为：
+
+- 已结束的旧v7一次性诊断：`audit_cifar_ours_failures.py`、`diagnose_cifar_nonfinite.py`、
+  `check_cifar_prefix_repeatability.py`、`check_cifar_client_repeatability.py`、
+  `run_cifar_ours_development.py`。
+- 上述工具的专用测试：`tests/test_cifar_ours_audit.py`、`tests/test_nonfinite_probe.py`、
+  `tests/test_prefix_repeatability.py`、`tests/test_client_repeatability.py`、
+  `tests/test_cifar_ours_development_runner.py`。
+- 当前项目未接入的旧GmSSL实现：`gmssl/sm2.py`、`gmssl/sm4.py`、`gmssl/sm9.py`、
+  `gmssl/optimized_curve.py`、`gmssl/optimized_pairing.py`、`gmssl/optimized_field_elements.py`。
+- 对应上游演示：`tests/test_sm2.py`、`tests/test_sm3.py`、`tests/test_sm4.py`、`tests/test_sm9.py`。
+
+密码摘要继续使用保留的`gmssl/sm3.py`及`gmssl/func.py`，真实SM9继续使用
+`sm9rrsfl.sm9_backend`和原生v2桥。旧CIFAR v2–v8入口、配置和共享测试fixture仍服务于
+续跑、结果读取及来源审计；`cifar_ours_development_policy.py`也仍在冻结来源清单中。
+最新clean horizon的96文件source map保持
+`63b6cdf804894249886a0da5367000275ea1390dd4c97e94ce357f19bb133245`。
+
+本地同时清理Python缓存、旧构建lib/temp、退役`_native_rrs`二进制和失效FedRE临时探针；
+保留固定GmSSL v2源码缓存、当前原生扩展、实验输出、数据集和本地文档。
+旧文件可从清理前提交`f2c42c17e3e6e540faaa720bba77778b57814209`查阅。
+清理后113个测试文件可成功收集1465项测试；针对现行密码、训练、Fashion和80轮面板的
+198项回归通过，无真实CIFAR/CUDA训练。
+
 ## 2026-10-11最新：80轮 clean H0/H1 回传完成，H1不采用
 
 AI Station 已回传完整 `CIFAR_CLEAN_HORIZON_BEGIN/END`：4/4任务、4/4配对均完成请求的80轮。
