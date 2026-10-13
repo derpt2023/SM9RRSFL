@@ -56,7 +56,7 @@
     "attack_target_count": 200,
     "attack_start_round": 12,
     "detector_window": 10,
-    "crypto_mode": "hash",
+    "crypto_mode": "simulated",
     "dkg_threshold": 2,
     "dkg_nodes": 3,
     "early_stop": false,

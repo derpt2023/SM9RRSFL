@@ -36,7 +36,7 @@ def run_quick_validation():
     print("  3. detector_distance_threshold: 4.39 → 2.5 (MNIST configuration)")
     print("  4. detector_reject_threshold: 5.56 → 5.0 (MNIST configuration)")
     print("  5. rounds: 150 → 50 (quick validation)")
-    print("  6. crypto_mode: sm9 → hash (faster execution)")
+    print("  6. crypto_mode: sm9 → simulated (faster execution)")
     print()
     print("Hypothesis:")
     print("  Higher attack strength makes malicious updates more detectable,")
@@ -92,7 +92,7 @@ def run_quick_validation():
         "--suspicion-penalty-factor", "0.5",
         "--suspicion-recovery-factor", "1.25",
         "--suspicion-remove-after", "3",
-        "--crypto-mode", "hash",
+        "--crypto-mode", "simulated",
         "--compute-backend", "torch",
         "--device", "cuda:0",
         "--output-dir", config['output_dir'],
