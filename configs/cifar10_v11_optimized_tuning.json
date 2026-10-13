@@ -7,7 +7,7 @@
     "data_dir": "data/cifar10",
     "download": true,
     "output_dir": "outputs/cifar10_v11_optimized_tuning",
-    "methods": ["sm9rrs"],
+    "methods": ["sm9rrs", "vert", "alignins", "krum", "ding13", "fedavg"],
     "ratio_range": [0.0, 0.4, 3],
     "client_counts": [100],
     "partitions": ["iid", "dirichlet"],
