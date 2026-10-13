@@ -56,7 +56,7 @@ def run_quick_validation():
 
         try:
             result = subprocess.run(
-                [sys.executable, "run_experiments_from_config.py", exp["config"]],
+                [sys.executable, "run_experiments_from_config.py", "--config", exp["config"]],
                 cwd=project_root,
                 check=True,
             )
