@@ -81,8 +81,13 @@ def main():
         print("已取消")
         sys.exit(0)
 
+    # 设置 PYTHONPATH 以找到 fair_tuning_progress_display 模块
+    cmd = (
+        "export PYTHONPATH=\"${PYTHONPATH}:$(pwd)/scripts/experiments/mnist\" && "
+        "python3 run_fair_tuning_from_config.py --config configs/cifar10_v11_optimized_tuning.json"
+    )
     success = run_command(
-        "python3 run_fair_tuning_from_config.py --config configs/cifar10_v11_optimized_tuning.json",
+        cmd,
         "阶段 1/3: sm9rrs 优化调优（9 小时）"
     )
 
