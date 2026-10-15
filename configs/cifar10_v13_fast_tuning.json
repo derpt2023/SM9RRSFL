@@ -1,27 +1,28 @@
 {
   "schema_version": 3,
   "name": "cifar10_v13_fast_tuning",
-  "description": "CIFAR-10 快速调优 v13 - 修正客户端数量为100，优化搜索空间以在48小时内完成",
-
+  "description": "CIFAR-10 快速调优 v13 - 100客户端，简化搜索空间",
   "shared_parameters": {
     "dataset": "cifar10",
     "data_dir": "data/cifar10",
     "download": true,
     "output_dir": "outputs/cifar10_v13_fast_tuning",
-
     "num_clients": 100,
     "rounds": 150,
     "local_epochs": 1,
     "batch_size": 50,
     "lr": 0.01,
     "lr_decay": 0.998,
-
     "partition": "iid",
     "train_samples": 5000,
     "test_samples": 1000,
-
-    "ratios": [0.0, 0.2, 0.4, 0.6],
-
+    "ratios": [
+      0.0,
+      0.2,
+      0.4,
+      0.6,
+      0.8
+    ],
     "attack": "alternating_minimization",
     "attack_boost": 20.0,
     "attack_epochs": 1,
@@ -29,21 +30,14 @@
     "attack_distance_weight": 0.0001,
     "attack_source_label": 3,
     "attack_target_label": 5,
-    "attack_target_count": 1,
-    "attack_scale": 5.0,
     "attack_start_round": 25,
-
-    "crypto_mode": "sm9",
-    "dkg_nodes": 3,
-    "dkg_threshold": 2,
-    "sm9_workers": 1,
-
+    "K": 20,
+    "ours_parameter_mode": "fixed",
     "detector_subspace_dim": 3,
     "detector_normal_clusters": 2,
-    "detector_distance_threshold": 2.0,
     "detector_reject_threshold": 5.0,
     "detector_drift_memory": 0.8,
-    "detector_drift_allowance": 2.0,
+    "detector_drift_allowance": 1.5,
     "detector_drift_threshold": 6.0,
     "detector_history_confirm": 2,
     "detector_history_threshold": 1.5,
@@ -51,132 +45,94 @@
     "detector_reference_budget": 3.0,
     "detector_clip_factor": 2.0,
     "detector_weight_cap": 2.0,
-    "detector_window": 20,
-
     "suspicion_penalty_factor": 0.5,
     "suspicion_recovery_factor": 1.25,
     "suspicion_remove_after": 3,
-
-    "vert_projection_dim": 128,
-    "vert_history_window": 10,
-    "vert_use_ratio_prior": false,
-    "vert_top_k": 0,
-
-    "checkpoint_interval": 0,
-    "eval_interval": 1,
-    "early_stop": false,
-    "device": "cuda",
-    "compute_backend": "torch"
-  },
-
-  "validation": {
-    "seeds": [301],
-    "partitions": ["dirichlet"],
-    "rounds": 50
-  },
-
-  "final": {
-    "seeds": [401, 402],
-    "partitions": ["iid", "dirichlet"]
-  },
-
-  "methods": {
-    "sm9rrs": {
-      "candidates": [
-        {"detector_distance_threshold": 1.9},
-        {"detector_distance_threshold": 2.0},
-        {"detector_distance_threshold": 2.1}
-      ]
-    },
-
-    "vert": {
-      "search_space": {
-        "vert_history_window": [5, 10, 15],
-        "vert_projection_dim": [64, 128, 256],
-        "vert_predict_epochs": [3, 5],
-        "vert_predict_lr": [0.01, 0.001]
-      },
-      "num_candidates": 4
-    },
-
-    "alignins": {
-      "shared_overrides": {
-        "detector_subspace_dim": null,
-        "detector_distance_threshold": null
-      },
-      "search_space": {
-        "alignins_sparsity": [0.3, 0.5, 0.7],
-        "alignins_tda_radius": [0.5, 1.0, 1.5],
-        "alignins_mpsa_radius": [0.5, 1.0, 1.5]
-      },
-      "num_candidates": 4
-    },
-
-    "krum": {
-      "shared_overrides": {
-        "detector_subspace_dim": null,
-        "detector_distance_threshold": null
-      },
-      "candidates": [{}]
-    },
-
-    "ding13": {
-      "shared_overrides": {
-        "detector_subspace_dim": null,
-        "detector_distance_threshold": null
-      },
-      "candidates": [{}]
-    },
-
-    "fedavg": {
-      "shared_overrides": {
-        "detector_subspace_dim": null,
-        "detector_distance_threshold": null
-      },
-      "candidates": [{}]
-    }
-  },
-
-  "hard_constraints": {
-    "training_health": {
-      "reject_any_all_clients_revoked": true,
-      "reject_any_all_honest_revoked": true,
-      "max_clean_false_revocation_rate": 0.1,
-      "ours_starvation_consecutive_rounds": 5,
-      "ours_starvation_honest_weight_loss": 0.99
-    },
-    "max_clean_accuracy_drop": 0.05,
-    "max_nonfinite_updates": 0,
-    "min_round_completion_rate": 1.0
-  },
-
-  "performance_target": {
-    "max_asr": 0.08,
-    "max_peak_asr": 0.20,
-    "tail_rounds": 10,
-    "accuracy_gap": 0.02,
-    "asr_gap": 0.01
-  },
-
-  "selection_policy": {
-    "required_valid_methods": ["sm9rrs", "vert"],
-    "execution_and_metric_gates": "required for every method",
-    "comparison_fallback": "highest common Score among complete, finite failed comparisons",
-    "comparison_failure_reasons": [
-      "all_clients_revoked",
-      "all_honest_revoked",
-      "clean_accuracy_drop",
-      "clean_false_revocation_rate",
-      "honest_weight_starvation"
-    ],
-    "failed_comparisons_remain_invalid": true
-  },
-
-  "tuning_execution": {
     "compute_backend": "torch",
     "device": "cuda",
-    "jobs": "auto",
-    "progress": "auto",
-    "final_jobs": "auto"
+    "early_stop": false,
+    "eval_interval": 1,
+    "visualizations": true,
+    "progress": true,
+    "checkpoint_interval": 0,
+    "methods": [
+      "sm9rrs",
+      "vert",
+      "alignins",
+      "krum",
+      "ding13",
+      "fedavg"
+    ]
+  },
+  "tuning": {
+    "algorithm": "grid",
+    "validation_fraction": 0.15,
+    "split_seed": 20261013,
+    "validation_seeds": [
+      301
+    ],
+    "final_seeds": [
+      401,
+      402
+    ],
+    "trials_per_tunable_method": 3,
+    "run_final_evaluation": true,
+    "final_jobs": "auto",
+    "max_clean_accuracy_drop": 0.05,
+    "performance_target": {
+      "accuracy_gap": 0.02,
+      "asr_gap": 0.01,
+      "max_asr": 0.08,
+      "max_peak_asr": 0.2,
+      "tail_rounds": 10
+    },
+    "objective": "auto",
+    "method_spaces": {
+      "sm9rrs": {
+        "detector_distance_threshold": [
+          1.9,
+          2.0,
+          2.1
+        ]
+      },
+      "vert": {
+        "vert_history_window": [
+          5,
+          10,
+          15
+        ],
+        "vert_projection_dim": [
+          20
+        ],
+        "vert_predict_epochs": [
+          5
+        ],
+        "vert_predict_lr": [
+          0.01
+        ],
+        "vert_top_k": [
+          5
+        ],
+        "vert_use_ratio_prior": [
+          false
+        ]
+      },
+      "alignins": {
+        "alignins_sparsity": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "alignins_tda_radius": [
+          0.1
+        ],
+        "alignins_mpsa_radius": [
+          0.1
+        ]
+      },
+      "krum": {},
+      "ding13": {},
+      "fedavg": {}
+    }
   }
 }

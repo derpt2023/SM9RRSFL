@@ -116,7 +116,8 @@ python run_fair_tuning_from_config.py --config configs/my_experiment.json
 
 **已验证的成功配置**：
 - **MNIST v7**：`configs/mnist_v7_target_fair_tuning.json`（推荐）
-- **CIFAR-10 v13**：`configs/cifar10_v13_fair_tuning_fixed.json`（当前最新）
+- **CIFAR-10 v13 (10客户端)**：`configs/cifar10_v13_fair_tuning_fixed.json`
+- **CIFAR-10 v13 (100客户端)**：`configs/cifar10_v13_100clients.json`（当前最新）
 - **Fashion-MNIST**：`configs/fashion_mnist_fair_tuning.json`
 
 ---
@@ -323,38 +324,61 @@ python run_fair_tuning_from_config.py \
 - 开发调试：使用`simulated`
 - 最终结果：切换到`sm9`
 
-### Q6: 调优失败："Krum is undefined" 或运行时间过长
+### Q6: "ModuleNotFoundError: No module named 'fair_tuning_progress_display'"
 
-**问题1: Krum约束错误**
+**问题描述**:
+```
+ModuleNotFoundError: No module named 'fair_tuning_progress_display'
+```
+
+**原因**: 进度显示模块不在Python搜索路径中。
+
+**解决方案**:
+```bash
+# 复制模块到项目根目录
+cp scripts/experiments/mnist/fair_tuning_progress_display.py .
+
+# 验证导入
+python3 -c "from fair_tuning_progress_display import progress_display; print('✅ 成功')"
+```
+
+该模块提供实时进度显示和日志管理，不影响核心训练逻辑。
+
+### Q7: CIFAR-10 v13调优配置说明
+
+**问题背景**: v13 fixed (10客户端)在运行39小时后失败
+
 ```
 ValueError: Krum is undefined for this configuration: n=10, f=8, n-f-2=0; require n-f-2 >= 1
 ```
 
 **根本原因**: 
-- ❌ `num_clients=10` 太小，不符合论文设置
-- ❌ 在`malicious_ratio=0.8`时违反Krum约束（n-f-2 < 1）
+- ❌ `num_clients=10` 不符合论文标准设置（论文用100）
+- ❌ `malicious_ratio=0.8` 时违反Krum约束（n-f-2 < 1）
 
-**问题2: 运行时间过长**
-- ❌ 10个客户端时运行39小时
-- ❌ 如果修正为100客户端，需要420小时（17.5天）❌
-
-**推荐解决方案: 使用优化后的快速配置**
+**正确配置: v13_100clients**
 
 ```bash
-# 1. 使用v13_fast配置（100客户端，优化搜索空间）
-bash run_v13_fast_tuning.sh
+# 使用100客户端配置（与MNIST v7一致）
+bash run_v13_100clients.sh
 
-# 预计耗时：57小时（2.4天）✅
+# 或直接运行
+python run_fair_tuning_from_config.py \
+    --config configs/cifar10_v13_100clients.json
 ```
 
-**v13_fast配置优势**:
-- ✅ `num_clients=100`（与MNIST一致）
-- ✅ 验证：1种子、1分区、50轮（快速验证）
-- ✅ 正式：2种子、2分区、150轮（充分验证）
-- ✅ 恶意比例：[0.0, 0.2, 0.4, 0.6]（充分覆盖）
-- ✅ 聚焦最佳参数（14候选 vs 39候选）
-- ✅ 总任务：152（vs 999）
-- ✅ 仍符合一区论文标准
+**配置参数**:
+- ✅ `num_clients = 100`（与论文一致）
+- ✅ `ratios = [0.0, 0.2, 0.4, 0.6, 0.8]`（充分覆盖）
+- ✅ `rounds = 150`（充分训练）
+- ✅ `attack_boost = 20.0`（验证有效）
+- ✅ 搜索空间：sm9rrs(12) + vert(12) + alignins(12) + 3基线
+
+**任务规模**:
+- 验证阶段: 585 trials (39 candidates × 5 ratios × 3 seeds)
+- 最终阶段: 90 trials (6 methods × 5 ratios × 3 seeds)
+- 总计: 675 trials × 150 rounds = 101,250 训练轮
+- **预计耗时**: 100-150小时（7张4090D并行）
 
 **Krum约束验证**（num_clients=100）:
 | ratio | 恶意数f | n-f-2 | Krum兼容 |
@@ -363,31 +387,16 @@ bash run_v13_fast_tuning.sh
 | 0.2 | 20 | 78 | ✅ |
 | 0.4 | 40 | 58 | ✅ |
 | 0.6 | 60 | 38 | ✅ |
+| 0.8 | 80 | 18 | ✅ |
 
-**注意：断点恢复不适用**
-
-如果已经用错误配置（num_clients=10）运行了很久：
-- ❌ 修改`num_clients`会改变配置指纹
-- ❌ 系统无法识别已完成的任务
-- ✅ 必须从头开始，因此使用v13_fast很重要
-
-**配置对比**:
-```
-v13_fixed（错误）:
-  - num_clients: 10 ❌
-  - 任务数: 999
-  - 耗时: 420小时（修正后）❌
-
-v13_fast（推荐）:
-  - num_clients: 100 ✅
-  - 任务数: 152
-  - 耗时: 57小时 ✅
-  - 学术要求: 完全满足 ✅
-```
+**注意事项**:
+1. ⚠️ **不能断点恢复**: 修改`num_clients`会改变配置指纹，必须从头运行
+2. ✅ **学术标准**: 完全符合一区论文要求
+3. ✅ **公平对比**: 所有方法使用相同的客户端数量
 
 **参考文档**: 
-- `docs/CIFAR-v13-配置对比-2026-10-15.md` - 详细对比与推荐
-- `docs/CIFAR-v13-客户端数量与资源优化-2026-10-15.md` - 优化分析
+- `docs/CIFAR-v13-100clients-验证完成-2026-10-16.md` - 完整配置说明
+- `docs/CIFAR-v13-Krum约束修复-2026-10-15.md` - 问题诊断
 
 ---
 
