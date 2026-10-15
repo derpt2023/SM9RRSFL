@@ -12,42 +12,38 @@ cd "$(dirname "$0")"
 
 cat << 'EOF'
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║              CIFAR-10 公平调优 v13 - 修复共享参数错误                         ║
+║              CIFAR-10 公平调优 v13 - 修复 Krum 约束问题                      ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
-✅ 修复:
+🔧 修复:
+  - ratios: [0.0, 0.1, 0.2, 0.4, 0.6] (移除 0.8)
+  - 原因: Krum 要求 n-f-2 ≥ 1，10客户端时 ratio=0.8 不满足
   - attack_boost: 20.0 (共享参数，不调优)
   - attack_start_round: 25 (> K=20)
-  - 只调优方法特定参数
 
 调优参数:
-  sm9rrs:   detector_distance_threshold [1.7, 1.9, 2.1, 2.3, 2.5] (5 values)
+  sm9rrs:   detector_distance_threshold [2.0..3.1] (12 values)
             detector_subspace_dim 固定为 3
-  VERT:     window × dim × epochs × lr (3×3×2×2 = 36 组合，TPE 采样 12 个)
-  AlignIns: sparsity × radii (3×3×3 = 27 组合，TPE 采样 18 个)
-
-基于今天的发现:
-  ✅ boost=20 效果好 (平均 ASR=13.5%)
-  ✅ threshold 在 1.7-2.5 范围内搜索（围绕成功的 2.0）
-  ✅ dim=3 已验证有效
+  VERT:     window × dim × epochs × lr (采样 12 个)
+  AlignIns: sparsity × radii (采样 12 个)
 
 预计耗时:
-  - 验证: 5+12+18 = 35 trials × 10分钟 = 6 小时
-  - 最终: 6方法 × 5ratio × 2partition × 150轮 = 约12小时
-  - 总计: 18 小时
+  - 验证: 12+12+12 = 36 trials × 5场景 × 10分钟 ≈ 30 小时
+  - 最终: 6方法 × 5ratio × 2partition × 150轮 ≈ 15 小时
+  - 总计: 45 小时
 
 学术价值:
   ⭐⭐⭐⭐⭐ 符合一区论文标准
   - 公平对比 (有参数的方法都调优)
   - 方法一致 (与 MNIST v7 相同)
-  - 参数基于实证 (今天的测试)
+  - Krum 约束兼容
 
 EOF
 
 echo ""
 echo "开始时间: $(date)"
 echo ""
-read -p "是否开始 18 小时的完整调优？[Y/n]: " answer
+read -p "是否开始 45 小时的完整调优？[Y/n]: " answer
 if [[ "$answer" =~ ^[Nn] ]]; then
     echo "已取消"
     exit 0

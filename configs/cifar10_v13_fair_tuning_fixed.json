@@ -20,6 +20,8 @@
     "train_samples": 5000,
     "test_samples": 1000,
 
+    "ratios": [0.0, 0.1, 0.2, 0.4, 0.6],
+
     "attack": "alternating_minimization",
     "attack_boost": 20.0,
     "attack_epochs": 1,

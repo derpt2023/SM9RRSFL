@@ -323,6 +323,41 @@ python run_fair_tuning_from_config.py \
 - 开发调试：使用`simulated`
 - 最终结果：切换到`sm9`
 
+### Q6: 调优失败："Krum is undefined for this configuration"
+
+**问题描述**:
+```
+ValueError: Krum is undefined for this configuration: n=10, f=8, n-f-2=0; require n-f-2 >= 1
+```
+
+**原因**: Krum算法要求 `n - f - 2 ≥ 1`，当 `num_clients=10` 且 `malicious_ratio=0.8` 时不满足约束。
+
+**解决方案**:
+
+1. **验证配置兼容性**（推荐先检查）:
+   ```bash
+   python3 scripts/verify_krum_compatibility.py
+   ```
+
+2. **修复配置**: 在 `shared_parameters` 中显式设置合法的 ratios:
+   ```json
+   {
+     "shared_parameters": {
+       "num_clients": 10,
+       "ratios": [0.0, 0.1, 0.2, 0.4, 0.6],  // 移除0.8
+       "methods": ["sm9rrs", "vert", "alignins", "krum", "ding13", "fedavg"]
+     }
+   }
+   ```
+
+3. **约束参考表**（num_clients=10）:
+   | ratio | 恶意数f | n-f-2 | Krum兼容 |
+   |-------|---------|-------|----------|
+   | 0.0~0.7 | 0~7 | 8~1 | ✅ |
+   | 0.8 | 8 | 0 | ❌ |
+
+**参考文档**: `docs/CIFAR-v13-Krum约束修复-2026-10-15.md`
+
 ---
 
 ## 引用
