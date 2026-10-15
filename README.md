@@ -323,40 +323,71 @@ python run_fair_tuning_from_config.py \
 - 开发调试：使用`simulated`
 - 最终结果：切换到`sm9`
 
-### Q6: 调优失败："Krum is undefined for this configuration"
+### Q6: 调优失败："Krum is undefined" 或运行时间过长
 
-**问题描述**:
+**问题1: Krum约束错误**
 ```
 ValueError: Krum is undefined for this configuration: n=10, f=8, n-f-2=0; require n-f-2 >= 1
 ```
 
-**原因**: Krum算法要求 `n - f - 2 ≥ 1`，当 `num_clients=10` 且 `malicious_ratio=0.8` 时不满足约束。
+**根本原因**: 
+- ❌ `num_clients=10` 太小，不符合论文设置
+- ❌ 在`malicious_ratio=0.8`时违反Krum约束（n-f-2 < 1）
 
-**解决方案**:
+**问题2: 运行时间过长**
+- ❌ 10个客户端时运行39小时
+- ❌ 如果修正为100客户端，需要420小时（17.5天）❌
 
-1. **验证配置兼容性**（推荐先检查）:
-   ```bash
-   python3 scripts/verify_krum_compatibility.py
-   ```
+**推荐解决方案: 使用优化后的快速配置**
 
-2. **修复配置**: 在 `shared_parameters` 中显式设置合法的 ratios:
-   ```json
-   {
-     "shared_parameters": {
-       "num_clients": 10,
-       "ratios": [0.0, 0.1, 0.2, 0.4, 0.6],  // 移除0.8
-       "methods": ["sm9rrs", "vert", "alignins", "krum", "ding13", "fedavg"]
-     }
-   }
-   ```
+```bash
+# 1. 使用v13_fast配置（100客户端，优化搜索空间）
+bash run_v13_fast_tuning.sh
 
-3. **约束参考表**（num_clients=10）:
-   | ratio | 恶意数f | n-f-2 | Krum兼容 |
-   |-------|---------|-------|----------|
-   | 0.0~0.7 | 0~7 | 8~1 | ✅ |
-   | 0.8 | 8 | 0 | ❌ |
+# 预计耗时：57小时（2.4天）✅
+```
 
-**参考文档**: `docs/CIFAR-v13-Krum约束修复-2026-10-15.md`
+**v13_fast配置优势**:
+- ✅ `num_clients=100`（与MNIST一致）
+- ✅ 验证：1种子、1分区、50轮（快速验证）
+- ✅ 正式：2种子、2分区、150轮（充分验证）
+- ✅ 恶意比例：[0.0, 0.2, 0.4, 0.6]（充分覆盖）
+- ✅ 聚焦最佳参数（14候选 vs 39候选）
+- ✅ 总任务：152（vs 999）
+- ✅ 仍符合一区论文标准
+
+**Krum约束验证**（num_clients=100）:
+| ratio | 恶意数f | n-f-2 | Krum兼容 |
+|-------|---------|-------|----------|
+| 0.0 | 0 | 98 | ✅ |
+| 0.2 | 20 | 78 | ✅ |
+| 0.4 | 40 | 58 | ✅ |
+| 0.6 | 60 | 38 | ✅ |
+
+**注意：断点恢复不适用**
+
+如果已经用错误配置（num_clients=10）运行了很久：
+- ❌ 修改`num_clients`会改变配置指纹
+- ❌ 系统无法识别已完成的任务
+- ✅ 必须从头开始，因此使用v13_fast很重要
+
+**配置对比**:
+```
+v13_fixed（错误）:
+  - num_clients: 10 ❌
+  - 任务数: 999
+  - 耗时: 420小时（修正后）❌
+
+v13_fast（推荐）:
+  - num_clients: 100 ✅
+  - 任务数: 152
+  - 耗时: 57小时 ✅
+  - 学术要求: 完全满足 ✅
+```
+
+**参考文档**: 
+- `docs/CIFAR-v13-配置对比-2026-10-15.md` - 详细对比与推荐
+- `docs/CIFAR-v13-客户端数量与资源优化-2026-10-15.md` - 优化分析
 
 ---
 

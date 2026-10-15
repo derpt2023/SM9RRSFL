@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="174mm" height="94mm" viewBox="0 0 1740 940" role="img" aria-labelledby="figure-title figure-description">
+  <title id="figure-title">System architecture of SM9-RRS-FL</title>
+  <desc id="figure-description">Four stages: setup, federated learning, poisoning detection, and trace and revocation. D-KGC provisions client private keys. Clients upload ring-signed local updates to the aggregation server and receive the global model. The server submits anomaly evidence to the auditor. The auditor requests threshold tracing from D-KGC and returns trace results and a certificate to the server. The server verifies the certificate before revoking an identity.</desc>
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+      .role { font-size: 32px; font-weight: 700; fill: #253748; }
+      .body { font-size: 25px; fill: #566A78; }
+      .stage { font-size: 25px; font-weight: 700; }
+      .flow { font-size: 25px; fill: #253748; }
+      .math { font-family: 'Times New Roman', Times, serif; font-style: italic; }
+      .panel { fill: #FBFCFD; stroke: #CEDAE1; stroke-width: 1.8; }
+      .icon { stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+    <marker id="arrow-training" viewBox="0 0 10 10" markerWidth="8" markerHeight="8" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 1 1 L 9 5 L 1 9 Z" fill="#397D9D"/></marker>
+    <marker id="arrow-model" viewBox="0 0 10 10" markerWidth="8" markerHeight="8" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 1 1 L 9 5 L 1 9 Z" fill="#7298AC"/></marker>
+    <marker id="arrow-crypto" viewBox="0 0 10 10" markerWidth="8" markerHeight="8" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 1 1 L 9 5 L 1 9 Z" fill="#23867B"/></marker>
+    <marker id="arrow-audit" viewBox="0 0 10 10" markerWidth="8" markerHeight="8" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 1 1 L 9 5 L 1 9 Z" fill="#B37B35"/></marker>
+  </defs>
+  <rect width="1740" height="940" fill="#FFFFFF"/>
+
+  <!-- Four protocol roles; role boundaries also anchor the communication edges. -->
+  <g id="aggregation-server">
+    <rect class="panel" x="80" y="70" width="590" height="260" rx="7"/>
+    <circle cx="116" cy="107" r="18" fill="#397D9D"/>
+    <text x="116" y="116" text-anchor="middle" font-size="25" font-weight="700" fill="#FFFFFF">3</text>
+    <text class="stage" x="148" y="116" fill="#397D9D">Poisoning detection</text>
+    <path d="M 104 139 H 646" stroke="#DFE7EC" stroke-width="1.5"/>
+    <g class="icon" fill="#FFFFFF" stroke="#397D9D" stroke-width="3.2">
+      <rect x="127" y="176" width="81" height="34" rx="4"/>
+      <rect x="127" y="218" width="81" height="34" rx="4"/>
+      <rect x="127" y="260" width="81" height="34" rx="4"/>
+      <path d="M 140 193 H 145 M 140 235 H 145 M 140 277 H 145" stroke-width="4"/>
+      <path d="M 164 193 H 195 M 164 235 H 195 M 164 277 H 195" stroke-width="2.4"/>
+    </g>
+    <text class="role" x="244" y="185">Aggregation server (AS)</text>
+    <text class="body" x="244" y="224">Anomaly scoring</text>
+    <text class="body" x="244" y="258">Adaptive aggregation weights</text>
+    <text x="244" y="305" font-size="24" fill="#8A633C">Verify certificate before revocation</text>
+  </g>
+
+  <g id="auditor">
+    <rect class="panel" x="1070" y="70" width="590" height="260" rx="7"/>
+    <circle cx="1106" cy="107" r="18" fill="#B37B35"/>
+    <text x="1106" y="116" text-anchor="middle" font-size="25" font-weight="700" fill="#FFFFFF">4</text>
+    <text class="stage" x="1138" y="116" fill="#9D6B2D">Trace &amp; revocation</text>
+    <path d="M 1094 139 H 1636" stroke="#DFE7EC" stroke-width="1.5"/>
+    <g class="icon" fill="none" stroke="#B37B35" stroke-width="3.2">
+      <circle cx="1158" cy="180" r="10" fill="#FFF8EC"/>
+      <path d="M 1158 192 V 267 M 1117 211 H 1199 M 1130 211 L 1116 244 Q 1130 257 1144 244 Z M 1186 211 L 1172 244 Q 1186 257 1200 244 Z M 1135 268 H 1181 M 1121 280 H 1195"/>
+    </g>
+    <text class="role" x="1238" y="185">Auditor</text>
+    <text class="body" x="1238" y="224">Ring-signature verification</text>
+    <text class="body" x="1238" y="258">Audit coordination</text>
+    <text class="body" x="1238" y="305">Trace result review</text>
+  </g>
+
+  <g id="federated-clients">
+    <rect class="panel" x="80" y="610" width="590" height="285" rx="7"/>
+    <text class="role" x="111" y="656">Federated clients</text>
+    <text class="body" x="111" y="692">Local training on private data</text>
+    <g class="icon" fill="#FFFFFF" stroke="#397D9D" stroke-width="3.2">
+      <rect x="136" y="727" width="72" height="47" rx="4"/>
+      <path d="M 126 781 H 218 L 210 790 H 134 Z" fill="#E7F0F5"/>
+      <rect x="262" y="727" width="72" height="47" rx="4"/>
+      <path d="M 252 781 H 344 L 336 790 H 260 Z" fill="#E7F0F5"/>
+      <rect x="388" y="727" width="72" height="47" rx="4"/>
+      <path d="M 378 781 H 470 L 462 790 H 386 Z" fill="#E7F0F5"/>
+      <path d="M 149 741 H 195 M 275 741 H 321 M 401 741 H 447" stroke="#A5C3D3" stroke-width="2.4"/>
+    </g>
+    <g class="icon" fill="#FFFFFF" stroke="#C65A54" stroke-width="3.2">
+      <rect x="514" y="727" width="72" height="47" rx="4"/>
+      <path d="M 504 781 H 596 L 588 790 H 512 Z" fill="#FAECEA"/>
+      <path d="M 541 741 L 559 759 M 559 741 L 541 759"/>
+    </g>
+    <text x="172" y="827" text-anchor="middle" font-size="25" fill="#397D9D">Honest</text>
+    <text x="298" y="827" text-anchor="middle" font-size="25" fill="#397D9D">Honest</text>
+    <text x="424" y="827" text-anchor="middle" font-size="25" fill="#397D9D">Honest</text>
+    <text x="550" y="827" text-anchor="middle" font-size="25" fill="#B44C46">Malicious</text>
+    <text class="body" x="111" y="869">SM9 ring-signed model updates</text>
+  </g>
+
+  <g id="d-kgc">
+    <rect class="panel" x="1070" y="610" width="590" height="285" rx="7"/>
+    <text class="role" x="1101" y="656">D-KGC</text>
+    <text class="body" x="1101" y="692">Distributed key generation center</text>
+    <g class="icon" fill="none" stroke="#23867B" stroke-width="3.2">
+      <path d="M 1170 759 H 1510 M 1170 759 L 1245 819 H 1395 L 1470 759" stroke="#B7D8D2" stroke-dasharray="6 7" stroke-width="2.4"/>
+      <circle cx="1170" cy="759" r="35" fill="#EEF7F5"/>
+      <circle cx="1320" cy="759" r="35" fill="#EEF7F5"/>
+      <circle cx="1470" cy="759" r="35" fill="#EEF7F5"/>
+      <circle cx="1163" cy="753" r="9"/>
+      <path d="M 1169 760 L 1184 775 M 1178 769 L 1183 764 M 1183 774 L 1188 769"/>
+      <circle cx="1313" cy="753" r="9"/>
+      <path d="M 1319 760 L 1334 775 M 1328 769 L 1333 764 M 1333 774 L 1338 769"/>
+      <circle cx="1463" cy="753" r="9"/>
+      <path d="M 1469 760 L 1484 775 M 1478 769 L 1483 764 M 1483 774 L 1488 769"/>
+      <circle cx="1547" cy="759" r="3" fill="#23867B" stroke="none"/>
+      <circle cx="1565" cy="759" r="3" fill="#23867B" stroke="none"/>
+      <circle cx="1583" cy="759" r="3" fill="#23867B" stroke="none"/>
+    </g>
+    <text class="body" x="1101" y="869"><tspan class="math">t</tspan>-of-<tspan class="math">n</tspan> threshold cooperation</text>
+  </g>
+
+  <!-- 1. Setup: private-key provisioning from D-KGC to clients. -->
+  <g id="setup">
+    <path d="M 1070 760 H 670" fill="none" stroke="#23867B" stroke-width="3.2" marker-end="url(#arrow-crypto)"/>
+    <text class="flow" x="870" y="737" text-anchor="middle">Private-key provisioning</text>
+    <rect x="793" y="817" width="154" height="44" rx="22" fill="#EDF6F4"/>
+    <circle cx="819" cy="839" r="17" fill="#23867B"/>
+    <text x="819" y="848" text-anchor="middle" font-size="25" font-weight="700" fill="#FFFFFF">1</text>
+    <text class="stage" x="848" y="848" fill="#20746C">Setup</text>
+  </g>
+
+  <!-- 2. Federated learning: the two directions have separate, aligned lanes. -->
+  <g id="federated-learning">
+    <path d="M 210 610 V 330" fill="none" stroke="#397D9D" stroke-width="3.2" marker-end="url(#arrow-training)"/>
+    <path d="M 545 330 V 610" fill="none" stroke="#7298AC" stroke-width="3.2" marker-end="url(#arrow-model)"/>
+    <rect x="238" y="386" width="284" height="44" rx="22" fill="#EDF3F7"/>
+    <circle cx="264" cy="408" r="17" fill="#397D9D"/>
+    <text x="264" y="417" text-anchor="middle" font-size="25" font-weight="700" fill="#FFFFFF">2</text>
+    <text class="stage" x="293" y="417" fill="#397D9D">Federated learning</text>
+    <text class="flow" x="234" y="528">Signed local</text>
+    <text class="flow" x="234" y="561">updates</text>
+    <text class="flow" x="521" y="528" text-anchor="end">Global</text>
+    <text class="flow" x="521" y="561" text-anchor="end">model</text>
+  </g>
+
+  <!-- 4. Auditing and threshold tracing: requests point down, results point up. -->
+  <g id="trace-and-revocation">
+    <path d="M 670 172 H 1070" fill="none" stroke="#B37B35" stroke-width="3.2" marker-end="url(#arrow-audit)"/>
+    <text class="flow" x="870" y="151" text-anchor="middle">Anomaly evidence, <tspan class="math">E</tspan><tspan class="math" baseline-shift="sub" font-size="18">π</tspan></text>
+    <path d="M 1070 270 H 670" fill="none" stroke="#23867B" stroke-width="3.2" marker-end="url(#arrow-crypto)"/>
+    <text class="flow" x="870" y="309" text-anchor="middle">Trace result &amp; certificate</text>
+    <path d="M 1180 330 V 610" fill="none" stroke="#B37B35" stroke-width="3.2" stroke-dasharray="9 7" marker-end="url(#arrow-audit)"/>
+    <path d="M 1510 610 V 330" fill="none" stroke="#23867B" stroke-width="3.2" marker-end="url(#arrow-crypto)"/>
+    <text class="flow" x="1204" y="528">Trace</text>
+    <text class="flow" x="1204" y="561">request</text>
+    <text class="flow" x="1486" y="528" text-anchor="end">Identity &amp;</text>
+    <text class="flow" x="1486" y="561" text-anchor="end">trace certificate</text>
+  </g>
+</svg>
