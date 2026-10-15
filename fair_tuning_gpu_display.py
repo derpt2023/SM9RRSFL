@@ -59,6 +59,10 @@ class GPUProgressDisplay:
         self.started = perf_counter()
         self.eta_deadline = None
         self.tuning_phase = "unknown"
+        self.refresh_interval = 1.0  # seconds
+        self._stop_event = Event()
+        self._refresh_thread = None
+        self._output_handler = None
 
     def parse_start_event(self, line):
         """Parse START event: partition=X clients=Y method=Z ratio=W.WW"""
@@ -106,6 +110,32 @@ class GPUProgressDisplay:
             self.total = total
             self.tuning_phase = phase
 
+    def start_refresh_thread(self, output_handler):
+        """Start background thread for periodic display refresh."""
+        self._output_handler = output_handler
+        if self._refresh_thread is None or not self._refresh_thread.is_alive():
+            self._stop_event.clear()
+            self._refresh_thread = Thread(
+                target=self._refresh_loop,
+                name="gpu-progress-refresh",
+                daemon=True
+            )
+            self._refresh_thread.start()
+
+    def stop_refresh_thread(self):
+        """Stop the background refresh thread."""
+        self._stop_event.set()
+        if self._refresh_thread is not None:
+            self._refresh_thread.join(timeout=2.0)
+
+    def _refresh_loop(self):
+        """Background loop to refresh display periodically."""
+        while not self._stop_event.wait(self.refresh_interval):
+            if self._output_handler and self._output_handler.tty:
+                with self._output_handler._process_lock():
+                    if not self._output_handler.partial_log_line:
+                        self._output_handler._show()
+
     def format_display(self):
         """Format the complete display with progress bar and GPU status."""
         with self.lock:
@@ -128,7 +158,9 @@ class GPUProgressDisplay:
                 for device in sorted(self.gpu_tasks.keys()):
                     task = self.gpu_tasks[device]
                     round_info = f" r={task['round']}" if 'round' in task else ""
-                    gpu_line = (f"{device}: {task['partition']:<10} "
+                    # Show device with actual ID (cuda:0, cuda:1, etc.)
+                    device_display = device if ':' in device else f"{device}:?"
+                    gpu_line = (f"{device_display}: {task['partition']:<10} "
                                f"n={task['clients']:<3} {task['method']:<8} "
                                f"ratio={task['ratio']}{round_info}")
                     lines.append(_fit_line(gpu_line))
@@ -312,12 +344,18 @@ def gpu_progress_display():
     experiments.ProgressReporter = GPUProgressReporter
     fair_tuning.ProgressReporter = GPUProgressReporter
 
+    # Start background refresh thread
+    gpu_display.start_refresh_thread(output)
+
     try:
         yield
     finally:
         active_error = sys.exc_info()[0] is not None
         cleanup_error = None
         try:
+            # Stop refresh thread first
+            gpu_display.stop_refresh_thread()
+
             for reporter in reversed(reporters):
                 try:
                     reporter.close()

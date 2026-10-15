@@ -2269,9 +2269,9 @@ def run_measured_experiment(
         event = {
             "type": "START",
             "partition": getattr(config, 'partition', 'unknown'),
-            "clients": getattr(config, 'clients', 0),
-            "method": getattr(config, 'defense_method', 'unknown'),
-            "ratio": getattr(config, 'attack_ratio', 0.0),
+            "clients": getattr(config, 'num_clients', 0),
+            "method": getattr(config, 'method', 'unknown'),
+            "ratio": getattr(config, 'malicious_ratio', 0.0),
             "device": device_str
         }
         print(f"progress_event={json.dumps(event)}", flush=True)
