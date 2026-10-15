@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import hashlib
 from itertools import product
 import json
+import os
 from pathlib import Path
 from statistics import fmean, pstdev
 import sys
@@ -1286,6 +1287,7 @@ def execute_tuning_tasks(
     progress_completed: int = 0,
     on_complete: Callable[[TuningExperimentTask, ExperimentResult], None] | None = None,
     cuda_devices: tuple[str, ...] | None = None,
+    emit_progress_events: bool = False,
 ) -> list[tuple[TuningExperimentTask, ExperimentResult]]:
     """Execute independent configs with the main runner's executor semantics."""
 
@@ -1329,13 +1331,16 @@ def execute_tuning_tasks(
             run_cuda_tasks(
                 tasks, devices=cuda_devices or tuple(sorted({t.config.device for t in tasks})),
                 jobs=jobs, required_mb=_estimated_cuda_worker_memory_mb(dataset, [t.config for t in tasks]),
-                run=lambda task: _run_tuning_task_in_thread(dataset, task, checkpoint_dir, run_fingerprint),
+                run=lambda task: _run_tuning_task_in_thread(
+                    dataset, task, checkpoint_dir, run_fingerprint, emit_progress_events
+                ),
                 commit=commit_cuda, event=cuda_event,
             )
             return completed
         if jobs <= 1:
             for task in tasks:
                 progress.start_config(task.config)
+                task_id = f"{task.phase}_{task.method}_{task.candidate_id}"
                 result = run_measured_experiment(
                     dataset,
                     task.config,
@@ -1343,6 +1348,8 @@ def execute_tuning_tasks(
                     run_fingerprint=run_fingerprint,
                     retain_success_checkpoint=checkpoint_dir is not None,
                     checkpoint_identity_config=task.checkpoint_config,
+                    task_id=task_id,
+                    emit_progress_events=emit_progress_events,
                 )
                 completed.append((task, result))
                 if on_complete is not None:
@@ -1451,7 +1458,11 @@ def _run_tuning_task_in_thread(
     task: TuningExperimentTask,
     checkpoint_dir: Path | None = None,
     run_fingerprint: str | None = None,
+    emit_progress_events: bool = False,
 ) -> ExperimentResult:
+    # Generate unique task_id for progress tracking
+    task_id = f"{task.phase}_{task.method}_{task.candidate_id}"
+
     return run_measured_experiment(
         dataset,
         task.config,
@@ -1459,6 +1470,8 @@ def _run_tuning_task_in_thread(
         run_fingerprint=run_fingerprint,
         retain_success_checkpoint=checkpoint_dir is not None,
         checkpoint_identity_config=task.checkpoint_config,
+        task_id=task_id,
+        emit_progress_events=emit_progress_events,
     )
 
 
@@ -1500,6 +1513,7 @@ def execute_resumable_tuning_phase(
         None,
     ]
     | None = None,
+    emit_progress_events: bool = False,
 ) -> tuple[list[tuple[TuningExperimentTask, ExperimentResult]], str]:
     """Run one tuning phase with per-round and per-configuration recovery.
 
@@ -1623,6 +1637,7 @@ def execute_resumable_tuning_phase(
                 progress_completed=len(executions),
                 on_complete=commit,
                 cuda_devices=tuple(sorted({t.config.device for t in tasks})),
+                emit_progress_events=emit_progress_events,
             )
         except BaseException:
             if on_snapshot is not None:
@@ -1718,6 +1733,10 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
     args = parse_args(parameters_to_argv(spec.shared_parameters))
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Enable progress events if EMIT_PROGRESS_EVENTS env var is set
+    emit_progress_events = os.environ.get("EMIT_PROGRESS_EVENTS", "0") == "1"
+
     dataset = load_image_dataset(
         args.dataset,
         args.data_dir,
@@ -1823,6 +1842,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
             "split_seed": spec.split_seed,
         },
         on_snapshot=validation_snapshot,
+        emit_progress_events=emit_progress_events,
     )
     validation_executions.sort(key=lambda item: _tuning_task_sort_key(item[0]))
     results_by_candidate: dict[str, list[ExperimentResult]] = {}
@@ -2063,6 +2083,7 @@ def run_fair_tuning(spec: FairTuningConfig) -> dict[str, TrialScore]:
             progress_mode=args.progress_mode,
             fingerprint_context={"selected_validation_fingerprint": validation_fingerprint},
             on_snapshot=final_snapshot,
+            emit_progress_events=emit_progress_events,
         )
         final_executions.sort(key=lambda item: _tuning_task_sort_key(item[0]))
         final_results = [result for _task, result in final_executions]

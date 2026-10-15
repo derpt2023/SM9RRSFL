@@ -57,9 +57,10 @@ echo "▶️  启动调优..."
 echo ""
 
 # 运行
-python3 run_fair_tuning_from_config.py \
+export EMIT_PROGRESS_EVENTS=1
+python3 -u run_fair_tuning_from_config.py \
     --config configs/cifar10_v13_100clients.json \
-    2>&1 | tee logs/cifar10_v13_100clients_$(date +%Y%m%d_%H%M%S).log
+    2>&1 | python3 fair_tuning_gpu_display.py
 
 echo ""
 echo "✅ 调优完成"

@@ -2216,6 +2216,8 @@ def run_measured_experiment(
     run_fingerprint: str | None = None,
     retain_success_checkpoint: bool = False,
     checkpoint_identity_config: ExperimentConfig | None = None,
+    task_id: str | None = None,
+    emit_progress_events: bool = False,
 ) -> ExperimentResult:
     # Tuning may move a task to another CUDA device while retaining the
     # original checkpoint filename and run fingerprint. The checkpoint loader
@@ -2258,10 +2260,28 @@ def run_measured_experiment(
             f"from_completed_round={latest_completed_round}",
             flush=True,
         )
+
+    # Emit START event for progress display
+    if emit_progress_events and task_id is not None:
+        # Parse task_id to extract components: phase_method_candidateid
+        # and extract config details
+        device_str = str(config.device) if hasattr(config, 'device') and config.device is not None else "unknown"
+        event = {
+            "type": "START",
+            "partition": getattr(config, 'partition', 'unknown'),
+            "clients": getattr(config, 'clients', 0),
+            "method": getattr(config, 'defense_method', 'unknown'),
+            "ratio": getattr(config, 'attack_ratio', 0.0),
+            "device": device_str
+        }
+        print(f"progress_event={json.dumps(event)}", flush=True)
+
     started = perf_counter()
-    callback = None
+
+    # Build combined callback for checkpoint + progress events
+    checkpoint_callback_fn = None
     if checkpoint_path is not None and run_fingerprint is not None:
-        def callback(state) -> None:
+        def checkpoint_callback_fn(state) -> None:
             nonlocal latest_completed_round, latest_state
             nonlocal last_checkpointed_round, checkpoint_io_seconds
             completed_round = int(state["completed_round"])
@@ -2291,6 +2311,29 @@ def run_measured_experiment(
             checkpoint_io_seconds += perf_counter() - checkpoint_started
             latest_completed_round = completed_round
             last_checkpointed_round = completed_round
+
+    # Wrap with progress event emitter if requested
+    if emit_progress_events and task_id is not None:
+        original_callback = checkpoint_callback_fn
+
+        def combined_callback(state) -> None:
+            # Emit ROUND event
+            completed_round = int(state.get("completed_round", 0))
+            device_str = str(config.device) if hasattr(config, 'device') and config.device is not None else "unknown"
+            event = {
+                "type": "ROUND",
+                "round": completed_round,
+                "device": device_str
+            }
+            print(f"progress_event={json.dumps(event)}", flush=True)
+
+            # Call original checkpoint callback if it exists
+            if original_callback is not None:
+                original_callback(state)
+
+        callback = combined_callback
+    else:
+        callback = checkpoint_callback_fn
 
     try:
         result = run_experiment(
@@ -2347,6 +2390,16 @@ def run_measured_experiment(
             checkpoint_identity,
             run_fingerprint,
         )
+
+    # Emit FINISH event for progress display
+    if emit_progress_events and task_id is not None:
+        device_str = str(config.device) if hasattr(config, 'device') and config.device is not None else "unknown"
+        event = {
+            "type": "FINISH",
+            "device": device_str
+        }
+        print(f"progress_event={json.dumps(event)}", flush=True)
+
     return final_result
 
 

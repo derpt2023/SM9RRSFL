@@ -127,9 +127,10 @@ class GPUProgressDisplay:
                 lines.append("─" * min(80, shutil.get_terminal_size(fallback=(80, 24)).columns - 1))
                 for device in sorted(self.gpu_tasks.keys()):
                     task = self.gpu_tasks[device]
+                    round_info = f" r={task['round']}" if 'round' in task else ""
                     gpu_line = (f"{device}: {task['partition']:<10} "
                                f"n={task['clients']:<3} {task['method']:<8} "
-                               f"ratio={task['ratio']}")
+                               f"ratio={task['ratio']}{round_info}")
                     lines.append(_fit_line(gpu_line))
 
             return "\n".join(lines)
@@ -184,28 +185,65 @@ class _EnhancedOutput:
         with self._process_lock():
             # Parse events to update GPU tracking
             for line in text.splitlines():
-                # Check for task start
-                config_info = self.gpu_display.parse_start_event(line)
-                if config_info:
-                    self.current_config = config_info
+                # Try parsing as JSON event first (new format)
+                if line.startswith("progress_event="):
+                    try:
+                        event_data = json.loads(line[15:])  # Skip "progress_event="
+                        event_type = event_data.get("type")
 
-                # Check for CUDA events
-                cuda_event = self.gpu_display.parse_cuda_event(line)
-                if cuda_event:
-                    event_type = cuda_event.get("event")
-                    if event_type == "cuda_task_reassigned":
-                        device = cuda_event.get("next_device")
-                        if device and self.current_config:
-                            self.gpu_display.update_gpu_status(device, self.current_config)
+                        if event_type == "START":
+                            config_info = {
+                                'partition': event_data.get('partition', 'unknown'),
+                                'clients': str(event_data.get('clients', '?')),
+                                'method': event_data.get('method', 'unknown'),
+                                'ratio': f"{event_data.get('ratio', 0.0):.2f}"
+                            }
+                            device = event_data.get('device')
+                            if device:
+                                self.gpu_display.update_gpu_status(device, config_info)
 
-                # Check for progress updates
-                if "configurations=" in line and "jobs=" in line:
-                    match = re.search(r'configurations=(\d+)', line)
-                    if match:
-                        total = int(match.group(1))
-                        phase_match = re.search(r'tuning_phase=(\S+)', line)
-                        phase = phase_match.group(1) if phase_match else "unknown"
-                        self.gpu_display.update_progress(self.gpu_display.completed, total, phase)
+                        elif event_type == "ROUND":
+                            device = event_data.get('device')
+                            round_num = event_data.get('round')
+                            if device and device in self.gpu_display.gpu_tasks and round_num:
+                                self.gpu_display.gpu_tasks[device]['round'] = round_num
+
+                        elif event_type == "FINISH":
+                            device = event_data.get('device')
+                            if device:
+                                self.gpu_display.remove_gpu_task(device)
+                                self.gpu_display.update_progress(
+                                    self.gpu_display.completed + 1,
+                                    self.gpu_display.total,
+                                    self.gpu_display.tuning_phase
+                                )
+                    except (json.JSONDecodeError, ValueError, KeyError):
+                        pass  # Ignore malformed events
+
+                # Fallback to old format for backward compatibility
+                else:
+                    # Check for task start (old format)
+                    config_info = self.gpu_display.parse_start_event(line)
+                    if config_info:
+                        self.current_config = config_info
+
+                    # Check for CUDA events (old format)
+                    cuda_event = self.gpu_display.parse_cuda_event(line)
+                    if cuda_event:
+                        event_type = cuda_event.get("event")
+                        if event_type == "cuda_task_reassigned":
+                            device = cuda_event.get("next_device")
+                            if device and self.current_config:
+                                self.gpu_display.update_gpu_status(device, self.current_config)
+
+                    # Check for progress updates (old format)
+                    if "configurations=" in line and "jobs=" in line:
+                        match = re.search(r'configurations=(\d+)', line)
+                        if match:
+                            total = int(match.group(1))
+                            phase_match = re.search(r'tuning_phase=(\S+)', line)
+                            phase = phase_match.group(1) if phase_match else "unknown"
+                            self.gpu_display.update_progress(self.gpu_display.completed, total, phase)
 
             self._clear()
             self.stream.write(text)
@@ -295,3 +333,18 @@ def gpu_progress_display():
             fair_tuning.ProgressReporter = original_tuning
         if cleanup_error is not None and not active_error:
             raise cleanup_error
+
+
+if __name__ == "__main__":
+    """Run as a pipe to display GPU progress."""
+    gpu_display = GPUProgressDisplay()
+    output = _EnhancedOutput(sys.stdout, gpu_display)
+
+    try:
+        for line in sys.stdin:
+            output.write(line)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        output.finish()
+
