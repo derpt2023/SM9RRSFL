@@ -22,7 +22,14 @@ if __name__ == "__main__":
 
     os.chdir(project_root)
     from sm9rrsfl.fair_tuning import main
-    from fair_tuning_progress_display import progress_display
 
-    with progress_display():
-        main(sys.argv[1:])
+    # Use enhanced GPU display for better per-device visibility
+    try:
+        from fair_tuning_gpu_display import gpu_progress_display
+        with gpu_progress_display():
+            main(sys.argv[1:])
+    except ImportError:
+        # Fallback to basic display if enhanced version unavailable
+        from fair_tuning_progress_display import progress_display
+        with progress_display():
+            main(sys.argv[1:])

@@ -62,7 +62,7 @@
     "eval_interval": 1,
     "visualizations": true,
     "progress": true,
-    "checkpoint_interval": 1,
+    "checkpoint_interval": 0,
 
     "methods": ["sm9rrs", "vert", "alignins", "krum", "ding13", "fedavg"]
   },

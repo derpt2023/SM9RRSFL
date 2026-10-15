@@ -35,16 +35,16 @@ echo "  AlignIns: sparsity × tda_radius (4×3 = 12 组合)"
 echo "            mpsa_radius 固定为 0.1"
 echo ""
 echo "预计耗时:"
-echo "  - 验证: (12+12+12+1+1+1)×5ratios×3seeds = 585 trials"
-echo "  - 最终: 6方法×5ratios×3seeds = 90 trials"
+echo "  - 验证: (12+12+12+1+1+1)×5ratios×3seeds×2partitions = 1170 trials"
+echo "  - 最终: 6方法×5ratios×3seeds×2partitions = 180 trials"
 echo "  - 每trial约150轮，100客户端"
-echo "  - 总计: 约 100-150 小时 (7张4090D并行)"
+echo "  - 总计: 约 200-300 小时 (7张4090D并行)"
 echo ""
 
 # 确认
 echo "开始时间: $(date)"
 echo ""
-read -p "是否开始 100-150 小时的完整调优？[Y/n]: " confirm
+read -p "是否开始 200-300 小时的完整调优？[Y/n]: " confirm
 confirm=${confirm:-Y}
 
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
