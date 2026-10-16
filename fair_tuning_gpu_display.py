@@ -150,23 +150,6 @@ class GPUProgressDisplay:
 
             lines.append(f"[{bar}] {self.completed}/{self.total} {ratio:5.1%} "
                         f"elapsed={_format_duration(elapsed)} eta={eta_text}")
-
-            # Calculate total rounds progress
-            total_rounds = 0
-            completed_rounds = 0
-            if self.gpu_tasks:
-                for task in self.gpu_tasks.values():
-                    if 'round' in task and 'total_rounds' in task:
-                        completed_rounds += task['round']
-                        total_rounds += task['total_rounds']
-
-            # Total rounds progress bar
-            if total_rounds > 0:
-                round_ratio = completed_rounds / total_rounds
-                round_filled = int(round(24 * round_ratio))
-                round_bar = "#" * round_filled + "-" * (24 - round_filled)
-                lines.append(f"[{round_bar}] {completed_rounds}/{total_rounds} rounds {round_ratio:5.1%}")
-
             lines.append(f"phase={self.tuning_phase} active_gpus={len(self.gpu_tasks)}")
 
             # Per-GPU status
@@ -222,11 +205,13 @@ class _EnhancedOutput:
     def _clear(self):
         """Clear the previous display lines."""
         if self.line_visible and self.line_visible > 0:
-            # Move cursor up and clear each line
-            for i in range(self.line_visible):
-                if i > 0:
-                    self.stream.write("\033[A")  # Move up
-                self.stream.write("\r\033[K")  # Clear line
+            # Clear current line first, then move up and clear each previous line
+            self.stream.write("\r\033[K")  # Clear current line
+            for i in range(self.line_visible - 1):
+                self.stream.write("\033[A")  # Move up
+                self.stream.write("\033[K")  # Clear that line
+            # Return cursor to beginning
+            self.stream.write("\r")
             self.line_visible = 0
             self.stream.flush()
 

@@ -225,6 +225,7 @@ class TuningExperimentTask:
 _TUNING_WORKER_DATASET: ImageDataset | None = None
 _TUNING_WORKER_CHECKPOINT_DIR: Path | None = None
 _TUNING_WORKER_RUN_FINGERPRINT: str | None = None
+_TUNING_WORKER_EMIT_PROGRESS: bool = False
 
 
 class FairTuningError(ValueError):
@@ -1366,7 +1367,7 @@ def execute_tuning_tasks(
         if executor_kind == "thread":
             with ThreadPoolExecutor(max_workers=jobs) as executor:
                 submit = lambda pool, task: pool.submit(
-                    _run_tuning_task_in_thread, dataset, task, checkpoint_dir, run_fingerprint)
+                    _run_tuning_task_in_thread, dataset, task, checkpoint_dir, run_fingerprint, emit_progress_events)
                 futures = {submit(executor, task): task for task in tasks}
                 _consume_tuning_futures(
                     futures,
@@ -1382,7 +1383,7 @@ def execute_tuning_tasks(
             with ProcessPoolExecutor(
                 max_workers=jobs,
                 initializer=_init_tuning_worker_dataset,
-                initargs=(dataset, checkpoint_dir, run_fingerprint),
+                initargs=(dataset, checkpoint_dir, run_fingerprint, emit_progress_events),
             ) as executor:
                 futures = {
                     executor.submit(_run_tuning_task_in_worker, task): task
@@ -1431,18 +1432,24 @@ def _init_tuning_worker_dataset(
     dataset: ImageDataset,
     checkpoint_dir: Path | None = None,
     run_fingerprint: str | None = None,
+    emit_progress_events: bool = False,
 ) -> None:
     global _TUNING_WORKER_DATASET
     global _TUNING_WORKER_CHECKPOINT_DIR
     global _TUNING_WORKER_RUN_FINGERPRINT
+    global _TUNING_WORKER_EMIT_PROGRESS
     _TUNING_WORKER_DATASET = dataset
     _TUNING_WORKER_CHECKPOINT_DIR = checkpoint_dir
     _TUNING_WORKER_RUN_FINGERPRINT = run_fingerprint
+    _TUNING_WORKER_EMIT_PROGRESS = emit_progress_events
 
 
 def _run_tuning_task_in_worker(task: TuningExperimentTask) -> ExperimentResult:
     if _TUNING_WORKER_DATASET is None:
         raise RuntimeError("tuning worker dataset was not initialized")
+    # Generate unique task_id for progress tracking
+    task_id = f"{task.phase}_{task.method}_{task.candidate_id}"
+
     return run_measured_experiment(
         _TUNING_WORKER_DATASET,
         task.config,
@@ -1450,6 +1457,8 @@ def _run_tuning_task_in_worker(task: TuningExperimentTask) -> ExperimentResult:
         run_fingerprint=_TUNING_WORKER_RUN_FINGERPRINT,
         retain_success_checkpoint=_TUNING_WORKER_CHECKPOINT_DIR is not None,
         checkpoint_identity_config=task.checkpoint_config,
+        task_id=task_id,
+        emit_progress_events=_TUNING_WORKER_EMIT_PROGRESS,
     )
 
 
