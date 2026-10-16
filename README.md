@@ -114,11 +114,65 @@ python run_fair_tuning_from_config.py --config configs/my_experiment.json
    - 6方法 × 2分区 × 5恶意比例 × 3 seed
    - 约180次完整训练
 
-**已验证的成功配置**：
+**现有配置**：
 - **MNIST v7**：`configs/mnist_v7_target_fair_tuning.json`（推荐）
 - **CIFAR-10 v13 (10客户端)**：`configs/cifar10_v13_fair_tuning_fixed.json`
-- **CIFAR-10 v13 (100客户端)**：`configs/cifar10_v13_100clients.json`（当前最新）
+- **CIFAR-10 v13 (100客户端)**：`configs/cifar10_v13_100clients.json`
+- **CIFAR-10 v14 (100客户端，逐轮/GPU进度)**：`configs/cifar10_v14_fair_grid.json`（本轮新增，等待 AI Station 实测）
 - **Fashion-MNIST**：`configs/fashion_mnist_fair_tuning.json`
+
+### CIFAR-10 v14：交接参数 + 全局轮数与 GPU 面板
+
+v14 沿用最新 v13 100 客户端配置中的攻击与训练条件，独立运行六方法公平网格调优。Ours 固定 `attack_boost=20`（所有方法共享）、`detector_subspace_dim=3`、`detector_history_threshold=1.5`，只搜索 `detector_distance_threshold=2.0,2.1,…,3.1`；`K=20`，第 25 轮开始攻击。这些设置对应本地交接中的改进方向，实际 Acc/ASR 由本轮结果确认。
+
+| 项目 | v14 配置 |
+|---|---|
+| 数据与模型 | CIFAR-10，当前通用实验路径的 CIFAR CNN；加载官方 50000 训练样本、10000 测试样本 |
+| 训练分割 | 原训练集 80% 用于训练、15% 用于调优评估、5% 用于攻击辅助；正式测试集不参与选参 |
+| 客户端与分布 | 100 客户端；IID + Dirichlet（α=0.5） |
+| 恶意比例 | 0%、20%、40%、60%、80% |
+| 公共训练 | 每项 150 轮，E=1，batch=50，lr=0.01，lr_decay=0.99；禁用早停 |
+| 攻击 | alternating_minimization，boost=20，源标签 5 → 目标标签 7 |
+| 密码模式 | 真实 SM9，DKG 3/2，sm9_workers=1 |
+| 调优 | Ours / VERT / AlignIns 各 12 个候选，Krum / TAD / FedAvg 各 1 个固定配置；验证 seed=301/302/303 |
+| 正式评估 | 使用选出的各方法参数，独立 seed=401/402/403 |
+| 并行 | v14 全可见 GPU 池；符合单任务总显存条件的卡全部纳入，每卡最多 1 项任务；调优和正式阶段均生效 |
+| 输出 | `outputs/cifar10_v14_fair_grid/` |
+
+完整计划：**1170 项调优 × 150 轮 + 180 项正式评估 × 150 轮 = 1350 项 / 202500 轮**。正式阶段沿用当前调优器的选择、健康与目标评估规则；若原规则阻止推进，面板保留未完成状态。此处的任务完成计数表示已保存结果，健康是否通过需查看结果审计。
+
+由用户提交并推送以下 **7 个文件** 后，在 AI Station 现有项目环境运行：
+
+- `README.md`
+- `configs/cifar10_v14_fair_grid.json`
+- `run_cifar_v14_with_progress.py`
+- `scripts/experiments/cifar10/fair_tuning_dashboard.py`
+- `scripts/experiments/cifar10/cifar_fair_gpu_pool.py`
+- `tests/test_cifar_fair_dashboard.py`
+- `tests/test_cifar_fair_gpu_pool.py`
+
+```bash
+cd /3251901002/SM9RRSFL
+git pull
+# 先确认配置与准确工作量；不下载数据、不训练、不创建实验输出
+python run_cifar_v14_with_progress.py --dry-run
+# 只读检查 PyTorch/CUDA、可见显卡、每卡显存与容器资源
+python run_cifar_v14_with_progress.py --check-gpus
+# 在 AI Station 的交互终端启动
+python -u run_cifar_v14_with_progress.py
+```
+
+面板在同一终端区域刷新：大进度条累计两阶段的训练轮数，并显示任务完成数、已用时、估算剩余时间、当前阶段。每张 GPU 显示当前候选、分区、恶意比例、seed、轮次进度条，以及 Ours 阈值 / VERT 参数 / AlignIns 参数。80 列、24 行终端可同时显示 8 张 GPU；更短的终端压缩详情，建议放大窗口。`cuda:N` 是当前进程的逻辑编号；若设置 `CUDA_VISIBLE_DEVICES`，编号按该列表重新映射。
+
+**GPU 使用策略**：v14 新入口把所有可见且总显存足够的 GPU 纳入任务池，GPU 并发数不再受 CPU 配额数直接限制。因此即使容器只分配 1 个 CPU 配额，只要主内存足够、8 卡都通过显存准入且还有至少 8 项任务，两阶段均可启动 8 项并行任务。保留主内存预算（容器可用总量的 75%）与原显存安全余量；若主内存限制并发，启动日志 `gpu_pool_plan` 明示 `host_memory_limited=true`、`host_slots` 与 `target_jobs`，不会把它误报为已用满所有卡。
+
+任务队列每秒复查显存；起初繁忙但总显存足够的卡持续保留在池中，空闲后可加入当前阶段；任何卡完成任务后可接续下一项。断点续跑只剩少量任务时，仍可在整个可见 GPU 池中选择空闲卡。全池都暂不可用时最多等待 600 秒，仍不可用则保留已有结果并报资源错误；原有 OOM 冷却、有限重试、断点与结果提交规则继续生效。`gpu_pool_plan` 列出 `pool_devices`、`ready_now`、`waiting_for_memory`、`target_jobs`，面板显示 `gpu=正在运行/池大小 slots=并发上限`，便于远端核对。此入口要求 CUDA；CUDA 不可见时明确停止，不转到 CPU 长时间训练。`CUDA_VISIBLE_DEVICES` 仍是用户控制的可见边界。
+
+多卡调度利用的是独立实验任务。SM9、检测器、聚合、存盘等阶段含 CPU/I/O 工作，实验末尾也可能剩余不足 8 项任务，因此无法承诺每张 GPU 在所有时刻都达到 100% 算力利用率。
+
+直接运行上述入口即可，无需额外管道或 `EMIT_PROGRESS_EVENTS` 环境变量。重跑同一命令沿用原调优器的断点恢复；缓存和恢复前缀计入总进度，但不当作本次新完成轮次加速 ETA。ETA 随实际吞吐估算，初始显示 `estimating`，任务耗时差异、显卡变化和调优后处理均可能影响它。若重定向到文件，自动输出普通日志，每 30 秒更新一次摘要；也可显式加 `--display-mode log`。
+
+结果查看：`validation_results.csv`、`tuning_summary.json`、`best_parameters.json`、`final_evaluation/summary.csv` 和 `final_evaluation/rounds.csv`（均位于新输出目录）。新入口调用当前调优器，在独立作用域内补充 GPU 资源计划与任务池范围；原训练、选择、恢复和报告流程继续使用，旧配置和旧实验目录保留。
 
 ---
 
