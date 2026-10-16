@@ -378,11 +378,15 @@ if __name__ == "__main__":
     gpu_display = GPUProgressDisplay()
     output = _EnhancedOutput(sys.stdout, gpu_display)
 
+    # Start background refresh thread
+    gpu_display.start_refresh_thread(output)
+
     try:
         for line in sys.stdin:
             output.write(line)
     except KeyboardInterrupt:
         pass
     finally:
+        gpu_display.stop_refresh_thread()
         output.finish()
 

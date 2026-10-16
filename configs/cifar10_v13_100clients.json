@@ -56,7 +56,7 @@
     "sm9_workers": 1,
 
     "compute_backend": "torch",
-    "device": "cuda",
+    "device": "auto",
 
     "early_stop": false,
     "eval_interval": 1,
