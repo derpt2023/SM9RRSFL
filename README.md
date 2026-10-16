@@ -169,7 +169,31 @@ python run_cifar_v14_with_progress.py --check-gpus && \
 
 **单卡显存查询失败的处理**：接近满载的卡可能在 `torch.cuda.mem_get_info` 时就触发 CUDA OOM。v14 按逻辑卡分别捕获错误，保留其他卡成功的显存读数；检查输出 `memory_query_status=partial` 和 `query_failures` 记录具体失败卡与原始错误。只要至少一张卡查询成功，继续按成功读数选择足够显存的卡；失败卡保持等待查询状态，在取得符合显存准入的有效读数之前不会接任务。调度每秒重查，恢复时输出 `gpu_memory_status`；`gpu_pool_plan.waiting_for_memory_query` 区分查询失败与已知空闲显存不足。全部卡查询均失败时，启动检查停止并给出逐卡原因。此处理适用于启动和运行期间，不再因一张卡查询失败阻断整个GPU池。
 
-2026-10-16 单卡查询修复需用户提交这 **3 个文件**：`README.md`、`scripts/experiments/cifar10/cifar_fair_gpu_pool.py`、`tests/test_cifar_fair_gpu_pool.py`。实验配置、轮数、选参和训练规则保持原版本。
+单卡查询修复已提交到 V4.10.1；下面的资源清理、故障证据与显示补丁仍需同步。
+
+**空闲卡与终止错误的显示**：每次资源复查会更新面板。等待显存的卡显示当前空闲量及所需空闲量，查询失败显示具体原因，满足准入但未派发的卡显示ready。`slots=8`表示并发上限，实际运行数看 `gpu=active/pool`；可见8卡不等于当前8卡都有足够空闲显存。
+
+`cuda_worker_failed`（例如未经确认分类的 `CUDNN_STATUS_INTERNAL_ERROR`）会按原控制器规则停止派发新任务，等待其他已运行任务结束并保存结果，然后报错退出。面板此时明确显示 `DISPATCH STOPPED`、`draining_after_worker_error` 和 `eta=paused`；正常任务的结果快照不会清除该状态。原有可重试OOM仍按原规则处理；显示修正不把cuDNN内部错误自动当作OOM，也不代表该错误已解决。
+
+**2026-10-16 代码审查与修复**：
+
+- 已回传的异常是 cuda3 在 `local_train_delta_resident` 的 `loss.backward()` 报 cuDNN 内部错误。按现有严格失败规则，这会停止整个队列的新任务派发；其余卡即使后来空闲也不会继续接任务。`--check-gpus` 只查询显存，检查通过不代表卷积反向传播已通过。进度条在测量函数返回或抛异常时都会撤下，单凭条消失不能区分成功、终态断点重放或新错误；历史 `last_failure.json` 也不能证明重启后再次报错。
+- 复现并修复闲置缓存造成的准入阻塞：原队列只在 OOM 后释放缓存，正常任务结束后仍可能由本进程的 PyTorch 闲置缓存占用显存，导致下一项任务过不了驱动空闲显存检查。v14 现在每项任务退出后释放该卡本进程的闲置缓存，保持每卡单任务及原显存门槛。此处释放缓存的作用符合 [PyTorch 2.3 显存管理说明](https://docs.pytorch.org/docs/2.3/notes/cuda.html#memory-management)，不能消除其他进程占用或保证未来峰值显存充足。
+- 非 OOM 异常原来由 Future 的 traceback 一直持有失败训练的模型、梯度等局部对象，直到其他任务全部收尾。v14 现在先保存完整故障证据，再清理栈帧的局部引用；保留异常类型、消息、栈位置及原终止规则。
+- 每次实际任务失败会追加到对应阶段的 `gpu_failures.jsonl`，记录时间、配置、实际 Python 轮次/客户端/批次位置（存在时）、张量形状/设备、该卡空闲/已分配/保留显存及查询错误、Torch/CUDA/cuDNN 版本与开关。原 `last_failure.json` 和断点继续保留。并发失败各自留档，诊断写盘失败不会替换训练原异常。
+- 启动输出 `v14_runtime` 包含 Git HEAD 与关键源码/配置 SHA256；故障记录带同一份启动代码身份。仅在 AI Station 执行 `git pull`，不会拿到尚未由用户在本地主项目提交、推送的补丁。
+
+当前证据尚不足以确认 cuDNN 内部错误来自显存竞争、运行库或具体算子，也未收到此次环境重启后的新异常。上述两项资源清理修复不冒充该 cuDNN 错误的因果修复；没有修改 batch、训练/攻击参数、cuDNN/TF32 开关、候选、健康/选参规则或自动重试分类。
+
+只读提取当前失败证据与代码身份（不加载数据、不反序列化训练断点、不启动训练；可在另一终端执行）：
+
+```bash
+python run_cifar_v14_with_progress.py --diagnose
+```
+
+本轮需用户提交这 **8 个文件**（含此前待提交的显示补丁）：`README.md`、`run_cifar_v14_with_progress.py`、`scripts/experiments/cifar10/cifar_fair_gpu_pool.py`、`scripts/experiments/cifar10/fair_tuning_dashboard.py`、`scripts/experiments/cifar10/cifar_fair_diagnostics.py`、`tests/test_cifar_fair_gpu_pool.py`、`tests/test_cifar_fair_dashboard.py`、`tests/test_cifar_fair_diagnostics.py`。交接 Markdown 仅本地保留，不提交。现有训练使用启动时加载的代码；同步新补丁后，须等现有控制器退出，再用原命令续跑，保留实验输出。
+
+将诊断输出的 `CIFAR_V14_DIAGNOSIS_BEGIN` 至 `END` 完整回传，可区分旧记录、当前失败、代码未同步与已恢复情况。屏蔽某张卡只是一种临时隔离手段；未经实际新证据，不能据此认定该卡损坏或 cuDNN 错误已经解决。
 
 多卡调度利用的是独立实验任务。SM9、检测器、聚合、存盘等阶段含 CPU/I/O 工作，实验末尾也可能剩余不足 8 项任务，因此无法承诺每张 GPU 在所有时刻都达到 100% 算力利用率。
 

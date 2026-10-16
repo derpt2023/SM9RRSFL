@@ -66,11 +66,13 @@ def check_gpus():
 
 
 class Pool:
-    def __init__(self, on_plan=None):
+    def __init__(self, on_plan=None, on_event=None):
         self.devices = ()
         self.jobs = 0
         self.on_plan = on_plan
+        self.on_event = on_event
         self.query_failures = {}
+        self.required_free_mb = None
 
     def prepare(self, dataset, tasks, args, *, requested_jobs=None, spread_cuda_devices=True):
         if not tasks:
@@ -89,6 +91,7 @@ class Pool:
         if host_slots < 1:
             raise RuntimeError("insufficient host memory for one v14 GPU task; increase the container memory allocation")
         fraction = experiments.CUDA_MEMORY_SAFETY_FRACTION
+        self.required_free_mb = required_mb / fraction
         by_device = {device: (free, total) for device, free, total in info}
         # Keep busy but sufficiently large GPUs in the pool so they can join later.
         # Unknown-memory cards remain candidates for a later successful query,
@@ -136,20 +139,28 @@ class Pool:
                 "queries_recovered": sorted(set(self.query_failures) - set(failures)),
             }, sort_keys=True), flush=True)
             self.query_failures = failures
+        if self.on_plan is not None and self.devices:
+            self.on_plan({
+                "pool_devices": list(self.devices), "target_jobs": self.jobs,
+                "required_gpu_free_mb": self.required_free_mb,
+                "gpu_memory_mb": [{"device": d, "free": f, "total": t} for d, f, t in info],
+                "query_failures": failures,
+            })
         return info
 
     def ready_devices(self, required_mb):
         # Only successful current readings admit work; one bad card cannot
         # block other cards or be treated as free by the scheduler.
+        self.required_free_mb = required_mb / experiments.CUDA_MEMORY_SAFETY_FRACTION
         info = self.memory_info()
         return tuple(device for device, free, _ in info
                      if free * experiments.CUDA_MEMORY_SAFETY_FRACTION >= required_mb)
 
 
 @contextmanager
-def gpu_pool(*, on_plan=None):
+def gpu_pool(*, on_plan=None, on_event=None):
     """Scope v14 resource policy; retain original queue, OOM recovery and commits."""
-    pool = Pool(on_plan)
+    pool = Pool(on_plan, on_event)
     original_prepare = fair_tuning.prepare_tuning_tasks
     original_queue = fair_tuning.run_cuda_tasks
     original_ready = cuda_execution.cuda_devices_with_capacity
@@ -161,6 +172,30 @@ def gpu_pool(*, on_plan=None):
         # narrower set, especially when only a few uncached tasks remain on resume.
         kwargs.update(devices=pool.devices, jobs=min(pool.jobs, len(tasks)),
                       poll_seconds=1., max_idle_seconds=600.)
+        run = kwargs["run"]
+
+        def execute(task):
+            try:
+                return run(task)
+            except Exception as error:
+                from .cifar_fair_diagnostics import clear_failure_frames
+                clear_failure_frames(error)
+                raise
+            finally:
+                # The queue admits work using driver free memory. PyTorch's
+                # unused cache is excluded from that reading, so a finished
+                # task could otherwise prevent the next task on its own GPU.
+                # No other v14 task is active on this device at this point.
+                cuda_execution.release_cuda_cache(task.config.device)
+
+        kwargs["run"] = execute
+        event = kwargs.get("event")
+        if event is not None and pool.on_event is not None:
+            def observe(kind, task, **details):
+                result = event(kind, task, **details)
+                pool.on_event(kind, task, **details)
+                return result
+            kwargs["event"] = observe
         return original_queue(tasks, **kwargs)
 
     fair_tuning.prepare_tuning_tasks = pool.prepare

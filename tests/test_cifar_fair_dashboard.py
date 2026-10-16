@@ -137,6 +137,51 @@ class DashboardTest(unittest.TestCase):
             self.assertIn("rounds=0/202500", stream.getvalue())
             self.assertIn("log preserved", stream.getvalue())
 
+    def test_idle_gpu_lines_distinguish_low_memory_query_failure_and_ready(self):
+        state = ui.Progress(self.spec)
+        items = [task(i, f"cuda:{i}") for i in range(8)]
+        state.register(items)
+        state.gpu_plan({"pool_devices": [item.config.device for item in items], "target_jobs": 8,
+            "required_gpu_free_mb": 3517,
+            "gpu_memory_mb": [{"device": f"cuda:{i}", "free": 17478 if i == 2 else 2219}
+                              for i in range(8) if i != 6],
+            "query_failures": {"cuda:6": {"error": "CUDA error: out of memory\nmore detail"}}})
+        rendered = "\n".join(state.lines())
+        self.assertIn("cuda:0 waiting memory: free=2219MiB need~3517MiB", rendered)
+        self.assertIn("cuda:2 ready: free=17478MiB", rendered)
+        self.assertIn("cuda:6 memory query failed: CUDA error: out of memory", rendered)
+
+    def test_fatal_worker_error_is_visible_and_commit_snapshot_does_not_clear_it(self):
+        state = ui.Progress(self.spec)
+        active, failed = task(1, "cuda:2"), task(2, "cuda:3")
+        state.register([active, failed])
+        key = state.start(active.config)
+        state.advance(key, 22)
+        state.scheduler_event("cuda_worker_failed", failed, error_type="RuntimeError",
+                              error="cuDNN error: CUDNN_STATUS_INTERNAL_ERROR")
+        state.snapshot([], "running")
+        self.assertEqual(state.status, "draining_after_worker_error")
+        self.assertIsNone(state.eta())
+        rendered = "\n".join(state.lines())
+        self.assertIn("DISPATCH STOPPED cuda:3: cuDNN error: CUDNN_STATUS_INTERNAL_ERROR", rendered)
+        self.assertIn("eta=paused", rendered)
+        self.assertIn("cuda:3 failed:", rendered)
+        self.assertIn("22/150", rendered)
+        state.snapshot([(active, SimpleNamespace(stopped_round=150))], "running")
+        self.assertEqual(state.status, "draining_after_worker_error")
+        self.assertEqual(state.totals(), (150, 1))
+        state.snapshot([(active, SimpleNamespace(stopped_round=150))], "interrupted")
+        self.assertEqual(state.status, "validation_interrupted")
+
+    def test_retryable_oom_keeps_dispatch_running_but_retry_exhaustion_stops_it(self):
+        state = ui.Progress(self.spec)
+        item = task()
+        state.register([item])
+        state.scheduler_event("cuda_oom", item, error="CUDA out of memory", retry=True)
+        self.assertIsNone(state.dispatch_error)
+        state.scheduler_event("cuda_oom", item, error="CUDA out of memory", retry=False)
+        self.assertEqual(state.dispatch_error["device"], "cuda:0")
+
     def test_live_refresh_does_not_split_partial_stdout_or_stderr(self):
         stream, errors = Terminal(), io.StringIO()
         ready = Event()

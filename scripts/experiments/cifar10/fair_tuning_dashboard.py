@@ -84,6 +84,10 @@ class Progress:
         self.lanes = {}
         self.devices = set()
         self.gpu_slots = None
+        self.gpu_memory = {}
+        self.gpu_query_failures = {}
+        self.required_gpu_free_mb = None
+        self.dispatch_error = None
         self.phase = "loading_data"
         self.status = "running"
         self.new_rounds = 0
@@ -97,10 +101,26 @@ class Progress:
         with self.lock:
             self.devices = set(report["pool_devices"])
             self.gpu_slots = report["target_jobs"]
+            self.gpu_memory = {row["device"]: row for row in report.get("gpu_memory_mb", [])}
+            self.gpu_query_failures = report.get("query_failures", {})
+            self.required_gpu_free_mb = report.get("required_gpu_free_mb")
+
+    def scheduler_event(self, kind, task, **details):
+        fatal = kind == "cuda_worker_failed" or (kind == "cuda_oom" and not details.get("retry", True))
+        if not fatal:
+            return
+        with self.lock:
+            self.dispatch_error = {
+                "device": str(task.config.device) if task is not None else "CUDA",
+                "error": str(details.get("error", kind)).splitlines()[0],
+            }
+            self.status = "draining_after_worker_error"
 
     def register(self, tasks):
         with self.lock:
             if tasks:
+                if self.phase != tasks[0].phase:
+                    self.dispatch_error = None
                 self.phase = tasks[0].phase
             for task in tasks:
                 self.devices.add(str(task.config.device))
@@ -150,13 +170,16 @@ class Progress:
                 row = self.tasks[self.key(task.phase, task.config)]
                 row.committed = True
                 row.round = min(task.config.rounds, max(0, result.stopped_round))
-            self.status = f"{self.phase}_{status}"
+            self.status = ("draining_after_worker_error" if self.dispatch_error and status == "running"
+                           else f"{self.phase}_{status}")
 
     def totals(self):
         with self.lock:
             return sum(t.round for t in self.tasks.values()), sum(t.committed for t in self.tasks.values())
 
     def eta(self):
+        if self.dispatch_error:
+            return None
         done, _ = self.totals()
         remaining = self.work["validation_rounds"] + self.work["final_rounds"] - done
         if remaining <= 0:
@@ -171,21 +194,36 @@ class Progress:
             phase_tasks = [t for t in self.tasks.values() if t.task.phase == self.phase]
             gpu_status = (f"gpu={len(self.lanes)}/{len(self.devices)} slots={self.gpu_slots} "
                           if self.gpu_slots is not None else "")
+            eta_status = "eta=paused" if self.dispatch_error else f"eta~{duration(self.eta())}"
             lines = [
                 f"{bar(done, total, max(8, min(48, width - 48)))} rounds={done}/{total} "
                 f"{done / total if total else 0:5.1%}",
                 f"tasks={committed}/{self.work['total_tasks']} elapsed={duration(self.now() - self.started)} "
-                f"eta~{duration(self.eta())} phase={self.phase}",
+                f"{eta_status} phase={self.phase}",
                 gpu_status + f"phase_tasks={sum(t.committed for t in phase_tasks)}/{len(phase_tasks)} "
                 f"failed_attempts={self.failed_attempts} status={self.status}",
                 f"n={args.num_clients} E={args.local_epochs} batch={args.batch_size} lr={args.lr:g} "
                 f"decay={args.lr_decay:g} boost={args.attack_boost:g} start={args.attack_start_round} K={args.detector_window}",
             ]
+            if self.dispatch_error:
+                lines.append(f"DISPATCH STOPPED {self.dispatch_error['device']}: {self.dispatch_error['error']}")
             detailed = height >= len(lines) + 2 * len(self.devices)
             for device in sorted(self.devices):
                 key = self.lanes.get(device)
                 if key is None:
-                    lines.append(f"{device} idle / waiting for scheduler or memory")
+                    if self.dispatch_error:
+                        reason = (f"failed: {self.dispatch_error['error']}" if device == self.dispatch_error["device"]
+                                  else "dispatch stopped; waiting for active tasks to finish")
+                    elif device in self.gpu_query_failures:
+                        error = self.gpu_query_failures[device]
+                        reason = "memory query failed: " + str(error.get("error", "unknown error")).splitlines()[0]
+                    elif device in self.gpu_memory and self.required_gpu_free_mb is not None:
+                        free = self.gpu_memory[device]["free"]
+                        reason = (f"waiting memory: free={free:.0f}MiB need~{self.required_gpu_free_mb:.0f}MiB"
+                                  if free < self.required_gpu_free_mb else f"ready: free={free:.0f}MiB")
+                    else:
+                        reason = "idle / waiting for scheduler or memory"
+                    lines.append(f"{device} {reason}")
                     continue
                 row = self.tasks[key]
                 task, config = row.task, row.task.config
@@ -321,8 +359,17 @@ def dashboard(spec, *, mode="auto", refresh=1.):
         kwargs["emit_progress_events"] = False
         try:
             return original_measure(dataset, config, **kwargs)
-        except BaseException:
+        except BaseException as error:
             progress.stop(key, failed=True)
+            if isinstance(error, Exception):
+                from .cifar_fair_diagnostics import record_failure
+                try:
+                    record_failure(error, config, checkpoint_dir=kwargs.get("checkpoint_dir"),
+                                   task_id=kwargs.get("task_id"))
+                except Exception as diagnostic_error:
+                    # An evidence I/O/query failure must not replace training's
+                    # original exception or change its retry classification.
+                    print(f"gpu_failure_record_error={diagnostic_error}", file=sys.stderr, flush=True)
             raise
         finally:
             progress.stop(key)

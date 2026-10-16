@@ -16,18 +16,22 @@ def main(argv=None):
     from sm9rrsfl.config_runner import ConfigError
     from scripts.experiments.cifar10.fair_tuning_dashboard import dashboard, plan
     from scripts.experiments.cifar10.cifar_fair_gpu_pool import check_gpus, gpu_pool
+    from scripts.experiments.cifar10.cifar_fair_diagnostics import diagnose, runtime_info, source_identity
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs/cifar10_v14_fair_grid.json"))
     parser.add_argument("--dry-run", action="store_true", help="Validate and count work without training or downloading data")
     parser.add_argument("--display-mode", choices=("auto", "live", "log"), default="auto")
     parser.add_argument("--check-gpus", action="store_true", help="Inspect visible CUDA GPUs without loading data or training")
+    parser.add_argument("--diagnose", action="store_true", help="Read saved failure evidence and code hashes; no training or checkpoint loading")
     options = parser.parse_args(argv)
     try:
         spec = fair_tuning.load_fair_tuning_config(options.config)
         _, _, work = plan(spec)
     except (ConfigError, fair_tuning.FairTuningError) as exc:
         parser.error(str(exc))
+    if options.diagnose:
+        return diagnose(PROJECT_ROOT / spec.shared_parameters["output_dir"])
     # Reuse the tuner's validation summary and retain all original health/selection gates.
     fair_tuning.main(["--config", str(spec.source), "--dry-run"])
     work["total_rounds"] = work["validation_rounds"] + work["final_rounds"]
@@ -42,8 +46,10 @@ def main(argv=None):
     if options.dry_run:
         return
     try:
+        print("v14_runtime=" + json.dumps({**source_identity(), **runtime_info()}, sort_keys=True), flush=True)
         check_gpus()
-        with dashboard(spec, mode=options.display_mode) as progress, gpu_pool(on_plan=progress.gpu_plan):
+        with dashboard(spec, mode=options.display_mode) as progress, \
+                gpu_pool(on_plan=progress.gpu_plan, on_event=progress.scheduler_event):
             selected = fair_tuning.run_fair_tuning(spec)
             print("selected_parameters=" + json.dumps({method: row.parameters for method, row in selected.items()}, sort_keys=True), flush=True)
     except (ConfigError, fair_tuning.FairTuningError, RuntimeError) as exc:

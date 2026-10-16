@@ -46,6 +46,7 @@ class GpuPoolTest(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(experiments, "_physical_memory_mb", return_value=128 * 1024.))
         self.stack.enter_context(mock.patch.object(experiments, "_estimated_parallel_worker_memory_mb", return_value=2048.))
         self.stack.enter_context(mock.patch.object(experiments, "_estimated_cuda_worker_memory_mb", return_value=1024.))
+        self.release = self.stack.enter_context(mock.patch.object(cuda_execution, "release_cuda_cache"))
 
     def test_both_phases_use_eight_gpus_despite_one_cpu_slot(self):
         reports = []
@@ -166,7 +167,7 @@ class GpuPoolTest(unittest.TestCase):
 
         with mock.patch.object(fair_tuning, "run_cuda_tasks", side_effect=queue), policy.gpu_pool() as pool:
             prepared, _, _, _ = fair_tuning.prepare_tuning_tasks(None, tasks(count=1), self.args)
-            result = fair_tuning.run_cuda_tasks(prepared, devices=("cuda:0",), jobs=1)
+            result = fair_tuning.run_cuda_tasks(prepared, devices=("cuda:0",), jobs=1, run=lambda item: None)
         self.assertEqual(result, "original queue result")
         self.assertEqual(captured["devices"], DEVICES)
         self.assertEqual(captured["jobs"], 1)
@@ -242,6 +243,95 @@ class GpuPoolTest(unittest.TestCase):
                 raise ValueError("fixture")
         self.assertEqual(original, (fair_tuning.prepare_tuning_tasks, fair_tuning.run_cuda_tasks,
                          cuda_execution.cuda_devices_with_capacity, experiments.cuda_device_memory_info))
+
+    def test_fatal_cudnn_event_is_forwarded_and_active_task_is_still_committed(self):
+        notified = Event()
+        original_events, display_events, commits = [], [], []
+        def observe(kind, item, **details):
+            display_events.append((kind, item, details))
+            if kind == "cuda_worker_failed":
+                notified.set()
+
+        def run(item):
+            if item.config.seed == 0:
+                raise RuntimeError("cuDNN error: CUDNN_STATUS_INTERNAL_ERROR")
+            self.assertTrue(notified.wait(3.))
+            return item.config.seed
+
+        with policy.gpu_pool(on_event=observe):
+            prepared, jobs, _, _ = fair_tuning.prepare_tuning_tasks(None, tasks(count=2), self.args)
+            with self.assertRaisesRegex(RuntimeError, "CUDNN_STATUS_INTERNAL_ERROR"):
+                fair_tuning.run_cuda_tasks(prepared, devices=DEVICES, jobs=jobs, required_mb=1024.,
+                    run=run, commit=lambda item, result: commits.append(result),
+                    event=lambda kind, item, **details: original_events.append((kind, item, details)))
+        self.assertEqual(original_events, display_events)
+        self.assertEqual(original_events[-1][0], "cuda_worker_failed")
+        self.assertEqual(commits, [1])
+
+    def test_own_unused_cache_cannot_block_the_next_task_on_a_finished_gpu(self):
+        # Driver free memory falls below admission after task 1, even though
+        # this process can give its unused allocator cache back immediately.
+        free = [20000.]
+        commits, seen = [], []
+        self.info.side_effect = lambda: (("cuda:0", free[0], 24000.),)
+        self.release.side_effect = lambda device: free.__setitem__(0, 20000.)
+
+        def run(item):
+            seen.append(item.config.seed)
+            free[0] = 20.
+            return item.config.seed
+
+        def event(kind, *args, **kwargs):
+            if kind == "cuda_waiting_for_memory":
+                self.fail("own idle cache blocked admission after the previous task finished")
+
+        with mock.patch.object(experiments, "available_cuda_devices", return_value=("cuda:0",)), policy.gpu_pool():
+            prepared, jobs, _, _ = fair_tuning.prepare_tuning_tasks(None, tasks(count=2), self.args)
+            fair_tuning.run_cuda_tasks(prepared, devices=("cuda:0",), jobs=jobs, required_mb=1024.,
+                run=run, commit=lambda item, result: commits.append(result), event=event)
+        self.assertEqual(commits, [0, 1])
+        self.assertEqual(seen, [0, 1])
+        self.assertEqual(self.release.call_args_list, [mock.call("cuda:0"), mock.call("cuda:0")])
+
+    def test_failed_training_frame_does_not_retain_tensors_while_other_gpu_drains(self):
+        import weakref
+        class TensorSentinel:
+            pass
+        refs, commits = [], []
+        failed = Event()
+
+        def run(item):
+            if item.config.seed == 0:
+                local_tensor = TensorSentinel()
+                refs.append(weakref.ref(local_tensor))
+                raise RuntimeError("cuDNN error: CUDNN_STATUS_INTERNAL_ERROR")
+            self.assertTrue(failed.wait(3.))
+            self.assertIsNone(refs[0](), "fatal Future retained the failed training frame")
+            return item.config.seed
+
+        def observe(kind, item, **details):
+            if kind == "cuda_worker_failed":
+                failed.set()
+
+        with policy.gpu_pool(on_event=observe):
+            prepared, jobs, _, _ = fair_tuning.prepare_tuning_tasks(None, tasks(count=2), self.args)
+            with self.assertRaisesRegex(RuntimeError, "CUDNN_STATUS_INTERNAL_ERROR"):
+                fair_tuning.run_cuda_tasks(prepared, devices=DEVICES, jobs=jobs, required_mb=1024.,
+                    run=run, commit=lambda item, value: commits.append(value), event=lambda *a, **kw: None)
+        self.assertEqual(commits, [1])
+
+    def test_live_memory_updates_reach_display_callback(self):
+        reports = []
+        pool = policy.Pool(on_plan=reports.append)
+        pool.prepare(None, tasks(), self.args)
+        self.info.return_value = tuple((d, 17478. if d == "cuda:2" else 2219., total)
+                                       for d, _, total in self.info.return_value if d != "cuda:6")
+        pool.ready_devices(3000.)
+        self.assertEqual(reports[-1]["target_jobs"], 8)
+        self.assertEqual(reports[-1]["pool_devices"], list(DEVICES))
+        self.assertEqual(reports[-1]["required_gpu_free_mb"], 3000. / experiments.CUDA_MEMORY_SAFETY_FRACTION)
+        self.assertEqual(set(reports[-1]["query_failures"]), {"cuda:6"})
+        self.assertEqual(reports[-1]["gpu_memory_mb"][2]["free"], 17478.)
 
 
 class MemoryProbeTest(unittest.TestCase):
