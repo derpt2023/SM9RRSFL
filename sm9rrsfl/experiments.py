@@ -2272,6 +2272,7 @@ def run_measured_experiment(
             "clients": getattr(config, 'num_clients', 0),
             "method": getattr(config, 'method', 'unknown'),
             "ratio": getattr(config, 'malicious_ratio', 0.0),
+            "rounds": getattr(config, 'rounds', 150),
             "device": device_str
         }
         print(f"progress_event={json.dumps(event)}", flush=True)

@@ -141,7 +141,7 @@ class GPUProgressDisplay:
         with self.lock:
             lines = []
 
-            # Overall progress
+            # Overall configuration progress
             ratio = self.completed / self.total if self.total > 0 else 0
             filled = int(round(24 * ratio))
             bar = "#" * filled + "-" * (24 - filled)
@@ -150,6 +150,23 @@ class GPUProgressDisplay:
 
             lines.append(f"[{bar}] {self.completed}/{self.total} {ratio:5.1%} "
                         f"elapsed={_format_duration(elapsed)} eta={eta_text}")
+
+            # Calculate total rounds progress
+            total_rounds = 0
+            completed_rounds = 0
+            if self.gpu_tasks:
+                for task in self.gpu_tasks.values():
+                    if 'round' in task and 'total_rounds' in task:
+                        completed_rounds += task['round']
+                        total_rounds += task['total_rounds']
+
+            # Total rounds progress bar
+            if total_rounds > 0:
+                round_ratio = completed_rounds / total_rounds
+                round_filled = int(round(24 * round_ratio))
+                round_bar = "#" * round_filled + "-" * (24 - round_filled)
+                lines.append(f"[{round_bar}] {completed_rounds}/{total_rounds} rounds {round_ratio:5.1%}")
+
             lines.append(f"phase={self.tuning_phase} active_gpus={len(self.gpu_tasks)}")
 
             # Per-GPU status
@@ -157,12 +174,23 @@ class GPUProgressDisplay:
                 lines.append("─" * min(80, shutil.get_terminal_size(fallback=(80, 24)).columns - 1))
                 for device in sorted(self.gpu_tasks.keys()):
                     task = self.gpu_tasks[device]
-                    round_info = f" r={task['round']}" if 'round' in task else ""
                     # Show device with actual ID (cuda:0, cuda:1, etc.)
                     device_display = device if ':' in device else f"{device}:?"
+
+                    # Build round progress bar for this GPU
+                    if 'round' in task and 'total_rounds' in task:
+                        r = task['round']
+                        total = task['total_rounds']
+                        r_ratio = r / total if total > 0 else 0
+                        r_filled = int(round(24 * r_ratio))
+                        r_bar = "#" * r_filled + "-" * (24 - r_filled)
+                        round_progress = f"[{r_bar}] {r}/{total} {r_ratio:5.1%}"
+                    else:
+                        round_progress = "waiting..."
+
                     gpu_line = (f"{device_display}: {task['partition']:<10} "
                                f"n={task['clients']:<3} {task['method']:<8} "
-                               f"ratio={task['ratio']}{round_info}")
+                               f"ratio={task['ratio']:<4} {round_progress}")
                     lines.append(_fit_line(gpu_line))
 
             return "\n".join(lines)
@@ -192,13 +220,15 @@ class _EnhancedOutput:
         return self.lock
 
     def _clear(self):
-        if self.line_visible:
-            # Clear multiple lines
-            num_lines = self.line_visible
-            for _ in range(num_lines):
-                self.stream.write("\r\033[2K\033[A")
-            self.stream.write("\r\033[2K")
+        """Clear the previous display lines."""
+        if self.line_visible and self.line_visible > 0:
+            # Move cursor up and clear each line
+            for i in range(self.line_visible):
+                if i > 0:
+                    self.stream.write("\033[A")  # Move up
+                self.stream.write("\r\033[K")  # Clear line
             self.line_visible = 0
+            self.stream.flush()
 
     def _show(self):
         if self.tty and not self.partial_log_line:
@@ -228,7 +258,9 @@ class _EnhancedOutput:
                                 'partition': event_data.get('partition', 'unknown'),
                                 'clients': str(event_data.get('clients', '?')),
                                 'method': event_data.get('method', 'unknown'),
-                                'ratio': f"{event_data.get('ratio', 0.0):.2f}"
+                                'ratio': f"{event_data.get('ratio', 0.0):.2f}",
+                                'round': 0,
+                                'total_rounds': event_data.get('rounds', 150)  # Default 150
                             }
                             device = event_data.get('device')
                             if device:
