@@ -5,24 +5,50 @@ from contextlib import contextmanager
 from dataclasses import replace
 from functools import wraps
 import json
+import math
 import os
 
 from sm9rrsfl import cuda_execution, experiments, fair_tuning
+from sm9rrsfl.torch_backend import _torch_module
+
+
+def probe_gpu_memory():
+    """Keep successful logical-device queries when another GPU cannot be queried.
+
+    Querying an almost full GPU can itself raise CUDA OOM. Never substitute
+    zero/free memory for that device or discard the other devices' readings.
+    """
+    devices = experiments.available_cuda_devices()
+    if not devices:
+        return (), (), {}
+    torch = _torch_module()
+    info, failures = [], {}
+    for device in devices:
+        try:
+            index = int(device.split(":")[1])
+            free_bytes, total_bytes = torch.cuda.mem_get_info(index)
+            free, total = float(free_bytes) / (1024 * 1024), float(total_bytes) / (1024 * 1024)
+            if not (math.isfinite(free) and math.isfinite(total) and 0 <= free <= total and total > 0):
+                raise ValueError("invalid free/total GPU memory values")
+            info.append((device, free, total))
+        except (RuntimeError, AttributeError, TypeError, ValueError, OSError) as exc:
+            failures[device] = {"error_type": type(exc).__name__, "error": str(exc)}
+    return devices, tuple(info), failures
 
 
 def inspect_gpus():
-    devices = experiments.available_cuda_devices()
+    devices, info, failures = probe_gpu_memory()
     if not devices:
         raise RuntimeError("v14 requires visible CUDA GPUs; check PyTorch/CUDA and CUDA_VISIBLE_DEVICES")
-    info = experiments.cuda_device_memory_info()
-    if info is None or any(device not in {row[0] for row in info} for device in devices):
-        raise RuntimeError("cannot inspect all visible GPUs' memory; no GPU work was scheduled")
-    return devices, info
+    if not info:
+        raise RuntimeError("no GPU memory query succeeded; no GPU work was scheduled; "
+                           "query_failures=" + json.dumps(failures, sort_keys=True))
+    return devices, info, failures
 
 
 def check_gpus():
     """Read-only hardware inventory; no dataset download or experiment output."""
-    devices, info = inspect_gpus()
+    devices, info, failures = inspect_gpus()
     result = {
         "visible_devices": list(devices),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "unmasked"),
@@ -30,6 +56,8 @@ def check_gpus():
         "host_memory_mb": round(experiments._physical_memory_mb()),
         "gpu_memory_mb": [{"device": device, "free": round(free), "total": round(total)}
                           for device, free, total in info],
+        "memory_query_status": "partial" if failures else "complete",
+        "query_failures": failures,
         "policy": "all eligible visible GPUs, one task per GPU; CPU slot count is not a GPU job cap",
         "capacity": "per-task GPU and host memory checked again after loading the dataset",
     }
@@ -42,6 +70,7 @@ class Pool:
         self.devices = ()
         self.jobs = 0
         self.on_plan = on_plan
+        self.query_failures = {}
 
     def prepare(self, dataset, tasks, args, *, requested_jobs=None, spread_cuda_devices=True):
         if not tasks:
@@ -50,7 +79,8 @@ class Pool:
                 or str(args.jobs).lower() != "auto"
                 or requested_jobs is not None and str(requested_jobs).lower() != "auto"):
             raise RuntimeError("v14 GPU pool requires compute_backend=torch, device=auto and jobs/final_jobs=auto")
-        visible, info = inspect_gpus()
+        visible, info, failures = inspect_gpus()
+        self.query_failures = failures
         configs = [task.config for task in tasks]
         required_mb = experiments._estimated_cuda_worker_memory_mb(dataset, configs)
         host_worker_mb = experiments._estimated_parallel_worker_memory_mb(dataset, configs)
@@ -61,7 +91,10 @@ class Pool:
         fraction = experiments.CUDA_MEMORY_SAFETY_FRACTION
         by_device = {device: (free, total) for device, free, total in info}
         # Keep busy but sufficiently large GPUs in the pool so they can join later.
-        self.devices = tuple(d for d in visible if by_device[d][1] * fraction >= required_mb)
+        # Unknown-memory cards remain candidates for a later successful query,
+        # but ready_devices never admits them while their query is failing.
+        self.devices = tuple(d for d in visible
+                             if d not in by_device or by_device[d][1] * fraction >= required_mb)
         if not self.devices:
             raise RuntimeError("no visible GPU has sufficient total memory for one v14 task")
         self.jobs = min(len(tasks), len(self.devices), host_slots)
@@ -69,13 +102,15 @@ class Pool:
                    parallel_jobs=self.jobs) if args._sm9_workers_auto else args.sm9_workers)
         prepared = [replace(task, config=replace(task.config, sm9_workers=workers,
                     device=self.devices[index % len(self.devices)])) for index, task in enumerate(tasks)]
-        ready = [d for d in self.devices if by_device[d][0] * fraction >= required_mb]
+        ready = [d for d in self.devices if d in by_device and by_device[d][0] * fraction >= required_mb]
         report = {
             "phase": tasks[0].phase,
             "visible_devices": list(visible),
             "pool_devices": list(self.devices),
             "ready_now": ready,
-            "waiting_for_memory": [d for d in self.devices if d not in ready],
+            "waiting_for_memory": [d for d in self.devices if d in by_device and d not in ready],
+            "waiting_for_memory_query": [d for d in self.devices if d not in by_device],
+            "query_failures": failures,
             "excluded_total_memory": [d for d in visible if d not in self.devices],
             "target_jobs": self.jobs,
             "cpu_slots": experiments.available_cpu_count(),
@@ -93,12 +128,20 @@ class Pool:
             self.on_plan(report)
         return prepared, self.jobs, "torch:cuda", workers
 
-    @staticmethod
-    def ready_devices(required_mb):
-        # A failed runtime query must not be interpreted as all cards being free.
-        info = experiments.cuda_device_memory_info()
-        if info is None:
-            return ()
+    def memory_info(self):
+        _, info, failures = probe_gpu_memory()
+        if failures != self.query_failures:
+            print("gpu_memory_status=" + json.dumps({
+                "query_failures": failures,
+                "queries_recovered": sorted(set(self.query_failures) - set(failures)),
+            }, sort_keys=True), flush=True)
+            self.query_failures = failures
+        return info
+
+    def ready_devices(self, required_mb):
+        # Only successful current readings admit work; one bad card cannot
+        # block other cards or be treated as free by the scheduler.
+        info = self.memory_info()
         return tuple(device for device, free, _ in info
                      if free * experiments.CUDA_MEMORY_SAFETY_FRACTION >= required_mb)
 
@@ -110,6 +153,7 @@ def gpu_pool(*, on_plan=None):
     original_prepare = fair_tuning.prepare_tuning_tasks
     original_queue = fair_tuning.run_cuda_tasks
     original_ready = cuda_execution.cuda_devices_with_capacity
+    original_memory = experiments.cuda_device_memory_info
 
     @wraps(original_queue)
     def queue(tasks, **kwargs):
@@ -122,9 +166,13 @@ def gpu_pool(*, on_plan=None):
     fair_tuning.prepare_tuning_tasks = pool.prepare
     fair_tuning.run_cuda_tasks = queue
     cuda_execution.cuda_devices_with_capacity = pool.ready_devices
+    # Keep the original runner's resource log consistent with this queue's
+    # partial inventory. The generic reader itself remains unchanged on disk.
+    experiments.cuda_device_memory_info = pool.memory_info
     try:
         yield pool
     finally:
         fair_tuning.prepare_tuning_tasks = original_prepare
         fair_tuning.run_cuda_tasks = original_queue
         cuda_execution.cuda_devices_with_capacity = original_ready
+        experiments.cuda_device_memory_info = original_memory

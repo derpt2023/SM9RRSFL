@@ -3,6 +3,7 @@ from dataclasses import asdict
 import io
 from pathlib import Path
 from threading import Event, Lock
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -33,6 +34,14 @@ class GpuPoolTest(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(experiments, "available_cuda_devices", return_value=DEVICES))
         self.info = self.stack.enter_context(mock.patch.object(experiments, "cuda_device_memory_info",
             return_value=tuple((d, 20000., 24000.) for d in DEVICES)))
+        def probe():
+            devices = experiments.available_cuda_devices()
+            info = self.info() or ()
+            known = {row[0] for row in info}
+            failures = {d: {"error_type": "RuntimeError", "error": "CUDA error: out of memory"}
+                        for d in devices if d not in known}
+            return devices, info, failures
+        self.stack.enter_context(mock.patch.object(policy, "probe_gpu_memory", side_effect=probe))
         self.stack.enter_context(mock.patch.object(experiments, "available_cpu_count", return_value=1))
         self.stack.enter_context(mock.patch.object(experiments, "_physical_memory_mb", return_value=128 * 1024.))
         self.stack.enter_context(mock.patch.object(experiments, "_estimated_parallel_worker_memory_mb", return_value=2048.))
@@ -85,9 +94,61 @@ class GpuPoolTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "requires visible CUDA"):
                 policy.check_gpus()
         self.info.return_value = None
-        with self.assertRaisesRegex(RuntimeError, "cannot inspect"):
+        with self.assertRaisesRegex(RuntimeError, "no GPU memory query succeeded.*query_failures"):
             policy.check_gpus()
-        self.assertEqual(policy.Pool.ready_devices(1024.), ())
+        self.assertEqual(policy.Pool().ready_devices(1024.), ())
+
+    def test_one_query_oom_keeps_other_cards_and_retries_failed_card_later(self):
+        # Reproduce the feedback: cuda:6 unreadable, 2/3 have plenty of memory,
+        # all other successful readings are too small for this task.
+        self.info.return_value = tuple((d, 22000. if i in (2, 3) else 2200., 24000.)
+                                       for i, d in enumerate(DEVICES) if i != 6)
+        inventory = policy.check_gpus()
+        self.assertEqual(inventory["memory_query_status"], "partial")
+        self.assertEqual(set(inventory["query_failures"]), {"cuda:6"})
+        reports = []
+        with mock.patch.object(experiments, "_estimated_cuda_worker_memory_mb", return_value=3000.):
+            pool = policy.Pool(reports.append)
+            pool.prepare(None, tasks(), self.args)
+        self.assertEqual(pool.devices, DEVICES)
+        self.assertEqual(reports[0]["ready_now"], ["cuda:2", "cuda:3"])
+        self.assertEqual(reports[0]["waiting_for_memory_query"], ["cuda:6"])
+        self.assertEqual(pool.ready_devices(3000.), ("cuda:2", "cuda:3"))
+        self.info.return_value += (("cuda:6", 22000., 24000.),)
+        self.assertEqual(pool.ready_devices(3000.), ("cuda:2", "cuda:3", "cuda:6"))
+        self.assertEqual(pool.query_failures, {})
+
+    def test_runtime_query_failure_never_admits_failed_card_or_blocks_healthy_card(self):
+        pool = policy.Pool()
+        pool.prepare(None, tasks(), self.args)
+        self.info.return_value = tuple(row for row in self.info.return_value if row[0] != "cuda:6")
+        ready = pool.ready_devices(1024.)
+        self.assertEqual(set(ready), set(DEVICES) - {"cuda:6"})
+        self.assertEqual(set(pool.query_failures), {"cuda:6"})
+
+    def test_real_queue_finishes_tasks_on_healthy_cards_while_one_query_keeps_failing(self):
+        self.info.return_value = tuple((d, 22000. if i in (2, 3) else 2200., 24000.)
+                                       for i, d in enumerate(DEVICES) if i != 6)
+        seen, commits = [], []
+        def run(item):
+            seen.append(item.config.device)
+            return item.config.seed
+
+        with mock.patch.object(experiments, "_estimated_cuda_worker_memory_mb", return_value=3000.), \
+                policy.gpu_pool():
+            prepared, jobs, _, _ = fair_tuning.prepare_tuning_tasks(None, tasks(count=8), self.args)
+            fair_tuning.run_cuda_tasks(prepared, devices=DEVICES, jobs=jobs, required_mb=3000.,
+                run=run, commit=lambda item, result: commits.append(result), event=lambda *a, **k: None)
+        self.assertEqual(len(commits), 8)
+        self.assertEqual(set(seen), {"cuda:2", "cuda:3"})
+
+    def test_scoped_generic_resource_reader_also_preserves_partial_results(self):
+        self.info.return_value = tuple(row for row in self.info.return_value if row[0] != "cuda:6")
+        original = experiments.cuda_device_memory_info
+        with policy.gpu_pool():
+            rows = experiments.cuda_device_memory_info()
+            self.assertEqual({row[0] for row in rows}, set(DEVICES) - {"cuda:6"})
+        self.assertIs(experiments.cuda_device_memory_info, original)
 
     def test_gpu_inventory_is_read_only_and_does_not_start_training(self):
         with mock.patch.object(fair_tuning, "run_fair_tuning") as run, \
@@ -175,12 +236,40 @@ class GpuPoolTest(unittest.TestCase):
 
     def test_pool_hooks_are_restored_when_training_fails(self):
         original = (fair_tuning.prepare_tuning_tasks, fair_tuning.run_cuda_tasks,
-                    cuda_execution.cuda_devices_with_capacity)
+                    cuda_execution.cuda_devices_with_capacity, experiments.cuda_device_memory_info)
         with self.assertRaisesRegex(ValueError, "fixture"):
             with policy.gpu_pool():
                 raise ValueError("fixture")
         self.assertEqual(original, (fair_tuning.prepare_tuning_tasks, fair_tuning.run_cuda_tasks,
-                         cuda_execution.cuda_devices_with_capacity))
+                         cuda_execution.cuda_devices_with_capacity, experiments.cuda_device_memory_info))
+
+
+class MemoryProbeTest(unittest.TestCase):
+    def test_actual_probe_isolates_oom_and_still_queries_next_logical_device(self):
+        def memory(index):
+            if index == 6:
+                raise RuntimeError("CUDA error: out of memory")
+            return 20 * 1024 ** 3, 24 * 1024 ** 3
+
+        reader = mock.Mock(side_effect=memory)
+        torch = SimpleNamespace(cuda=SimpleNamespace(mem_get_info=reader))
+        with mock.patch.object(experiments, "available_cuda_devices", return_value=DEVICES), \
+                mock.patch.object(policy, "_torch_module", return_value=torch):
+            visible, rows, failures = policy.probe_gpu_memory()
+        self.assertEqual(visible, DEVICES)
+        self.assertEqual({row[0] for row in rows}, set(DEVICES) - {"cuda:6"})
+        self.assertEqual(rows[-1], ("cuda:7", 20 * 1024., 24 * 1024.))
+        self.assertEqual(reader.call_args_list, [mock.call(i) for i in range(8)])
+        self.assertEqual(failures["cuda:6"], {"error_type": "RuntimeError", "error": "CUDA error: out of memory"})
+
+    def test_invalid_or_unknown_readings_are_never_counted_as_free_memory(self):
+        reader = mock.Mock(side_effect=[(float("nan"), 100.), (120., 100.), AttributeError("no mem_get_info")])
+        torch = SimpleNamespace(cuda=SimpleNamespace(mem_get_info=reader))
+        with mock.patch.object(experiments, "available_cuda_devices", return_value=DEVICES[:3]), \
+                mock.patch.object(policy, "_torch_module", return_value=torch):
+            _, rows, failures = policy.probe_gpu_memory()
+        self.assertEqual(rows, ())
+        self.assertEqual(set(failures), set(DEVICES[:3]))
 
 
 if __name__ == "__main__":

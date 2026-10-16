@@ -156,10 +156,9 @@ cd /3251901002/SM9RRSFL
 git pull
 # 先确认配置与准确工作量；不下载数据、不训练、不创建实验输出
 python run_cifar_v14_with_progress.py --dry-run
-# 只读检查 PyTorch/CUDA、可见显卡、每卡显存与容器资源
-python run_cifar_v14_with_progress.py --check-gpus
-# 在 AI Station 的交互终端启动
-python -u run_cifar_v14_with_progress.py
+# 在 AI Station 交互终端检查资源，通过后启动
+python run_cifar_v14_with_progress.py --check-gpus && \
+  python -u run_cifar_v14_with_progress.py
 ```
 
 面板在同一终端区域刷新：大进度条累计两阶段的训练轮数，并显示任务完成数、已用时、估算剩余时间、当前阶段。每张 GPU 显示当前候选、分区、恶意比例、seed、轮次进度条，以及 Ours 阈值 / VERT 参数 / AlignIns 参数。80 列、24 行终端可同时显示 8 张 GPU；更短的终端压缩详情，建议放大窗口。`cuda:N` 是当前进程的逻辑编号；若设置 `CUDA_VISIBLE_DEVICES`，编号按该列表重新映射。
@@ -167,6 +166,10 @@ python -u run_cifar_v14_with_progress.py
 **GPU 使用策略**：v14 新入口把所有可见且总显存足够的 GPU 纳入任务池，GPU 并发数不再受 CPU 配额数直接限制。因此即使容器只分配 1 个 CPU 配额，只要主内存足够、8 卡都通过显存准入且还有至少 8 项任务，两阶段均可启动 8 项并行任务。保留主内存预算（容器可用总量的 75%）与原显存安全余量；若主内存限制并发，启动日志 `gpu_pool_plan` 明示 `host_memory_limited=true`、`host_slots` 与 `target_jobs`，不会把它误报为已用满所有卡。
 
 任务队列每秒复查显存；起初繁忙但总显存足够的卡持续保留在池中，空闲后可加入当前阶段；任何卡完成任务后可接续下一项。断点续跑只剩少量任务时，仍可在整个可见 GPU 池中选择空闲卡。全池都暂不可用时最多等待 600 秒，仍不可用则保留已有结果并报资源错误；原有 OOM 冷却、有限重试、断点与结果提交规则继续生效。`gpu_pool_plan` 列出 `pool_devices`、`ready_now`、`waiting_for_memory`、`target_jobs`，面板显示 `gpu=正在运行/池大小 slots=并发上限`，便于远端核对。此入口要求 CUDA；CUDA 不可见时明确停止，不转到 CPU 长时间训练。`CUDA_VISIBLE_DEVICES` 仍是用户控制的可见边界。
+
+**单卡显存查询失败的处理**：接近满载的卡可能在 `torch.cuda.mem_get_info` 时就触发 CUDA OOM。v14 按逻辑卡分别捕获错误，保留其他卡成功的显存读数；检查输出 `memory_query_status=partial` 和 `query_failures` 记录具体失败卡与原始错误。只要至少一张卡查询成功，继续按成功读数选择足够显存的卡；失败卡保持等待查询状态，在取得符合显存准入的有效读数之前不会接任务。调度每秒重查，恢复时输出 `gpu_memory_status`；`gpu_pool_plan.waiting_for_memory_query` 区分查询失败与已知空闲显存不足。全部卡查询均失败时，启动检查停止并给出逐卡原因。此处理适用于启动和运行期间，不再因一张卡查询失败阻断整个GPU池。
+
+2026-10-16 单卡查询修复需用户提交这 **3 个文件**：`README.md`、`scripts/experiments/cifar10/cifar_fair_gpu_pool.py`、`tests/test_cifar_fair_gpu_pool.py`。实验配置、轮数、选参和训练规则保持原版本。
 
 多卡调度利用的是独立实验任务。SM9、检测器、聚合、存盘等阶段含 CPU/I/O 工作，实验末尾也可能剩余不足 8 项任务，因此无法承诺每张 GPU 在所有时刻都达到 100% 算力利用率。
 
