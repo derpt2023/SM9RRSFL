@@ -1,0 +1,18 @@
+{
+  "protocol": "cifar_v14_fixed_attack_screen_v1",
+  "source_config": "configs/cifar10_v14_fair_grid.json",
+  "source_config_sha256": "dfdb25f022c9eda6e3e03f0fd3e76d0a0eb4a617cd632812cf2d5226c2b09778",
+  "rounds": 50,
+  "num_clients": 100,
+  "ratios": [
+    0.6,
+    0.8
+  ],
+  "seed": 301,
+  "candidate_ids": {
+    "sm9rrs": "sm9rrs-001",
+    "vert": "vert-001",
+    "fedavg": "fedavg-001"
+  },
+  "output_dir": "outputs/cifar10_v14_attack_screen_100clients"
+}

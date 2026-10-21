@@ -1,0 +1,50 @@
+{
+  "protocol": "cifar_c7_calibrated_60r_v1",
+  "source_protocol": "configs/cifar10_c7_six_methods_v1.json",
+  "reference_dir": "outputs/cifar10_c7_six_methods_v1",
+  "reference_fingerprint": "f565dff035fc8690748b31f6d5ec0f6dcf9e1c06471089b09031a120a02ad2b2",
+  "output_dir": "outputs/cifar10_c7_calibrated_60r_v1",
+  "calibration_seed": 301,
+  "calibration_rounds": 30,
+  "final_seed": 402,
+  "final_rounds": 60,
+  "num_clients": 100,
+  "partition": "dirichlet",
+  "ratios": [0.6, 0.8],
+  "sm9_workers": 8,
+  "profile": {"id": "C7", "optimizer": "adam", "lr": 0.001, "boost": 20.0, "stealth_steps": 10, "scope": "weights"},
+  "calibration_candidates": {
+    "vert": [
+      {"id": "V1", "overrides": {"vert_history_window": 5, "vert_projection_dim": 20, "vert_predict_epochs": 5, "vert_predict_lr": 0.01, "vert_top_k": 10, "vert_use_ratio_prior": false}},
+      {"id": "V2", "overrides": {"vert_history_window": 5, "vert_projection_dim": 20, "vert_predict_epochs": 5, "vert_predict_lr": 0.01, "vert_top_k": 20, "vert_use_ratio_prior": false}},
+      {"id": "V3", "overrides": {"vert_history_window": 10, "vert_projection_dim": 256, "vert_predict_epochs": 5, "vert_predict_lr": 0.001, "vert_top_k": 10, "vert_use_ratio_prior": false}},
+      {"id": "V4", "overrides": {"vert_history_window": 10, "vert_projection_dim": 256, "vert_predict_epochs": 5, "vert_predict_lr": 0.001, "vert_top_k": 20, "vert_use_ratio_prior": false}}
+    ],
+    "alignins": [
+      {"id": "A1", "overrides": {"alignins_sparsity": 0.8, "alignins_tda_radius": 0.5, "alignins_mpsa_radius": 0.5}},
+      {"id": "A2", "overrides": {"alignins_sparsity": 0.8, "alignins_tda_radius": 1.0, "alignins_mpsa_radius": 1.0}},
+      {"id": "A3", "overrides": {"alignins_sparsity": 0.3, "alignins_tda_radius": 0.5, "alignins_mpsa_radius": 0.5}},
+      {"id": "A4", "overrides": {"alignins_sparsity": 0.3, "alignins_tda_radius": 1.0, "alignins_mpsa_radius": 1.0}}
+    ]
+  },
+  "selection": {
+    "max_final_clean_accuracy_drop": 0.05,
+    "max_last10_clean_accuracy_drop": 0.05,
+    "max_clean_false_revocation_rate": 0.1,
+    "require_every_training_round_nonempty_aggregation": true,
+    "require_complete_and_finite": true,
+    "ranking": ["last10_accuracy_desc", "final_accuracy_desc", "candidate_id_asc"],
+    "no_eligible_candidate": "retain_best_complete_finite_as_unqualified_stress_comparison",
+    "official_test_used": false,
+    "attack_outcomes_used": false
+  },
+  "final_clean_methods": ["fedavg", "sm9rrs", "vert", "alignins", "krum", "ding13"],
+  "final_attack_methods": ["fedavg", "sm9rrs", "vert", "alignins", "krum", "ding13"],
+  "ding13_policy": "unchanged_project_implementation; true-ratio quota pathology retained and flagged; no attack-start oracle",
+  "target_selection": "original_per_experiment_seed",
+  "clean_reference": "outputs/cifar10_attack_stability_v1/tasks/clean_dirichlet",
+  "diagnostic_references": [
+    "outputs/cifar10_c7_60r_preparation_20261020/ding13_early_revocation_audit.json",
+    "outputs/cifar10_c7_60r_preparation_20261020/baseline_calibration_design.json"
+  ]
+}

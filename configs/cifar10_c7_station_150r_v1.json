@@ -1,0 +1,136 @@
+{
+  "protocol": "cifar10_c7_station_150r_v1",
+  "description": "Fixed C7 / Ours d2.0 / VERT V4 / AlignIns A4; independent CUDA six-method 150-round validation and official-test evaluation. No parameter reselection.",
+  "shared_parameters": {
+    "dataset": "cifar10",
+    "data_dir": "data/cifar10",
+    "download": true,
+    "output_dir": "outputs/cifar10_c7_station_150r_v1",
+    "num_clients": 100,
+    "rounds": 150,
+    "local_epochs": 1,
+    "batch_size": 50,
+    "lr": 0.01,
+    "lr_decay": 0.99,
+    "partitions": [
+      "iid",
+      "dirichlet"
+    ],
+    "train_samples": 50000,
+    "test_samples": 10000,
+    "ratios": [
+      0.0,
+      0.2,
+      0.4,
+      0.6,
+      0.8
+    ],
+    "attack": "alternating_minimization",
+    "attack_boost": 20.0,
+    "attack_epochs": 1,
+    "attack_stealth_steps": 10,
+    "attack_distance_weight": 0.0001,
+    "attack_source_label": 5,
+    "attack_target_label": 7,
+    "attack_start_round": 25,
+    "K": 20,
+    "ours_parameter_mode": "fixed",
+    "detector_subspace_dim": 3,
+    "detector_normal_clusters": 2,
+    "detector_reject_threshold": 5.0,
+    "detector_drift_memory": 0.8,
+    "detector_drift_allowance": 2.0,
+    "detector_drift_threshold": 6.0,
+    "detector_history_confirm": 2,
+    "detector_history_threshold": 1.5,
+    "detector_recovery_confirm": 2,
+    "detector_reference_budget": 3.0,
+    "detector_clip_factor": 2.0,
+    "detector_weight_cap": 2.0,
+    "suspicion_penalty_factor": 0.5,
+    "suspicion_recovery_factor": 1.25,
+    "suspicion_remove_after": 3,
+    "crypto_mode": "sm9",
+    "dkg_nodes": 3,
+    "dkg_threshold": 2,
+    "sm9_workers": 1,
+    "compute_backend": "torch",
+    "device": "auto",
+    "early_stop": false,
+    "eval_interval": 1,
+    "visualizations": true,
+    "progress": true,
+    "checkpoint_interval": 0,
+    "methods": [
+      "sm9rrs",
+      "vert",
+      "alignins",
+      "krum",
+      "ding13",
+      "fedavg"
+    ],
+    "dirichlet_alpha": 0.5,
+    "jobs": "auto",
+    "progress_mode": "auto",
+    "seed": 42
+  },
+  "attack_profile": {
+    "id": "C7",
+    "optimizer": "adam",
+    "lr": 0.001,
+    "boost": 20.0,
+    "stealth_steps": 10,
+    "scope": "weights"
+  },
+  "fixed_parameters": {
+    "sm9rrs": {
+      "detector_distance_threshold": 2.0
+    },
+    "vert": {
+      "vert_history_window": 10,
+      "vert_projection_dim": 256,
+      "vert_predict_epochs": 5,
+      "vert_predict_lr": 0.001,
+      "vert_top_k": 20,
+      "vert_use_ratio_prior": false
+    },
+    "alignins": {
+      "alignins_sparsity": 0.3,
+      "alignins_tda_radius": 1.0,
+      "alignins_mpsa_radius": 1.0
+    },
+    "krum": {},
+    "ding13": {},
+    "fedavg": {}
+  },
+  "evaluation": {
+    "validation_fraction": 0.15,
+    "split_seed": 20261013,
+    "validation_seeds": [
+      301,
+      302,
+      303
+    ],
+    "final_seeds": [
+      401,
+      402,
+      403
+    ],
+    "final_jobs": "auto",
+    "parameter_selection": "fixed_before_validation",
+    "official_test_used_for_selection": false,
+    "run_final_after_complete_health_failures": true,
+    "tail_rounds": 10
+  },
+  "execution": {
+    "torch_cpu_threads": 2,
+    "gpu_poll_seconds": 1,
+    "gpu_max_idle_seconds": 600,
+    "gpu_oom_retries": 1
+  },
+  "interpretation": {
+    "ding13": "Original ratio-quota implementation retained; report honest false revocations at every ratio.",
+    "krum": "Report clean utility and high-Byzantine-ratio limitations; do not remove failed comparisons.",
+    "asr": "Separate auxiliary training-target, independent single-target and full source-class transfer metrics."
+  }
+}

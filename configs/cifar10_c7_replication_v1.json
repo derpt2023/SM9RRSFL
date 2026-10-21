@@ -1,0 +1,17 @@
+{
+  "protocol": "cifar_c7_replication_v1",
+  "source_protocol": "configs/cifar10_attack_stability_v1.json",
+  "reference_dir": "outputs/cifar10_attack_stability_v1",
+  "reference_fingerprint": "8f01b7e9480bbb47e1221bbbd565ecaaea56055f13ece6e0e37356faba714b70",
+  "output_dir": "outputs/cifar10_c7_replication_v1",
+  "partition": "dirichlet",
+  "num_clients": 100,
+  "rounds": 30,
+  "clean_seed": 301,
+  "replication_seed": 401,
+  "ratios": [0.6, 0.8],
+  "sm9_workers": 8,
+  "profile": {"id": "C7", "optimizer": "adam", "lr": 0.001, "boost": 20.0, "stealth_steps": 10, "scope": "weights"},
+  "target_selection": "original_per_experiment_seed",
+  "task_count": 8
+}

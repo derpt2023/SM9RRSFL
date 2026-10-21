@@ -1,0 +1,32 @@
+{
+  "protocol": "cifar_attack_stability_v1",
+  "source_config": "configs/cifar10_v14_fair_grid.json",
+  "source_config_sha256": "dfdb25f022c9eda6e3e03f0fd3e76d0a0eb4a617cd632812cf2d5226c2b09778",
+  "output_dir": "outputs/cifar10_attack_stability_v1",
+  "budget_seconds": 7200,
+  "probe_budget_seconds": 1800,
+  "probe_processes": 3,
+  "probe_threads": 2,
+  "representative_clients": 16,
+  "rounds": 30,
+  "num_clients": 100,
+  "seed": 301,
+  "candidate_ids": {"sm9rrs": "sm9rrs-001", "vert": "vert-001", "fedavg": "fedavg-001"},
+  "effectiveness": {
+    "first_round": 25,
+    "last_round": 30,
+    "min_target_hit_rate": 0.8,
+    "min_confidence_gain": 0.2,
+    "clean_high_confidence_threshold": 0.8
+  },
+  "profiles": [
+    {"id": "C0", "optimizer": "sgd", "lr": null, "boost": 20.0, "stealth_steps": 1, "scope": "all"},
+    {"id": "C1", "optimizer": "sgd", "lr": null, "boost": 5.0, "stealth_steps": 1, "scope": "all"},
+    {"id": "C2", "optimizer": "sgd", "lr": null, "boost": 10.0, "stealth_steps": 1, "scope": "all"},
+    {"id": "C3", "optimizer": "sgd", "lr": null, "boost": 20.0, "stealth_steps": 5, "scope": "all"},
+    {"id": "C4", "optimizer": "sgd", "lr": null, "boost": 20.0, "stealth_steps": 10, "scope": "all"},
+    {"id": "C5", "optimizer": "sgd", "lr": null, "boost": 20.0, "stealth_steps": 10, "scope": "weights"},
+    {"id": "C6", "optimizer": "adam", "lr": 0.001, "boost": 10.0, "stealth_steps": 10, "scope": "weights"},
+    {"id": "C7", "optimizer": "adam", "lr": 0.001, "boost": 20.0, "stealth_steps": 10, "scope": "weights"}
+  ]
+}
