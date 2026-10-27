@@ -65,6 +65,15 @@ python3 run_cifar_h84_full_validation.py --finish
 父审计和history_decision已作为新reference_lock冻结，勿重新运行父报告器改写时间戳。新任务失败/partial不自动重试；新入口结束后的`analysis/full_validation.json`保留完整原始结果、健康排除原因、健康排名与差距。绘图及正式方案是完成后的独立步骤。
 
 
+### Krum IID参照的独立用户修订（2026-10-27，结果已知后）
+
+Krum IID clean末10 Accuracy43.792%，比FedAvg59.198667%低15.406667pp，原5pp效用门槛判定仍保留。用户随后明确：若差表现有可分析原因，Krum仍可作参照。只读审计发现其150轮均仅采用1/100更新，19个客户端曾被选中，其中client-94获选113轮；该客户端400张训练图覆盖十类。保存模型的CPU复核：Krum在该客户端准确率100%、7500张独立验证图43.826667%；FedAvg同客户端64.5%、验证59.293333%。初始化、数据和训练配置一致，仅聚合方法不同。该现象支持重复选择集中和局部过拟合的机制解释，未作额外训练；实际CUDA每轮距离分数未保存，不能宣称已回放全部选择或量化全部差距的因果份额。原始单更新Krum选择规则见[原论文第4节](https://papers.nips.cc/paper/2017/file/f4b9ec30ad9f68f89b29639786cb62ef-Paper.pdf)，本项目固定客户端多步local SGD与其独立无偏梯度假设不同。
+
+独立`configs/cifar10_h84_krum_iid_reference_exception_v1.json`记录人类指令、已知结果背景、证据SHA和范围：仅豁免Krum的IID clean Accuracy效用损失；该分布五比例其他原健康仍全部必须通过。Non-IID、其他方法、所有排名/差距门槛不变。这个Krum是按用户例外获得参照资格，不应改称其原clean效用检查通过。原82冻结来源、训练协议、`full_validation.json`严格报告均不修改。
+
+完整矩阵结束后另运行`python3 assess_h84_krum_reference.py`，核对原报告、父引用、机制证据后生成`analysis/krum_reference_exception_assessment.json`；启动前可用`--verify-only`只读核验证据。最新达标结论依这个独立判定，原严格结论一并展示。若纳入Krum导致Ours ASR落到第三，即使差距小于5pp也仍判失败；其他健康失败不豁免，缺失方法不默认为失败而排除。机制证据为单独数据artifact（随协议记录SHA，非新训练），须位于配置指定路径。
+
+
 本项目实现了基于国密SM9环签名的联邦学习防御方法（Ours），并提供了与5种主流防御方法的公平对比实验框架。
 
 **支持的防御方法**：

@@ -1,0 +1,34 @@
+{
+  "all_metric_gap_and_rank_limits_unchanged": true,
+  "diagnosis_path": "outputs/ai_station_access_20261027/krum_clean_cpu_diagnosis_20261027.json",
+  "diagnosis_sha256": "c23eb97c46c5a63f4bc2f3d6c39d34816f336906ab844d5b861b448f8fd1da94",
+  "exception": {
+    "all_other_health_gates_required": true,
+    "arm": "Krum",
+    "no_other_method_exemption": true,
+    "partition": "iid",
+    "waived_reason": "clean_accuracy_drop"
+  },
+  "frozen_matrix_fingerprint": "c1322ce9328652650509fb08ec6848d44307d00238445c8e57286aa1a1233785",
+  "known_results_context": {
+    "clean_accuracy_drop_pp": 15.406666666666668,
+    "dominant_selections": 113,
+    "dominant_training_accuracy": 1.0,
+    "fedavg_clean_accuracy_percent": 59.19866666666668,
+    "fedavg_same_client_training_accuracy": 0.645,
+    "fedavg_validation_accuracy": 0.5929333333333333,
+    "krum_clean_accuracy_percent": 43.792,
+    "krum_validation_accuracy": 0.4382666666666667,
+    "total_rounds": 150,
+    "unique_selected_clients": 19
+  },
+  "mechanism_assessment": "supported_observed_selection_concentration_and_local_overfit",
+  "original_policy_preserved": true,
+  "paper_url": "https://papers.nips.cc/paper/2017/file/f4b9ec30ad9f68f89b29639786cb62ef-Paper.pdf",
+  "post_result_user_revision": true,
+  "recorded_utc": "2026-10-27T07:17:47.451189+00:00",
+  "schema": "h84_krum_iid_reference_exception_v1",
+  "scientific_limit": "Fixed-client federated local updates differ from the original unbiased-gradient setting. Observed concentration and overfit support a bounded explanation; the full causal gap and all historical CUDA distance scores have not been reconstructed.",
+  "scope_note": "Only IID Krum clean utility is waived under this explicit post-result user instruction; no blanket Non-IID or other health exemption.",
+  "user_instruction": "如果Krum在IID clean下的差表现有可分析的原因则仍可以作为参照。否则按照设定来。"
+}
