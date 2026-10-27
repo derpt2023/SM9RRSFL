@@ -6,15 +6,19 @@
 
 新入口`run_cifar_cp1_cuda_development.py`使用`configs/cifar10_cp1_cuda_diagnosis150_v1.json`，在独立目录开展150轮开发。第一批为IID clean/60/80%各FedAvg、CP1、W85、W80，共12项1800轮；W85/W80仅改变Ours告警、历史准入及漂移容限三项阈值，其他参数（含累计撤销容忍60）不变。固定V2交替最小化攻击、100客户端、数据划分和已观察开发seed2026102201不变。此批用于检验早期漏入机制，不是最终资格或正式实验。
 
-CUDA统一启用确定性算法，禁用TF32及cuDNN benchmark，设置`CUBLAS_WORKSPACE_CONFIG=:4096:8`。平台/软件变化单独记录，不能将MPS与CUDA成绩混作配对基线。输入数据的全部数组与原MPS哈希核对；使用原攻击及观测代码、原健康函数。任务完整保留失败；partial和无身份残留禁止自动重试。首个可用GPU须连续3次（间隔10秒）满足空闲显存至少16GiB、利用率不高于5%，本批固定同一UUID串行执行；等候上限24小时，超时仅表示资源阻塞，不代表算法失败。此抽样准入不等于集群独占预约，其他用户进程不会被终止。
+CUDA统一启用确定性算法，禁用TF32及cuDNN benchmark，设置`CUBLAS_WORKSPACE_CONFIG=:4096:8`。平台/软件变化单独记录，不能将MPS与CUDA成绩混作配对基线。输入数据的全部数组与原MPS哈希核对；使用原攻击及观测代码、原健康函数。任务完整保留失败；partial和无身份残留禁止自动重试。原始串行入口保持冻结。2026-10-27按用户授权，新增独立调度适配器`run_cifar_cp1_dynamic_gpu.py`接续已有manifest：动态检查所有可见4090D，每卡一个独立实验，最多8卡同时运行，不固定GPU4或任何UUID。每张卡仍须连续3次（间隔10秒）满足空闲显存至少16GiB、利用率不高于5%，获取UUID锁后再次检查。无任务运行时等候上限24小时，超时仅表示资源阻塞，不代表算法失败。此抽样准入不等于集群独占预约，其他用户进程不会被终止。
 
 ```bash
 # 在已配置PyTorch CUDA和SM9 native库的解释器下执行
-python3 -m unittest tests.test_cp1_cuda_development tests.test_cifar_tad_no_prior -v
+python3 -m unittest tests.test_cp1_dynamic_gpu tests.test_cp1_cuda_development tests.test_cifar_tad_no_prior -v
 python3 run_cifar_cp1_cuda_development.py          # 仅检查协议与来源
-python3 -u run_cifar_cp1_cuda_development.py --batch
+python3 run_cifar_cp1_dynamic_gpu.py --max-gpus 8  # 仅检查
+# 只在旧控制器退出、已有任务均为终态时接续，切勿同时运行两个控制器
+python3 -u run_cifar_cp1_dynamic_gpu.py --batch --max-gpus 8
 python3 run_cifar_cp1_cuda_development.py --summary
 ```
+
+并行调度修订记录在`scheduler_dynamic_v1/policy.json`，每次接续保存原结果SHA和启动/退出事件；冻结manifest、原71项执行来源、攻击和筛选参数均不重写。已完成任务不重跑，partial或身份不明任务阻止派发；工作进程异常后停止派发新任务、等其他实验完成后保留失败证据。SIGTERM/SIGINT也只停止新派发并等待已运行任务收尾；不可把强杀控制器当作安全暂停。跨GPU实验必须实际核验攻击前轨迹和r24模型配对，不能仅凭确定性设置认定它们一致。
 
 阶段完成后检查匹配clean前24轮、FedAvg攻击有效性、原健康、首轮冲击、恢复时间及尾10指标，再决定下一批。最终仍须两分布各0/20/40/60/80%及六法的完整同平台证据：方法需在同分布全部五比例健康后才进入参照集，Ours也必须健康；clean不限制名次，Accuracy/ASR距健康最优≤1/2pp，攻击场景双前二且差距≤2/5pp。六法原始结果和健康失败原因全部保留；不能以本12项开发面板宣称达标，也不自动启动正式测试集实验。
 
