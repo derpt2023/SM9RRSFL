@@ -27,6 +27,24 @@ python3 run_cifar_cp1_cuda_development.py --summary
 `diagnose_cifar_cp1_iid.py`仅供拥有原本地输出的环境执行，校验原64项科学来源及引用、逐客户端计数/撤销/聚合质量和时序，输出独立诊断JSON；远端不需要复制这些历史输出才能启动新CUDA面板。
 
 
+### W85历史准入单变量验证（2026-10-27）
+
+用户进一步授权以W85为基准，只调整历史准入。新入口`run_cifar_w85_history_admission.py`与协议`configs/cifar10_w85_history_admission150_v1.json`固定告警0.85、漂移容限0.85、历史确认1、累计撤销容忍60及全部攻击/训练参数，仅历史阈值从W85的0.75改为H80=0.80或H84=0.84（必须严格低于告警阈值0.85）。两个候选各IID clean/60/80%，6项×150轮，共新增900轮；同样使用共享GPU8GiB准入、每卡一项、最多8卡，不依据分数剪枝。H80表示历史阈值0.80，与上一轮告警0.80的W80不同。
+
+先用`audit_cifar_cuda_panel.py`完整审计原12项，包括任务/数据/来源、真实逐次攻击SGD及增强种子与128辅助图身份、全部在线恶意client-round覆盖、配对0..24分类/r24模型、撤销计数/历史准入及聚合质量。新实验仅复用已审计W85和FedAvg的完成结果，不重跑对照；所有原失败照常保留。独立`reference_lock.json`在新训练前冻结原manifest与审计原始输入SHA，旧科学结果不改。
+
+```bash
+python3 -m unittest tests.test_w85_history_admission tests.test_cp1_shared_gpu tests.test_cp1_cuda_development tests.test_cifar_tad_no_prior -q
+python3 audit_cifar_cuda_panel.py  # 原12项完整后执行一次；冻结引用后勿重复改写旧审计时间戳
+python3 run_cifar_w85_history_admission.py  # 仅检查6项设计、来源与参数差异
+python3 -u run_cifar_w85_history_admission.py --batch
+# 已有批次的只读训练结果汇总及独立派生审计（不会重新训练）
+python3 run_cifar_w85_history_admission.py --finish
+```
+
+此阶段推进条件独立预声明：三个场景原健康通过、clean效用门槛不变、clean误撤销严格少于W85的10人；相对W85，clean尾10 Accuracy最多降低1pp/ASR最多增加2pp，60/80尾10 Accuracy最多降低2pp/ASR最多增加5pp。符合者依次按clean误撤销数、最坏攻击ASR增量、攻击平均Accuracy、候选ID排序。完整保留首攻、全攻击期、峰值、恢复和机制记录，不把末段成绩当作全程无代价。以上仅用于本轮开发推进，不替代或放宽最终健康参照内双前二、差距1/2pp（clean无名次）及2/5pp（攻击）的标准。入选后仍须补齐IID/Dirichlet各0/20/40/60/80%和六法的同CUDA平台验证；现阶段不使用官方测试集。
+
+
 本项目实现了基于国密SM9环签名的联邦学习防御方法（Ours），并提供了与5种主流防御方法的公平对比实验框架。
 
 **支持的防御方法**：
