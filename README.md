@@ -45,6 +45,26 @@ python3 run_cifar_w85_history_admission.py --finish
 此阶段推进条件独立预声明：三个场景原健康通过、clean效用门槛不变、clean误撤销严格少于W85的10人；相对W85，clean尾10 Accuracy最多降低1pp/ASR最多增加2pp，60/80尾10 Accuracy最多降低2pp/ASR最多增加5pp。符合者依次按clean误撤销数、最坏攻击ASR增量、攻击平均Accuracy、候选ID排序。完整保留首攻、全攻击期、峰值、恢复和机制记录，不把末段成绩当作全程无代价。以上仅用于本轮开发推进，不替代或放宽最终健康参照内双前二、差距1/2pp（clean无名次）及2/5pp（攻击）的标准。入选后仍须补齐IID/Dirichlet各0/20/40/60/80%和六法的同CUDA平台验证；现阶段不使用官方测试集。
 
 
+### 固定H84完整CUDA验证（2026-10-27）
+
+历史单变量6项已全部完成并审计。H80/H84的clean误撤销均为5/100，较W85的10/100减半；两候选三个场景均通过原健康和开发推进门槛。依预声明选择顺序选H84：clean FP同为5，最坏攻击尾10 ASR增量为0.04pp，小于H80的0.133333pp。H84尾10结果为clean Accuracy58.904%/ASR9.266667%，IID60为55.750667%/10.12%，IID80为51.836%/11.12%；误撤销分别5/100、1/40、0/20。H80在60%下ASR峰值33.866667%，高于W85/H84的20.933333%，保留该早期代价；H84在60%全攻击期ASR比W85高0.213757pp，80%低0.043386pp，不将尾段结果表述为全程无退化。
+
+独立入口`run_cifar_h84_full_validation.py`、配置`configs/cifar10_h84_full_validation150_v1.json`和输出`outputs/cifar_h84_full_validation150_v1`覆盖IID与Dirichlet(alpha0.5)、0/20/40/60/80%、FedAvg/H84/TAD-no-prior/VERT/AlignIns/Krum，共60单元。同CUDA平台复用FedAvg和H84各IID clean/60/80六项，补跑54项×150轮=8100轮；此前12+6项开发预算与全部失败保留。候选、基线、V2攻击、数据、数值策略和最终健康参照筛选规则固定。仍为已观察seed2026102201的开发验证，不能称为正式或未用seed资格。
+
+训练前核验父审计、选择规则、引用SHA以及Python/PyTorch/CUDA/cuDNN/native库一致性；GPU UUID可不同。每卡一项、最多8卡、共享GPU8GiB准入继续适用，不依据成绩剪枝。结束后逐单元核验实际攻击target views、完整结果与Ours机制、TAD1500轮实际无先验决策、攻击前分类/r24模型、FedAvg八项攻击门槛、原健康和六法原始排名。Krum原基线使用配置的Byzantine数量，故单独披露它的clean/attack前缀差异，不冒称配对一致；其参数未调整。TAD不接收该先验。任何缺失/未核验单元阻止完整资格判定，不作为健康失败排除。正式实验仅在完整达标后准备方案，不自动运行官方测试集。
+
+```bash
+python3 -m unittest tests.test_h84_full_validation tests.test_w85_history_admission tests.test_cp1_shared_gpu tests.test_cp1_cuda_development tests.test_cifar_tad_no_prior -q
+python3 run_cifar_h84_full_validation.py          # 仅检查54新增+6复用的冻结设计
+python3 run_cifar_h84_full_validation.py --ready  # 只读核对真实父引用、选择与运行环境
+python3 -u run_cifar_h84_full_validation.py --batch
+# 仅在全部训练结束、主入口已退出且需要恢复派生报告时执行
+python3 run_cifar_h84_full_validation.py --finish
+```
+
+父审计和history_decision已作为新reference_lock冻结，勿重新运行父报告器改写时间戳。新任务失败/partial不自动重试；新入口结束后的`analysis/full_validation.json`保留完整原始结果、健康排除原因、健康排名与差距。绘图及正式方案是完成后的独立步骤。
+
+
 本项目实现了基于国密SM9环签名的联邦学习防御方法（Ours），并提供了与5种主流防御方法的公平对比实验框架。
 
 **支持的防御方法**：
