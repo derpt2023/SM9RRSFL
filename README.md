@@ -10,13 +10,15 @@ CUDA统一启用确定性算法，禁用TF32及cuDNN benchmark，设置`CUBLAS_W
 
 ```bash
 # 在已配置PyTorch CUDA和SM9 native库的解释器下执行
-python3 -m unittest tests.test_cp1_dynamic_gpu tests.test_cp1_cuda_development tests.test_cifar_tad_no_prior -v
+python3 -m unittest tests.test_cp1_shared_gpu tests.test_cp1_cuda_development tests.test_cifar_tad_no_prior -v
 python3 run_cifar_cp1_cuda_development.py          # 仅检查协议与来源
-python3 run_cifar_cp1_dynamic_gpu.py --max-gpus 8  # 仅检查
+python3 run_cifar_cp1_shared_gpu.py --max-gpus 8   # 仅检查
 # 只在旧控制器退出、已有任务均为终态时接续，切勿同时运行两个控制器
-python3 -u run_cifar_cp1_dynamic_gpu.py --batch --max-gpus 8
+python3 -u run_cifar_cp1_shared_gpu.py --batch --max-gpus 8
 python3 run_cifar_cp1_cuda_development.py --summary
 ```
+
+用户随后确认AI Station是共享GPU，允许无视其他任务占用、以本实验正常运行为准。当前改用独立`run_cifar_cp1_shared_gpu.py`：利用率只记录、不阻止派发；每卡空闲显存至少8192MiB，连续2次5秒采样并在锁内复查，仍每卡一项、最多8卡。本批CNN估算worker上界3178MiB、含原75%安全系数需求4238MiB，8192MiB是额外保守准入，不代表已测量完整CUDA峰值或能够预留他人后续使用的显存。约3991/7648MiB空闲的卡暂不准入。新策略仅写`scheduler_shared_v1`，原dynamic_v1审计、71项科学来源、JSON及任务身份保持不变；工作进程仍加载原配置。旧控制器收到TERM后让活动实验自然完成，新入口只在旧控制器退出且无partial时接续。共享负载下耗时只作开发运行记录，不用于论文算法速度对比。
 
 并行调度修订记录在`scheduler_dynamic_v1/policy.json`，每次接续保存原结果SHA和启动/退出事件；冻结manifest、原71项执行来源、攻击和筛选参数均不重写。已完成任务不重跑，partial或身份不明任务阻止派发；工作进程异常后停止派发新任务、等其他实验完成后保留失败证据。SIGTERM/SIGINT也只停止新派发并等待已运行任务收尾；不可把强杀控制器当作安全暂停。跨GPU实验必须实际核验攻击前轨迹和r24模型配对，不能仅凭确定性设置认定它们一致。
 
