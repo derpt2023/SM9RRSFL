@@ -26,7 +26,7 @@
       "Dirichlet clean Accuracy gap1.734667pp >1pp"
     ],
     "decision": "Accept fixed H84 for formal evaluation; original development failures and criteria remain recorded",
-    "seed_scope": "Assistant default proposal: three fresh seeds; not represented as an answered user choice"
+    "seed_scope": "User explicitly confirmed three fresh seeds and 180 tasks on 2026-10-28 before formal execution."
   },
   "evaluation": {
     "scope": "official_test",

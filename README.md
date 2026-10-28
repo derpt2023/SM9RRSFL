@@ -4,7 +4,7 @@
 
 用户在看过完整排名后明确接受当前H84，授权安排正式实验。这是结果已知后的独立采纳决定，覆盖下文历史状态中“尚不能进入正式实验”的推进限制；原最新标准8/10、原严格标准9/10及两个失败场景仍原样保留，不改写成全部达标。H84、V2攻击及六法参数均冻结，正式测试结果不回流调参、不按成绩剪枝、不复用开发成绩填补正式单元。
 
-独立入口`run_cifar_h84_formal.py`与`configs/cifar10_h84_formal150_v1.json`目前按推荐规模准备：seed2026102801/02/03 × IID与Dirichlet(alpha0.5) × 0/20/40/60/80% × FedAvg/H84/TAD-no-prior/VERT/AlignIns/Krum，共180项、每项150轮（27000轮）。三种子是助手提出的默认安排，不冒称用户已回答规模选择。输出`outputs/cifar_h84_formal150_v1`独立于开发目录。共享GPU动态准入沿用空闲显存≥8192MiB、连续2次5秒采样、利用率仅记录；每卡一项、最多8卡，同一UUID锁跨批次共用。partial、OOM或未知失败保留，禁止自动重试或改参数。
+独立入口`run_cifar_h84_formal.py`与`configs/cifar10_h84_formal150_v1.json`已获用户明确确认：seed2026102801/02/03 × IID与Dirichlet(alpha0.5) × 0/20/40/60/80% × FedAvg/H84/TAD-no-prior/VERT/AlignIns/Krum，共180项、每项150轮（27000轮）。用户于2026-10-28明确选择三个新种子、180项。输出`outputs/cifar_h84_formal150_v1`独立于开发目录。共享GPU动态准入沿用空闲显存≥8192MiB、连续2次5秒采样、利用率仅记录；每卡一项、最多8卡，同一UUID锁跨批次共用。partial、OOM或未知失败保留，禁止自动重试或改参数。
 
 数据仍为40000张联邦训练图和2500张攻击辅助图，不把7500张开发验证图并回训练。正式Accuracy在官方10000张测试图计算，独立ASR为其中1000张source=5测试图被预测为target=7的比例；实际攻击优化仅使用原训练辅助池的128张图及固定增强。正式测试不作选择输入。TAD继续原无先验实现，Krum继续原Byzantine数量配置，两者边界不混淆。
 
@@ -27,7 +27,7 @@ python3 watch_cifar_experiment.py --output outputs/cifar_h84_formal150_v1 --json
 
 动态显示包含总进度条、完成/失败项数、各卡任务与轮数、当前Acc/ASR、用时及基于已观察速度的ETA。非TTY按间隔输出日志。训练与显示分离，断开显示不影响worker。完成后自动审计来源、每次攻击、Ours机制、TAD决策及攻击前配对，生成`analysis/formal_results.json`；若主入口在训练全部完成后异常退出，可用`--finish`仅恢复派生报告。`--summary`生成当前未审计汇总，不把完成项数当作健康通过。
 
-截至本地准备阶段，新入口和显示已通过CPU/调度测试，CIFAR数据身份已核对，但尚未远端CUDA实跑。AI Station SSH端口返回`Connection refused`，需连接恢复后先Git同步和远端`--ready`；不得将本地计划检查写成180项已经启动。
+本地新入口和显示已通过CPU/调度测试，CIFAR数据身份已核对。初次准备时SSH端口拒绝连接，用户更新认证后已恢复；正式启动前仍须Git同步、远端测试与`--ready`。计划检查不代表180项已启动。
 
 ## CP1的IID失效诊断与独立CUDA开发（2026-10-27）
 
