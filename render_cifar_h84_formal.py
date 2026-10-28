@@ -253,6 +253,23 @@ def document(bundle, r, recovery, out, digest):
                 count=sum(r['cells'][f'{arm}_{d}_{label}_s{seed}']['health']['complete_observed_health_pass'] for seed in SEEDS)
                 rows.append([d,label,arm,g['actual_n'],pm(s['accuracy']),pm(s['asr']),pm(s['false_revocation_rate']),f'{count}/3'])
     body.append(table(['分布','恶意比例','方法','n','尾10 Acc %','尾10 ASR %','最终误撤销率 %','单元健康'],rows))
+    phase_rows=[];cost_rows=[]
+    mean_sd=lambda values,scale=1:f'{stats.mean(values)*scale:.3f} ± {stats.stdev(values)*scale:.3f}'
+    for d in full.PARTITIONS:
+        for label in full.RATIOS:
+            for arm in full.METHODS:
+                cells=[r['cells'][f'{arm}_{d}_{label}_s{seed}'] for seed in SEEDS]
+                metrics=[mean_sd([c[phase][key] for c in cells],100)
+                         for phase in ('final','attack_period') for key in ('accuracy','source_transfer_asr')]
+                phase_rows.append([d,label,arm,len(cells),*metrics,
+                                   mean_sd([c['peak_attack_asr'] for c in cells],100)])
+                cost_rows.append([d,label,arm,len(cells),*[mean_sd([c['timing'][key] for c in cells])
+                                  for key in ('runtime_with_crypto_seconds','runtime_without_crypto_seconds','crypto_wall_seconds')]])
+    body+=['<h2>最终轮、全攻击期与峰值：跨seed均值±样本SD</h2>'
+           '<p>每一行保留全部三个seed。全攻击期为25..150轮，clean为同轮窗口；峰值先按各seed取最大值，再汇总，不等于均值曲线的峰值。</p>',
+           table(['分布','比例','方法','n','r150 Acc %','r150 ASR %','r25–150 Acc %','r25–150 ASR %','逐seed峰ASR %'],phase_rows),
+           '<h2>逐场景耗时：跨seed均值±样本SD</h2>',
+           table(['分布','比例','方法','n','总墙钟秒','扣crypto秒','crypto秒'],cost_rows)]
     body+=['<h2>逐seed、逐场景判定</h2><img src="criteria.png" alt="三种子十场景通过失败矩阵">']
     rows=[];raw=[];health=[]
     for seed in SEEDS:
