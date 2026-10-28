@@ -1,0 +1,77 @@
+{
+  "protocol": "cifar10_h84_formal150_v1",
+  "candidate": "H84",
+  "rounds": 150,
+  "seeds": [
+    2026102801,
+    2026102802,
+    2026102803
+  ],
+  "output_dir": "outputs/cifar_h84_formal150_v1",
+  "development_config": "configs/cifar10_h84_full_validation150_v1.json",
+  "development_config_sha256": "33fa75eb3ec6fbf5a0d58ee5389d55459469c5bbc31778326e9145581d9a50e4",
+  "development_report": "outputs/cifar_h84_full_validation150_v1/analysis/full_validation.json",
+  "development_evidence": {
+    "outputs/cifar_h84_full_validation150_v1/analysis/full_validation.json": "dd71939dc08d7f833b1a873d00746ed1e5d7823b0dffa035392250793f32eae2",
+    "outputs/cifar_h84_full_validation150_v1/analysis/krum_reference_exception_assessment.json": "29117a0577118e03d5e4d0e29f76d25144b62c875755c49c94ae30bc4d089dd3"
+  },
+  "acceptance": {
+    "date": "2026-10-28",
+    "post_result_user_acceptance": true,
+    "original_passed_scenarios": 8,
+    "total_scenarios": 10,
+    "user_instruction": "我看了一下刚才的排名，我觉得可以接受，可以安排cifar-10的实验了",
+    "known_remaining_failures": [
+      "IID20 ASR rank3 (10.04%, gap3.106667pp)",
+      "Dirichlet clean Accuracy gap1.734667pp >1pp"
+    ],
+    "decision": "Accept fixed H84 for formal evaluation; original development failures and criteria remain recorded",
+    "seed_scope": "Assistant default proposal: three fresh seeds; not represented as an answered user choice"
+  },
+  "evaluation": {
+    "scope": "official_test",
+    "count": 10000,
+    "source_count": 1000,
+    "source_label": 5,
+    "target_label": 7,
+    "selection": false,
+    "refit_on_validation": false
+  },
+  "result_pruning": false,
+  "retune_on_test": false,
+  "reuse_development_cells": false,
+  "gpu_admission": {
+    "min_free_mb": 8192,
+    "max_utilization": 100,
+    "consecutive_samples": 2,
+    "sample_interval_seconds": 5,
+    "maximum_wait_seconds": 86400
+  },
+  "reporting": {
+    "primary_window": [
+      141,
+      150
+    ],
+    "additional": [
+      "all 0..150 round curves",
+      "final round",
+      "first attack",
+      "whole attack period",
+      "peak ASR",
+      "health and revocation",
+      "mean and sample SD across seeds with actual n",
+      "all six raw methods regardless of health"
+    ],
+    "times": [
+      "runtime_seconds",
+      "runtime_without_crypto_seconds",
+      "crypto_wall_seconds",
+      "four non-overlapping crypto spans",
+      "training/attack/detection/aggregation/evaluation",
+      "hash/packet/sign/verify operation times",
+      "measured structured persistence and checkpoint writes"
+    ],
+    "timing_scope": "Shared GPU worker wall time including data/evaluation/audit/I/O; excluding crypto subtracts wall spans, not summed operations; not crypto-disabled retraining or isolated speed comparison"
+  },
+  "no_automatic_retry_partial": true
+}
