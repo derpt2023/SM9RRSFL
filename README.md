@@ -27,7 +27,9 @@ python3 watch_cifar_experiment.py --output outputs/cifar_h84_formal150_v1 --json
 
 动态显示包含总进度条、完成/失败项数、各卡任务与轮数、当前Acc/ASR、用时及基于已观察速度的ETA。非TTY按间隔输出日志。训练与显示分离，断开显示不影响worker。完成后自动审计来源、每次攻击、Ours机制、TAD决策及攻击前配对，生成`analysis/formal_results.json`；若主入口在训练全部完成后异常退出，可用`--finish`仅恢复派生报告。`--summary`生成当前未审计汇总，不把完成项数当作健康通过。
 
-本地新入口和显示已通过CPU/调度测试，CIFAR数据身份已核对。初次准备时SSH端口拒绝连接，用户更新认证后已恢复；正式启动前仍须Git同步、远端测试与`--ready`。计划检查不代表180项已启动。
+2026-10-28 11:47北京时间，正式批次已在AI Station启动，冻结科学提交`409d1eb`、89项源码配置已与Git提交树逐项核对，两端25项测试和远端`--ready`通过。原数据/软件/native环境一致；初始实际三卡并发，空余卡动态加入，仍以实时状态为准。
+
+第四项`VERT_iid_clean_s2026102801`在GPU6复查空闲17287MiB后派发，数秒后发生OOM：错误记录显示另一进程占21.89GiB，尚未完成第1训练轮。控制器停止新派发并排空已有任务，失败不是算法健康或性能结论。独立`recover_cifar_h84_initial_oom.py`仅允许这一个经审查的round0 VERT OOM恢复：默认只读核验，`--apply --failure-sha256 <已核错误SHA>`须原控制器完全收尾，完整封存失败目录和日志后才允许同配置同seed fresh尝试一次；partial、其他错误、训练后期失败和再次失败均不自动重试。`--continue`接续原180项manifest，对本批隔离实际发生显存突增的GPU UUID，其余七张卡仍动态调度、每卡一项，其他准入及科学参数不变。恢复控制器的SHA和设备隔离独立记录，不修改89项冻结执行来源。最终另生成`analysis/recovery_final_audit.json`保留原失败成本、180科学单元/181执行尝试、同初始化核验；不得只展示成功尝试而隐藏OOM。
 
 ## CP1的IID失效诊断与独立CUDA开发（2026-10-27）
 
