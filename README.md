@@ -1,3 +1,22 @@
+## VERT 原文核心：验证完成，固定参数补跑原三 seed（2026-10-29）
+
+独立验证 `outputs/cifar_vert_paper_validation150_v1/analysis/paper_validation_results.json` 已完成30项150轮、3000轮实际VERT选择/权重、24组前缀及r24模型配对、8个FedAvg攻击门槛审计。报告SHA256：`23e23a137f4622b867e4841958c0b961425ce10fc739dbf7d3cacb4b1271417a`。只用训练衍生7500验证图，seed2026102901；此前已见官方test的后续开发如实披露。这是单seed描述性验证，不能直接当成原三seed正式test结果或统计显著性结论。
+
+末10轮、八攻击场景等权均值：PaperVERT Acc48.967% / ASR48.9883%；CurrentVERT39.619% / 93.86%；FedAvg41.7512% / 93.4767%。预注册全部条件通过，固定原文核心Adam.01，不启动后备学习率搜索。改善主要来自IID：四攻击Acc57.4407% / ASR7.9967%；Dirichlet四攻击40.4933% / 89.98%，其中40/60/80%攻击ASR仍98.8533/95.4667/94.64%，不得概括为每场景都优于FedAvg。
+
+用户已确认继续原seed2026102801/02/03×IID/Dirichlet(.5)×0/20/40/60/80%，30项VERT各150轮。新增独立入口/调度/审计/配置/测试，冻结原100来源，新105来源；只采用验证选定的dense256、raw A/B、每轮新投影器和预测器、history10、5epoch、Adam.01、Kmeans2及私有随机参与者顺序。公共模型、训练、攻击、数据划分、数值策略及原其他五法150项保持；这不是完整作者基准逐位复现。正式Acc为官方10000图，ASR为官方source5的1000图到target7，不再按正式成绩改参、换seed或控制名次。
+
+```bash
+python3 run_cifar_vert_paper_formal.py --ready
+python3 run_cifar_vert_paper_formal.py --batch --max-gpus 6
+# 只读状态；不得因历史PID或部分完成重复启动
+python3 run_cifar_vert_paper_formal.py --summary
+```
+
+新输出 `outputs/cifar_h84_formal_vert_paper150_v1`。准入仍空闲8192MiB连续两次间隔5秒并锁内复核，利用率仅记录，一卡一项，隔离原GPU3和GPU6，最多六卡。TERM/INT停新派发并排空；任何新失败保留，不能自动重试partial或套用旧OOM恢复。每轮指标及审计完整，checkpoint仅r0/r24/末轮。
+
+训练完自动核30新身份/初始化/数据/软件、4500实际选择与聚合权重、实际攻击target views/SGD及覆盖、24前缀配对，再将新30VERT与原150合并，重算所有健康/原始排名/严格标准及Krum独立例外。产物为 `analysis/supplement_results.json`、`analysis/combined_results.json`、`export/combined_bundle.json`。主进程活着且panel_terminal时可能CPU审计，禁止重启；只有全worker终态且主入口异常退出，才能`--finish`修复派生报告而不重训。新图每seed单独、MNIST配色、不展示旧Top20；缺项不可用旧VERT补齐。原科学raw/analysis/export保留，最终交付再归档旧derived并切当前报告入口。耗时是实测总墙钟减四个不重叠crypto区间，不能作为共享环境下的独占速度证据。
+
 ## VERT 论文配置优先验证（2026-10-29，独立开发中）
 
 用户要求优先复用原文配置；若验证集明显提升，固定该配置再补原三个seed正式对比，否则才另行有界调参。新入口 `run_cifar_vert_paper_validation.py` 仅使用训练拆分的7500验证图（source5共750），独立开发seed2026102901，训练40000/攻击辅助2500、公共CNN/E1/lr.05/.99/150轮/V2攻击全部保持。已见旧官方test成绩的后续开发如实披露；不以test成绩或第二/第三名选参，不覆盖当前已交付六法报告。
