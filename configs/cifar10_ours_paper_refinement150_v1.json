@@ -1,0 +1,108 @@
+{
+  "protocol": "cifar10_ours_paper_refinement150_v1",
+  "rounds": 150,
+  "seeds": [
+    2026102801,
+    2026102802,
+    2026102803
+  ],
+  "evaluation_scope": "training_validation_7500",
+  "output_dir": "outputs/cifar_ours_paper_refinement150_v1",
+  "candidates": {
+    "R2": {
+      "suspicion_recovery_factor": 2.0
+    },
+    "C125": {
+      "detector_clip_factor": 1.25
+    },
+    "R2C125": {
+      "suspicion_recovery_factor": 2.0,
+      "detector_clip_factor": 1.25
+    }
+  },
+  "reserve_candidates": {
+    "R4": {
+      "suspicion_recovery_factor": 4.0
+    },
+    "C150": {
+      "detector_clip_factor": 1.5
+    },
+    "R2C150": {
+      "suspicion_recovery_factor": 2.0,
+      "detector_clip_factor": 1.5
+    }
+  },
+  "selection_rule": {
+    "non_iid_tail_acc_drop_max": 0.01,
+    "non_iid_tail_asr_rise_max": 0.02,
+    "non_iid_attack_period_acc_drop_max": 0.01,
+    "non_iid_attack_period_asr_rise_max": 0.02,
+    "iid_tail_asr_rise_max": 0.02,
+    "iid_clean_acc_drop_max": 0.005,
+    "clean_acc_drop_vs_fedavg_max": 0.05,
+    "iid_mean_acc_gain_min": 0.005,
+    "iid_mean_gap_to_vert_goal": 0.01,
+    "iid_worst_gap_to_vert_goal": 0.02,
+    "all_seeds_and_scenarios": true,
+    "complete_observed_health_required": true,
+    "ranking_target": null,
+    "selection_metric": "maximum IID tail10 mean accuracy subject to all guardrails",
+    "tie_break": "minimum worst Non-IID tail ASR rise, then candidate name",
+    "interpretation": "Empirical paired validation guardrails, not a statistical guarantee or significance test"
+  },
+  "paper_contract": {
+    "fifth_sha256": "7902b5ab2817f826ed635eaaaefd9461211d8775ee4def3a1de2816aecd17318",
+    "sixth_sha256": "002fbb514b2eb414ade2bdd4ce27d39c0c979e97344937143e6494487c100ace",
+    "section": "4.3.3 steps 3 and 4; identical core in fifth and sixth manuscripts",
+    "free_parameters": [
+      "r_omega > 1: recovery factor",
+      "c_n: norm clipping multiplier"
+    ],
+    "immutable_mechanisms": [
+      "suspicious update isolated in same round",
+      "frozen clean reference and norm bound",
+      "bounded trusted-history admission and drift",
+      "recovery eligibility and confirmation",
+      "reliability <= 1",
+      "absolute coefficient cap",
+      "no renormalization after clipping/capping",
+      "valid threshold certificate before permanent revocation",
+      "SM9 protocol unchanged"
+    ],
+    "protocol_difference": "Accepted 150-round V2 attack, split and seeds retained by user request; not the draft 100-round experimental schedule"
+  },
+  "accepted_baseline_sha256": "2fd0d9cdad96b9cfacb6ed69da0b482dce4bfab537c118e03b9111810714f1a1",
+  "process_environment": {
+    "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python",
+    "OMP_NUM_THREADS": "2",
+    "OPENBLAS_NUM_THREADS": "2",
+    "MKL_NUM_THREADS": "2"
+  },
+  "quarantine_gpu_uuids": [
+    "GPU-430587b5-b622-2d06-0bb1-0a2e4e4b4c7c",
+    "GPU-5d9f949a-f126-67b3-5c96-af785e33aa5c"
+  ],
+  "automatic_retry": false,
+  "maximum_candidate_count": 6,
+  "automatic_search_expansion": false,
+  "gpu_admission": {
+    "min_free_mb": 8192,
+    "max_utilization": 100,
+    "consecutive_samples": 2,
+    "sample_interval_seconds": 5,
+    "maximum_wait_seconds": 86400
+  },
+  "max_gpus": 6,
+  "checkpoint_rounds": [
+    0,
+    24,
+    150
+  ],
+  "limitations": [
+    "Prior official-test results and these seeds were seen; subsequent development is explicitly disclosed.",
+    "Validation set was used in previous development; it is not an untouched confirmatory holdout.",
+    "Same global Ours configuration for every seed and distribution; no label/oracle input into defense.",
+    "No guarantee of Non-IID preservation; require paired empirical guardrails before final evaluation.",
+    "Accepted cifar-paper snapshot is never replaced by this development output."
+  ]
+}

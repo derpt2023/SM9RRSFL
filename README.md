@@ -1,3 +1,22 @@
+## 已接受快照与独立 Ours 论文参数验证（2026-10-29）
+
+用户确认保留当前六方法数据，已下载为 `outputs/cifar-paper/`。入口 `outputs/cifar-paper/report/report.html`；`accepted_snapshot.json` 标记用户接受并记录逐文件SHA/远端来源，`download_verification.json` 核验3484文件、4788168621字节，当前180科学单元与原文核心VERT导出SHA `2fd0d9cdad96b9cfacb6ed69da0b482dce4bfab537c118e03b9111810714f1a1`保持。原始结果、逐轮指标、模型锚点、审计与105源码快照已保留；211个完整训练断点共167142587720字节超过本机剩余空间，仅保留在AI Station，准确路径和大小列入清单，不能将本地快照称为完整断点备份。新图没有旧Top20记录；历史科学原件仅在raw中溯源。用户接受不等于原比较标准全部通过，后续开发不覆盖此快照。
+
+用户进一步授权在AI Station提升Ours的IID精度并保持Non-IID表现，强调尊重原论文。已只读核第五版（SHA7902b5ab2817f826ed635eaaaefd9461211d8775ee4def3a1de2816aecd17318）和第六版（SHA002fbb514b2eb414ade2bdd4ce27d39c0c979e97344937143e6494487c100ace）第4.3.3节，两版核心相同。新研究仅调整既有公式中的恢复因子rω与范数裁剪倍数cn；同轮隔离、固定参照/范数上界、可信历史与漂移、恢复资格/确认、可靠度上界1、绝对系数上限、裁剪后不归一化、证书撤销和SM9代码保持不变。裁剪参数也会影响历史准入/恢复资格，不能称纯聚合单因素。沿用已接受的150轮/V2攻击/40000训练＋2500辅助和公共CNN；这与文稿旧100轮及旧选参安排不同，明确披露，不声称实验协议逐字复现。
+
+独立入口 `run_cifar_ours_paper_refinement.py`、配置 `configs/cifar10_ours_paper_refinement150_v1.json`、输出 `outputs/cifar_ours_paper_refinement150_v1`。首批为原seed2026102801/02/03×IID/Dirichlet(.5)×0/20/40/60/80%×6臂=180项、各150轮：H84、FedAvg、原文核心VERT、R2（恢复1.25→2）、C125（裁剪1→1.25）、R2C125（组合）。只有训练衍生7500验证图/source5的750图参与选择，官方test不参与；原测试成绩与seed已见、验证集此前用于开发的事实保留，不称独立未见holdout。所有seed与场景使用同一全局候选参数，不按名次、比例或分布挑参数，不删除失败。
+
+预先固定经验约束：全部180完整finite、逐seed前缀/r24配对、24 FedAvg攻击门槛与执行审计；候选及配对H84全场景健康；每个Non-IID场景/seed尾10 Acc下降≤1pp、ASR上升≤2pp，攻击期均值同样限制；IID尾10ASR上升≤2pp，clean Acc下降≤0.5pp，候选各clean距FedAvg≤5pp。IID五比例×3seed等权平均Acc至少提升0.5pp才合格；合格者取IID均值最高，其后Non-IID最坏ASR增量最小、名称序。接近VERT的目标为平均差≤1pp且最坏场景差≤2pp；这些是经验约束，不是统计显著性或跨运行保证。只有完整验证后固定候选，再另建同3seed的30项正式Ours输出；正式成绩不回流调参。若首批无合格候选，先分析实际机制，最多另建预声明R4/C150/R2C150三个候选（最多90项），不无限扩展、不自动重试。本批没有自动启动后续正式或后备搜索。
+
+训练与CUDA就绪检查硬限制AI Station `/3251901002/SM9RRSFL`，本机仅协议测试、归档与绘图。共享GPU准入仍8192MiB、两次间隔5秒、锁内复查、利用率仅记录，每卡一项最多6，持续隔离GPU3/GPU6旧不稳定UUID。TERM/INT停派发并排空；partial/错误保留、无自动重试。每轮指标与实际系数完整，checkpoint仅r0/r24/r150；旧105科学来源不改，新110来源。无新正式结果时不得声称优化已达标。
+
+```bash
+python run_cifar_ours_paper_refinement.py --ready
+python run_cifar_ours_paper_refinement.py --batch --max-gpus 6
+```
+
+入口结束自动生成 `analysis/refinement_results.json` 与执行审计；先读实时controller状态和进程，`panel_terminal`且主进程存在可能仍CPU审计，禁止重复启动。只在全部训练终态且主进程异常退出时使用`--finish`恢复派生审计，不重训。所有训练、下载、候选决策和后续正式结果需在实际交接记录中更新。
+
 ## 当前六法最终结果：原文核心 VERT 三 seed 补跑完成（2026-10-29）
 
 原 seed 2026102801/02/03 × IID/Dirichlet(.5) × 0/20/40/60/80%，30项新版VERT全部完成150轮及最终审计；本批30次执行、0次失败、0次重试。北京时间16:39:11启动，19:32:57训练终态，主入口自动审计后正常退出。当前六法报告已全部替换这30项VERT，原其他五法150项成绩和轨迹逐值不变；没有根据正式test成绩继续调参、换seed或择优替换。
