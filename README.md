@@ -1,3 +1,9 @@
+## VERT K-means：逐 seed 图表与当前六法报告
+
+补跑完整审计后执行 `python3 render_cifar_vert_kmeans.py --expected-sha256 <export/combined_bundle.json的SHA>`。新入口核30项新VERT身份、其余150项值不变、180条完整曲线、三seed均值/样本SD、原严格及Krum例外排名重算。要求完整补跑及独立恢复审计，不用旧VERT补缺失项。
+
+每个seed分别输出 `tail10_s<seed>`、`trajectories_iid_s<seed>`、`trajectories_dirichlet_s<seed>`、`timing_s<seed>` 四组PNG/SVG，三个seed共12组。颜色与MNIST相同：Ours浅蓝、VERT粉红、AlignIns青、Krum黄绿、TAD橙、FedAvg棕；线型辅助区分。新图只绘K-means版VERT，没有旧Top20曲线、原始数值或附图。HTML保留所有六法、失败seed、尾10/最终轮/全攻击期/峰值和含/扣密码学成本，并公开事后修订与剩余实现适配边界。原科学目录只归档，不从中择优展示。
+
 ## VERT K-means 补跑：一次已审查的初始化显存故障恢复（2026-10-29）
 
 `VERT_dirichlet_r20_s2026102801` 首次在物理 GPU3 运行，派发锁内复查空闲16634MiB；约4秒后初始Accuracy前向OOM，另一进程占22.56GiB。没有完成round0、没有训练轮/模型检查点/成绩。first_failure SHA为`12198451a193669bf80e72d4449377dc2e48c1e8c7cb58779d3076026256b2d1`。原队列自动停止派发、自然排空其他6项，失败不计作算法健康失败。
