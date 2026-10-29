@@ -1,3 +1,22 @@
+## VERT 论文配置优先验证（2026-10-29，独立开发中）
+
+用户要求优先复用原文配置；若验证集明显提升，固定该配置再补原三个seed正式对比，否则才另行有界调参。新入口 `run_cifar_vert_paper_validation.py` 仅使用训练拆分的7500验证图（source5共750），独立开发seed2026102901，训练40000/攻击辅助2500、公共CNN/E1/lr.05/.99/150轮/V2攻击全部保持。已见旧官方test成绩的后续开发如实披露；不以test成绩或第二/第三名选参，不覆盖当前已交付六法报告。
+
+已核论文VI-A/VI-C3及作者 `mylab426/VERT@cc71a9dff95085219cdc2d6c033c10c13ed3e6e7` 的 defenses.py、utils/utils.py、models/ProjectHead.py、main-single.py、conf.json。论文主比较为Top-k；本研究沿用户要求采用作者未知比例K-means K=2分支。当前适配版与原核心的差异包括signed-hash投影、投影后系数、固定投影器、预测器lr.001和固定字典序处理。新独立 `cifar_vert_paper_core.py` 恢复稠密线性投影、原梯度空间A/B、每轮新投影器/预测器/全1系数、共享预测器按随机参与者顺序逐个训练即评分，以及history10/5epoch/Adam.01/256维/三Linear两ReLU。作者CIFAR模型62006参数，本项目公共CNN1687818参数；输入维度适配当前模型，不能称完整论文基准逐位复现。随机初始化/参与者顺序使用私有seed以保持共同训练RNG；历史转移批处理经作者逐条L2求和+三个Adam优化器数值对照测试。
+
+先运行独立12轮资源探针（seed2026102990，仅资源/正确性，不作性能选参）；再运行三个固定臂 CurrentVERT/PaperVERT/FedAvg × IID/Dir(.5) × 0/20/40/60/80%，共30项/4500轮。所有项完整保留，不按早期成绩剪枝。预先锁定“明显提升”：全30完整有限、全部clean/attack前缀/r24配对和八FedAvg攻击门槛通过；PaperVERT两clean精度距FedAvg≤5pp；八攻击场景等权平均Acc≥FedAvg且较CurrentVERT下降≤1pp；平均ASR较FedAvg和CurrentVERT各降低≥5pp。该规则不是显著性检验，也不规定排名。失败时停止扩展并读诊断，不自动反复试至满意。
+
+```bash
+python3 run_cifar_vert_paper_validation.py --config configs/cifar10_vert_paper_resource_probe12_v1.json --ready
+python3 run_cifar_vert_paper_validation.py --config configs/cifar10_vert_paper_resource_probe12_v1.json --batch --max-gpus 1
+python3 run_cifar_vert_paper_validation.py --ready
+python3 run_cifar_vert_paper_validation.py --batch --max-gpus 6
+```
+
+输出分别 `outputs/cifar_vert_paper_resource_probe12_v1`、`outputs/cifar_vert_paper_validation150_v1`；最终验证审计 `analysis/paper_validation_results.json`。每轮实际分数/聚类/选择和实际聚合权重独立记录，核7500验证身份、实际攻击target views/覆盖、初始化与配对；不读取官方test指标来选参。所有臂仅在r0/r24/末轮写完整checkpoint，逐轮分类/选择/状态全部保留；partial不自动恢复。共享GPU准入仍8GiB连续两次5秒+锁内复核、利用率仅记录、一卡一项，隔离既有GPU3/GPU6，最多六卡。TERM/INT停派发并排空，不杀其他任务；资源错误保留，不自动重试。原95冻结源码和旧科学输出不改。
+
+---
+
 ## 当前六法结果：VERT K-means 30项补跑与逐seed图已完成（2026-10-29）
 
 原seed2026102801/02/03 × IID/Dirichlet(.5) × 0/20/40/60/80%，30项VERT均完成150轮、数值有限并通过原单元健康和六组clean效用检查。北京时间11:07:39启动、13:07:46训练结束；自动审计完成，没有追加训练或根据成绩选版本。当前六法报告已统一替换全部30项VERT，其余五法150项成绩和轨迹逐值不变。

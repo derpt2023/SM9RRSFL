@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "phase": "resource_probe",
+  "parent_config": "configs/cifar10_h84_full_validation150_v1.json",
+  "parent_config_sha256": "33fa75eb3ec6fbf5a0d58ee5389d55459469c5bbc31778326e9145581d9a50e4",
+  "rounds": 12,
+  "seed": 2026102990,
+  "output_dir": "outputs/cifar_vert_paper_resource_probe12_v1",
+  "evaluation_scope": "training_validation_7500",
+  "selection_rule": {
+    "clean_accuracy_drop_limit": 0.05,
+    "mean_attack_accuracy_vs_fedavg_min": 0.0,
+    "mean_attack_asr_improvement_vs_fedavg_min": 0.05,
+    "mean_attack_asr_improvement_vs_current_min": 0.05,
+    "mean_attack_accuracy_vs_current_min": -0.01,
+    "all_cells_complete_finite": true,
+    "all_pairs_equal": true,
+    "all_fedavg_attack_gates": true,
+    "ranking_target": null,
+    "scope": "validation_only; clear improvement is a descriptive selection rule, not significance"
+  },
+  "quarantine_gpu_uuids": [
+    "GPU-430587b5-b622-2d06-0bb1-0a2e4e4b4c7c",
+    "GPU-5d9f949a-f126-67b3-5c96-af785e33aa5c"
+  ],
+  "gpu_admission": {
+    "min_free_mb": 8192,
+    "max_utilization": 100,
+    "consecutive_samples": 2,
+    "sample_interval_seconds": 5,
+    "maximum_wait_seconds": 86400
+  },
+  "source_reference": {
+    "repository": "mylab426/VERT",
+    "commit": "cc71a9dff95085219cdc2d6c033c10c13ed3e6e7",
+    "doi": "10.1109/TDSC.2025.3630175"
+  },
+  "user_amendment": "2026-10-29 paper parameters first; clear validation improvement then same-three-seed formal supplement; otherwise separately reviewed small validation search",
+  "limitations": [
+    "Common model/training/attack remain the project protocol, not a full original-paper benchmark replication.",
+    "Prior official test scores were seen; this subsequent development uses only the training-derived validation7500.",
+    "No selection by formal-test scores, desired ranking, seed replacement, or per-scenario parameter choices.",
+    "Shared GPUs; timing is not evidence of exclusive algorithm speed."
+  ],
+  "checkpoint_persistence": [
+    0,
+    24,
+    12
+  ],
+  "automatic_retry": false,
+  "automatic_search_expansion": false
+}
