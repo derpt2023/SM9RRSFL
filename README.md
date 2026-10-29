@@ -1,3 +1,11 @@
+## VERT K-means 补跑：一次已审查的初始化显存故障恢复（2026-10-29）
+
+`VERT_dirichlet_r20_s2026102801` 首次在物理 GPU3 运行，派发锁内复查空闲16634MiB；约4秒后初始Accuracy前向OOM，另一进程占22.56GiB。没有完成round0、没有训练轮/模型检查点/成绩。first_failure SHA为`12198451a193669bf80e72d4449377dc2e48c1e8c7cb58779d3076026256b2d1`。原队列自动停止派发、自然排空其他6项，失败不计作算法健康失败。
+
+独立 `recover_vert_kmeans_pre_eval_oom.py` 默认只读，只允许上述已审SHA、task和未完成初始评估的确切故障；拒绝partial/其他失败/重复恢复。`--apply --failure-sha256 <上述SHA>` 在旧worker全部结束后完整封存失败目录及日志，`--continue` 仅一次同seed/config fresh接续。95项冻结源/manifest不改；隔离GPU3及原GPU6，其余6卡动态，每卡一项、8GiB连续两次准入不变。没有自动重试循环，不杀其他任务、不降batch或改数值策略。
+
+补跑最多31次尝试对应30科学单元。最终 `analysis/recovery_final_audit.json` 独立绑定合并报告SHA，核身份/数据/目标相同、新模型与原正式同seed初始化匹配，并披露失败额外成本2.178092秒。失败发生时没有保存初始模型，因此不声称失败attempt模型已逐位核验；失败证据永久保留。
+
 ## VERT K-means 同种子补跑（2026-10-29）
 
 用户在原180项正式结果后明确要求把VERT改为K-means，其他条件保持一致。独立入口 `run_cifar_vert_kmeans_supplement.py` 使用 `configs/cifar10_vert_kmeans_supplement150_v1.json`，只补跑VERT：seed2026102801/02/03 × IID/Dirichlet(.5) × 0/20/40/60/80%，共30项×150轮。原其余五法150项完整复用；不依据新成绩选择是否替换，30项全部完成审计后统一替换当前对比里的VERT。
