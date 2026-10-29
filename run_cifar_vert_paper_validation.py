@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 import pickle
 import sys
@@ -17,6 +18,8 @@ OWN = ('run_cifar_vert_paper_validation.py', 'cifar_vert_paper_core.py',
 QUARANTINE = ('GPU-430587b5-b622-2d06-0bb1-0a2e4e4b4c7c',
               'GPU-5d9f949a-f126-67b3-5c96-af785e33aa5c')
 ARMS = {'FedAvg': ('fedavg', None), 'CurrentVERT': ('vert', .001), 'PaperVERT': ('vert', .01)}
+PROCESS_ENV = dict(PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION='python', OMP_NUM_THREADS='2',
+                   OPENBLAS_NUM_THREADS='2', MKL_NUM_THREADS='2')
 RULE = dict(clean_accuracy_drop_limit=.05, mean_attack_accuracy_vs_fedavg_min=0.,
             mean_attack_asr_improvement_vs_fedavg_min=.05,
             mean_attack_asr_improvement_vs_current_min=.05,
@@ -38,6 +41,8 @@ def plan(config=DEFAULT):
         raise ValueError('Frozen common experiment parameters changed')
     if p['selection_rule'] != RULE or p['quarantine_gpu_uuids'] != list(QUARANTINE):
         raise ValueError('Predeclared selection/resource rules changed')
+    if p['process_environment'] != PROCESS_ENV:
+        raise ValueError('Process-local dependency compatibility environment differs')
     probe = p['phase'] == 'resource_probe'
     if p['phase'] not in ('resource_probe', 'paper_first_validation'):
         raise ValueError('No implicit additional search or formal evaluation')
@@ -191,6 +196,7 @@ def runtime_environment():
     import numpy
     return dict(python=sys.version, torch=str(torch.__version__), cuda=torch.version.cuda,
                 cudnn=torch.backends.cudnn.version(), numpy=numpy.__version__,
+                process_environment={k:os.environ.get(k) for k in PROCESS_ENV},
                 gpu=torch.cuda.get_device_name(0),
                 native_binary_sha256={str(f.relative_to(ROOT)):sha(f) for f in (ROOT/'sm9rrsfl').glob('_native_*.so')})
 
@@ -202,7 +208,12 @@ def main():
     group=parser.add_mutually_exclusive_group()
     for flag in ('batch','ready','summary','finish'):group.add_argument('--'+flag,action='store_true')
     group.add_argument('--task')
-    args=parser.parse_args();p,specs,m=plan(args.config);out=ROOT/p['output_dir']
+    args=parser.parse_args()
+    # Set before Torch/ONNX/Protobuf imports. Avoid changing system installations.
+    declared=read(args.config)['process_environment']
+    if declared!=PROCESS_ENV:raise ValueError('Unexpected process environment')
+    os.environ.update(declared)
+    p,specs,m=plan(args.config);out=ROOT/p['output_dir']
     if args.task:
         if read(out/'manifest.json')!=m:raise ValueError('Frozen study manifest required')
         from run_cifar_vert_kmeans_supplement import check_selector_environment

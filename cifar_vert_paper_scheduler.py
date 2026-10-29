@@ -204,6 +204,7 @@ def run(config, p, specs, manifest, out, max_gpus=8):
                             log.parent.mkdir(exist_ok=True)
                             env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu['uuid'],
                                        CUBLAS_WORKSPACE_CONFIG=p['numerics']['cublas_workspace_config'])
+                            env.update(p.get('process_environment', {}))
                             with log.open('a') as stream:
                                 child = subprocess.Popen([sys.executable, '-u', str(base.ROOT / policy['worker']),
                                                           '--config', str(Path(config).resolve()), '--task', name],

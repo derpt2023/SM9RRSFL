@@ -48,5 +48,11 @@
     150
   ],
   "automatic_retry": false,
-  "automatic_search_expansion": false
+  "automatic_search_expansion": false,
+  "process_environment": {
+    "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python",
+    "OMP_NUM_THREADS": "2",
+    "OPENBLAS_NUM_THREADS": "2",
+    "MKL_NUM_THREADS": "2"
+  }
 }

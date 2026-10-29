@@ -13,6 +13,8 @@ python3 run_cifar_vert_paper_validation.py --ready
 python3 run_cifar_vert_paper_validation.py --batch --max-gpus 6
 ```
 
+远端原生PyTorch Adam连带导入旧ONNX时触发Protobuf描述符兼容错误，发生在单元测试阶段，尚未训练。新入口进程内固定 `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`，并固定OMP/OpenBLAS/MKL线程2；不安装、卸载或降级共享依赖，不改变Adam公式。环境进入配置、启动和worker锁校验，三臂使用相同进程设置。兼容设置下两端27测试通过。
+
 输出分别 `outputs/cifar_vert_paper_resource_probe12_v1`、`outputs/cifar_vert_paper_validation150_v1`；最终验证审计 `analysis/paper_validation_results.json`。每轮实际分数/聚类/选择和实际聚合权重独立记录，核7500验证身份、实际攻击target views/覆盖、初始化与配对；不读取官方test指标来选参。所有臂仅在r0/r24/末轮写完整checkpoint，逐轮分类/选择/状态全部保留；partial不自动恢复。共享GPU准入仍8GiB连续两次5秒+锁内复核、利用率仅记录、一卡一项，隔离既有GPU3/GPU6，最多六卡。TERM/INT停派发并排空，不杀其他任务；资源错误保留，不自动重试。原95冻结源码和旧科学输出不改。
 
 ---
