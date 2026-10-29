@@ -1,4 +1,68 @@
-## 原文核心VERT正式报告工具（2026-10-29，训练进行中）
+## 当前六法最终结果：原文核心 VERT 三 seed 补跑完成（2026-10-29）
+
+原 seed 2026102801/02/03 × IID/Dirichlet(.5) × 0/20/40/60/80%，30项新版VERT全部完成150轮及最终审计；本批30次执行、0次失败、0次重试。北京时间16:39:11启动，19:32:57训练终态，主入口自动审计后正常退出。当前六法报告已全部替换这30项VERT，原其他五法150项成绩和轨迹逐值不变；没有根据正式test成绩继续调参、换seed或择优替换。
+
+[当前完整六法报告](outputs/cifar_h84_formal150_v1/report/report.html)包含180项原值、60组跨seed均值/样本SD及实际n、尾10/最终轮/全攻击期/峰值、健康失败与全部原始排名、原严格及既有Krum IID clean效用独立例外。每seed四组图（尾10、IID全程、Dirichlet全程、含/扣crypto耗时），共12 PNG＋12 SVG，已逐张目视核验，使用MNIST固定颜色。尾10主图：[seed2026102801](outputs/cifar_h84_formal150_v1/report/tail10_s2026102801.png)、[seed2026102802](outputs/cifar_h84_formal150_v1/report/tail10_s2026102802.png)、[seed2026102803](outputs/cifar_h84_formal150_v1/report/tail10_s2026102803.png)。新图没有旧Top20曲线、数值或附图。
+
+六法攻击总览：先对每seed的八个攻击场景等权平均，再计算三seed均值±样本SD，n=3；单位%，尾10为141..150轮。所有健康失败结果仍纳入原始总览，不等于健康资格筛选后的排名或统计显著性结论。
+
+| 方法 | Accuracy | ASR |
+|---|---:|---:|
+| Ours (H84) | 54.571±0.453 | 8.563±0.999 |
+| TAD | 49.334±0.751 | 50.798±1.760 |
+| VERT (paper core + K-means) | 49.236±0.554 | 47.321±3.045 |
+| AlignIns | 43.619±0.639 | 78.788±0.657 |
+| Krum | 37.125±0.839 | 12.298±4.637 |
+| FedAvg | 42.188±0.853 | 91.604±1.619 |
+
+新版VERT比FedAvg平均Accuracy高7.048个百分点、ASR低44.283个百分点。改善主要集中在IID：四攻击场景跨seed平均Accuracy57.609%、ASR7.636%；Dirichlet为40.864%/87.006%，仍存在明显防御失败，不能概括为各场景均优于FedAvg。按全部八攻击场景均值，新VERT的Accuracy和ASR均列六法第三，但该观察不是调参目标，不能取代逐场景、健康和方差分析。
+
+新版VERT逐场景尾10结果（三seed均值±样本SD，n=3，单位%）：
+
+| 分布 | 恶意比例 | Accuracy | ASR |
+|---|---:|---:|---:|
+| IID | 0% | 60.093±0.868 | 7.223±0.471 |
+| IID | 20% | 59.753±0.659 | 7.027±0.197 |
+| IID | 40% | 59.021±1.024 | 7.687±0.065 |
+| IID | 60% | 57.554±0.625 | 7.740±0.501 |
+| IID | 80% | 54.106±0.552 | 8.090±0.660 |
+| Dirichlet(.5) | 0% | 58.139±1.303 | 8.480±0.325 |
+| Dirichlet(.5) | 20% | 48.101±6.009 | 63.527±28.993 |
+| Dirichlet(.5) | 40% | 36.247±3.396 | 97.190±1.914 |
+| Dirichlet(.5) | 60% | 39.473±1.889 | 94.447±2.054 |
+| Dirichlet(.5) | 80% | 39.633±1.727 | 92.860±1.623 |
+
+30项新版VERT和原30项H84均通过单元健康检查，六组VERT clean效用均通过；这不表示所有防御或比较标准通过。新版VERT成为更强的健康参照后，H84在原冻结描述性标准下重新计算如下，原始H84成绩没有改变：
+
+| seed | 原严格口径 | 既有Krum IID clean效用例外口径 |
+|---|---:|---:|
+| 2026102801 | 4/10 | 4/10 |
+| 2026102802 | 5/10 | 5/10 |
+| 2026102803 | 9/10 | 8/10 |
+| 合计 | 18/30 | 17/30 |
+
+13项原TAD单元健康失败、Krum的clean效用失败和全部比较失败仍完整保留。Krum IID的既有独立效用例外与原严格结果并列，不扩展为其他豁免；较低ASR伴随低Accuracy不能单独解释为有效防御。H84最初开发8/10、严格9/10及用户接受记录仍保留，不能把接受写成原标准全通过。
+
+本次固定参数依据独立seed2026102901的7500张训练衍生验证集预注册整体规则，验证30/30及全部规则通过后才补三seed官方test；没有执行后备学习率搜索。此前已见旧官方test的后续开发如实披露，不声称全流程未见测试。恢复的论文核心为dense256、原梯度空间A/B、每轮新projector/predictor、随机参与者顺序、history10、5epoch、Adam.01；筛选采用作者VI-C3未知比例K-means(K=2)分支，论文VI-A主比较仍为Top-κ。公共CNN/本地训练/V2定向攻击保持当前六法一致，仍不同于作者原模型与基准，不能称完整作者基准逐位复现。
+
+科学提交`8788f102f740f67402659bee7bf998a958832337`的105项冻结源与Git树一致；2178份合并输入及274份验证来源逐SHA核验。新VERT4500轮实际选择与真实聚合权重、151200次实际攻击target views/SGD/恶意覆盖、30项初始化和24组攻击前前缀/r24模型配对全部通过。两轮预热外K-means实际选择数14–96，没有固定Top20。合并782593次攻击调用和原其余方法审计保留；执行审计逐项核30次启动/成功退出和共享GPU准入，没有新失败或恢复。
+
+本次VERT累计任务墙钟55071.145秒（15.298小时），并行批次从启动至训练终态10426.491秒（约2小时53分46秒）。H84原累计总墙钟39024.610秒，四个不重叠crypto区间20662.371秒，扣除后18362.239秒。耗时包含加载、评估、观测、审计和I/O；不是关闭密码学重跑，不减并行sign/verify累计时间，不能把共享GPU/CPU耗时当独占算法速度。原H84初始化OOM的5.421214秒和旧K-means初始化OOM的2.178092秒分别保留在历史恢复记录，并非本批失败。
+
+完整新导出SHA：`2fd0d9cdad96b9cfacb6ed69da0b482dce4bfab537c118e03b9111810714f1a1`；合并报告SHA：`6586dd3811fff32f32a577aec6814c0127ac047f0e511e494a2d557f95e46d7d`；执行审计SHA：`ed7b2322191d7221efa26d24b4345826deb3ad718a57693f6e99152842f01bc5`。原验证SHA：`23e23a137f4622b867e4841958c0b961425ce10fc739dbf7d3cacb4b1271417a`。
+
+本地及AI Station当前报告完全一致，旧K-means的29个派生文件完整归档到`outputs/cifar_h84_formal150_v1/derived_report_archive/kmeans_20261029_before_paper/report`，早期Top20归档也保留。新report30个文件的SHA、归档和原始输入保护记录在`outputs/cifar_h84_formal_vert_paper150_v1/analysis/current_report_publication.json`；12图目视记录在`report/visual_qa.json`。原H84科学报告SHA仍`9234dd5e992382023a8c3cc61d5504d420f9b0c80717541723aa657384f40fc9`、导出仍`0ffacdf5ff65e2d09ebcc0aa62fef387df9be604ba476bb4d821414243fd7190`；旧K-means科学raw/analysis/export不改。正式入口23测试及独立报告器6测试均两端通过。
+
+```bash
+# 已完成；仅复现派生图表时运行，输出到尚不存在的新目录，不重训
+python3 render_cifar_vert_paper.py --expected-sha256 2fd0d9cdad96b9cfacb6ed69da0b482dce4bfab537c118e03b9111810714f1a1 --output outputs/cifar_h84_formal_vert_paper150_v1/report_reproduction
+```
+
+以下保留历史实现、验证和启动记录；其中“当前”“运行中”等表述仅描述当时状态，最新结论与入口以上述最终结果为准。
+
+---
+
+## 历史：原文核心VERT正式报告工具准备（2026-10-29）
 
 新增独立 `render_cifar_vert_paper.py` 适配105-source正式导出，不修改运行中的训练来源。要求完整30项新VERT、原其他150项值和轨迹不变、固定验证报告SHA及通过的预注册规则、4500实际选择/真实聚合审计、三seed全部排名和健康判定重算。拒绝旧Top20替补、正式后改参、缺失单元、改变其他方法或隐藏额外执行尝试。
 
@@ -25,7 +89,7 @@ python3 run_cifar_vert_paper_formal.py --summary
 
 训练完自动核30新身份/初始化/数据/软件、4500实际选择与聚合权重、实际攻击target views/SGD及覆盖、24前缀配对，再将新30VERT与原150合并，重算所有健康/原始排名/严格标准及Krum独立例外。产物为 `analysis/supplement_results.json`、`analysis/combined_results.json`、`export/combined_bundle.json`。主进程活着且panel_terminal时可能CPU审计，禁止重启；只有全worker终态且主入口异常退出，才能`--finish`修复派生报告而不重训。新图每seed单独、MNIST配色、不展示旧Top20；缺项不可用旧VERT补齐。原科学raw/analysis/export保留，最终交付再归档旧derived并切当前报告入口。耗时是实测总墙钟减四个不重叠crypto区间，不能作为共享环境下的独占速度证据。
 
-## VERT 论文配置优先验证（2026-10-29，独立开发中）
+## 历史：VERT论文配置优先验证方案（2026-10-29，已完成）
 
 用户要求优先复用原文配置；若验证集明显提升，固定该配置再补原三个seed正式对比，否则才另行有界调参。新入口 `run_cifar_vert_paper_validation.py` 仅使用训练拆分的7500验证图（source5共750），独立开发seed2026102901，训练40000/攻击辅助2500、公共CNN/E1/lr.05/.99/150轮/V2攻击全部保持。已见旧官方test成绩的后续开发如实披露；不以test成绩或第二/第三名选参，不覆盖当前已交付六法报告。
 
@@ -46,11 +110,11 @@ python3 run_cifar_vert_paper_validation.py --batch --max-gpus 6
 
 ---
 
-## 当前六法结果：VERT K-means 30项补跑与逐seed图已完成（2026-10-29）
+## 历史结果：VERT K-means 30项补跑与逐seed图已完成（2026-10-29）
 
 原seed2026102801/02/03 × IID/Dirichlet(.5) × 0/20/40/60/80%，30项VERT均完成150轮、数值有限并通过原单元健康和六组clean效用检查。北京时间11:07:39启动、13:07:46训练结束；自动审计完成，没有追加训练或根据成绩选版本。当前六法报告已统一替换全部30项VERT，其余五法150项成绩和轨迹逐值不变。
 
-[当前完整六法报告](outputs/cifar_h84_formal150_v1/report/report.html)包含180项原值、60组跨seed均值/样本SD及n、尾10/最终轮/全攻击期/峰值、原始排名/健康资格、原严格与既有Krum IID效用例外并列。每seed四组图（尾10、IID全程、Dirichlet全程、含/扣crypto耗时），共12 PNG＋12 SVG，均已逐张目视核验，颜色严格沿用MNIST。尾10主图：[seed2026102801](outputs/cifar_h84_formal150_v1/report/tail10_s2026102801.png)、[seed2026102802](outputs/cifar_h84_formal150_v1/report/tail10_s2026102802.png)、[seed2026102803](outputs/cifar_h84_formal150_v1/report/tail10_s2026102803.png)。**新图和当前对比中不保留旧Top20曲线、数值或附图。**
+[当前完整六法报告](outputs/cifar_h84_formal150_v1/derived_report_archive/kmeans_20261029_before_paper/report/report.html)包含180项原值、60组跨seed均值/样本SD及n、尾10/最终轮/全攻击期/峰值、原始排名/健康资格、原严格与既有Krum IID效用例外并列。每seed四组图（尾10、IID全程、Dirichlet全程、含/扣crypto耗时），共12 PNG＋12 SVG，均已逐张目视核验，颜色严格沿用MNIST。尾10主图：[seed2026102801](outputs/cifar_h84_formal150_v1/derived_report_archive/kmeans_20261029_before_paper/report/tail10_s2026102801.png)、[seed2026102802](outputs/cifar_h84_formal150_v1/derived_report_archive/kmeans_20261029_before_paper/report/tail10_s2026102802.png)、[seed2026102803](outputs/cifar_h84_formal150_v1/derived_report_archive/kmeans_20261029_before_paper/report/tail10_s2026102803.png)。**新图和当前对比中不保留旧Top20曲线、数值或附图。**
 
 六法攻击场景总览（先对每seed的八个攻击场景等权平均，再计算三seed均值±样本SD，n=3；单位%，尾10=141..150；所有失败结果均保留）：
 
