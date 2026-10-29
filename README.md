@@ -1,3 +1,11 @@
+## 原文核心VERT正式报告工具（2026-10-29，训练进行中）
+
+新增独立 `render_cifar_vert_paper.py` 适配105-source正式导出，不修改运行中的训练来源。要求完整30项新VERT、原其他150项值和轨迹不变、固定验证报告SHA及通过的预注册规则、4500实际选择/真实聚合审计、三seed全部排名和健康判定重算。拒绝旧Top20替补、正式后改参、缺失单元、改变其他方法或隐藏额外执行尝试。
+
+全部训练及自动CPU审计结束、主进程退出后，先在AI Station对实际导出SHA运行 `python3 render_cifar_vert_paper.py --expected-sha256 <实际SHA> --audit-execution`。该操作只读本批controller与scheduler事件并保存派生execution_audit，核30单元逐项仅一次启动/成功退出、GPU身份/准入、无本批失败或恢复；若有新失败或恢复，拒绝无失败结论，必须先另行审查，不重训或自动恢复。下载并校验新export和execution_audit后，本地 `python3 render_cifar_vert_paper.py --expected-sha256 <同一SHA>` 生成每seed四组共12PNG/SVG及完整HTML；可显式指定 `--source --parent --validation --execution-audit --output`。输出目录必须尚不存在，不能直接覆盖旧报告。
+
+新图只显示原文核心VERT及其余五法，MNIST配色、逐seed分开，含全部180原值/健康失败/六法原始排名/严格与Krum独立例外/跨seed均值样本SD/n/尾10、最终、攻击期和峰值/含扣crypto成本。旧科学原件保持，最终12图逐张目视之后才归档旧derived并切当前入口。此时训练仍进行，工具准备完成不代表正式结果或图表已经完成。
+
 ## VERT 原文核心：验证完成，固定参数补跑原三 seed（2026-10-29）
 
 独立验证 `outputs/cifar_vert_paper_validation150_v1/analysis/paper_validation_results.json` 已完成30项150轮、3000轮实际VERT选择/权重、24组前缀及r24模型配对、8个FedAvg攻击门槛审计。报告SHA256：`23e23a137f4622b867e4841958c0b961425ce10fc739dbf7d3cacb4b1271417a`。只用训练衍生7500验证图，seed2026102901；此前已见官方test的后续开发如实披露。这是单seed描述性验证，不能直接当成原三seed正式test结果或统计显著性结论。
