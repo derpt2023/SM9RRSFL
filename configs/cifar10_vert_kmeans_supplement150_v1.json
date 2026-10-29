@@ -1,0 +1,47 @@
+{
+  "protocol": "cifar10_vert_kmeans_supplement150_v1",
+  "parent_config": "configs/cifar10_h84_formal150_v1.json",
+  "output_dir": "outputs/cifar_h84_formal_vert_kmeans150_v1",
+  "seeds": [
+    2026102801,
+    2026102802,
+    2026102803
+  ],
+  "rounds": 150,
+  "selection_only": true,
+  "selector": {
+    "n_clusters": 2,
+    "random_state": 42,
+    "init": "k-means++",
+    "n_init": 10,
+    "max_iter": 300,
+    "tol": 0.0001,
+    "algorithm": "lloyd",
+    "copy_x": true
+  },
+  "quarantine_gpu_uuid": "GPU-5d9f949a-f126-67b3-5c96-af785e33aa5c",
+  "original_report_sha256": "9234dd5e992382023a8c3cc61d5504d420f9b0c80717541723aa657384f40fc9",
+  "original_export_sha256": "0ffacdf5ff65e2d09ebcc0aa62fef387df9be604ba476bb4d821414243fd7190",
+  "authorization": "2026-10-29 user requests K-means VERT, same3 seeds, all original conditions,150 rounds, replace VERT in six-method comparison; per-seed MNIST colors; no old Top20 in new figures.",
+  "review": {
+    "paper_doi": "10.1109/TDSC.2025.3630175",
+    "paper_sha256": "3c4d907049a35ab8efc231872cfbc5436b459073e51abf0f0ca3f661a5fa69d6",
+    "paper_section": "VI-C3, printed2756-2757; main comparison VI-A uses Top-k; K-means is unknown-poisoning-rate alternative",
+    "official_url": "https://github.com/mylab426/VERT/blob/cc71a9dff95085219cdc2d6c033c10c13ed3e6e7/defenses.py",
+    "official_source_sha256": "92faca5a3065a8899f976b320ac2cb3c9e79fd3541072a57186c6e85e150c164",
+    "official_lines": [
+      233,
+      247
+    ],
+    "implementation": "Enable author commented KMeans branch. Pin effective sklearn1.2.0 defaults; ascending cosine scores with zero second column; keep max-score cluster.",
+    "retained_adaptations": "Existing signed-hash256 projection/projected coefficients and histories,5 predictor epochs,Adam.001,all training/attack parameters unchanged. Selector correction, not full author-model reproduction."
+  },
+  "reporting": {
+    "old_top20_in_new_figures": false,
+    "per_seed": true,
+    "palette": "sm9rrsfl/visualization.py METHOD_COLORS",
+    "preserve_archived_original": true,
+    "posthoc_correction_disclosed": true,
+    "no_outcome_selection": true
+  }
+}

@@ -1,3 +1,22 @@
+## VERT K-means 同种子补跑（2026-10-29）
+
+用户在原180项正式结果后明确要求把VERT改为K-means，其他条件保持一致。独立入口 `run_cifar_vert_kmeans_supplement.py` 使用 `configs/cifar10_vert_kmeans_supplement150_v1.json`，只补跑VERT：seed2026102801/02/03 × IID/Dirichlet(.5) × 0/20/40/60/80%，共30项×150轮。原其余五法150项完整复用；不依据新成绩选择是否替换，30项全部完成审计后统一替换当前对比里的VERT。
+
+已核用户提供的正式论文 DOI `10.1109/TDSC.2025.3630175`：VI-A主实验实际采用统一Top-κ，VI-C3（2756–2757页）研究未知投毒率，以K-means K=2筛选高相似度簇。作者 `mylab426/VERT` 提交 `cc71a9dff95085219cdc2d6c033c10c13ed3e6e7` 的 `defenses.py` 233–247行包含该聚类分支（原仓库中被注释）。本补跑启用其分数升序/补零列/最大分数所属簇策略，`random_state=42`；明确固定Station现有scikit-learn1.2.0的有效默认值n_init10、k-means++、Lloyd、max_iter300、tol1e-4，防止库版本默认值漂移。每轮保存实际分数/簇标签/选中ID/权重，结束后回放核验4500轮决策。两轮预热保留；无真实比例、恶意身份或test信息输入聚类器。
+
+唯一ExperimentConfig变化为 `vert_top_k:20→0`，`vert_use_ratio_prior=false`保持。预测器history10/epochs5/lr.001、signed-hash256投影及投影空间系数、数据划分、CNN、SGD、V2攻击、数值策略、150轮和测试分母全部保持原样；仅用独立作用域适配官方聚类，不修改原89项科学源。此处是选择策略修订，不声称已完整复现作者的模型/投影实现。原test已经查看，补跑作为明确披露的事后协议修订，不称未见测试，不新增搜索或结果择优。
+
+```bash
+python3 run_cifar_vert_kmeans_supplement.py             # 计划，只读
+python3 run_cifar_vert_kmeans_supplement.py --ready     # 来源/环境/数据检查
+python3 run_cifar_vert_kmeans_supplement.py --batch --max-gpus 8
+python3 watch_cifar_experiment.py --help               # 只读进度显示用法
+```
+
+新输出 `outputs/cifar_h84_formal_vert_kmeans150_v1`；共享GPU沿用8GiB空闲、连续两次间隔5秒、UUID锁内复核和每卡一项。保留此前异常GPU6 UUID隔离，实际最多七卡；不杀其他任务，不自动重试partial/失败。结束自动生成 `analysis/supplement_results.json`、`analysis/combined_results.json` 和 `export/combined_bundle.json`。合并必须有30个完整finite新VERT，否则不能混入旧VERT补齐；旧原始记录独立归档，新的六法图表与数值只含新K-means VERT。
+
+最终按每个seed单独出六法图，采用MNIST的固定配色：Ours #8DBAD9、VERT #E99092、AlignIns #8ADDE4、Krum #DCDD8F、TAD #FEBD85、FedAvg #C4A9A2。保留完整Acc/ASR轨迹、尾10/最终轮/全攻击期/峰值、健康与全部原始排名、原严格及既有Krum IID例外判定；总时间、crypto四段及扣除时间沿用原定义。共享负载时间不作独占速度结论。
+
 # SM9-RRS-FL: 联邦学习中基于SM9环签名的鲁棒聚合方案
 
 ## H84 CIFAR-10正式结果：180项完成并审计（2026-10-29）
