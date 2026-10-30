@@ -1,3 +1,21 @@
+## 最新执行范围：只运行 Ours 参数验证（2026-10-29，覆盖下方旧180项安排）
+
+用户要求 AI Station 只调 Ours，其余五法直接复用 `outputs/cifar-paper`。旧控制器已收到 TERM，停止新派发并让已启动任务自然完成。旧180项入口的 `--batch`/`--finish` 不再用于后续全量执行；下方旧安排仅作历史记录。未启动的 FedAvg/VERT 不再运行，已启动两项结果保留为范围变更前的记录，不参与新版选参。
+
+新入口 `run_cifar_ours_only.py`、配置 `configs/cifar10_ours_only150_v1.json` 只派发 H84 原参数参照和 R2/C125/R2C125 三个 Ours 候选：同 seed 2026102801/02/03 × IID/Dirichlet(.5) × 0/20/40/60/80%，共120项、各150轮。输出仍为 `outputs/cifar_ours_paper_refinement150_v1`，复用原任务身份与已完成的 Ours；原110源码和原180项 manifest 不改。独立 `ours_only_scope_v1/manifest.json` 冻结120项执行子集、60项省略项、原 manifest 指纹及5个新增适配器来源，`transition.json` 保存变更前已完成任务。先确认旧控制器退出且无活动/失败，再一次性接续；已有接续进程时不得重复启动。
+
+只在训练衍生7500验证图/source750上选参，最终固定 Ours 后另跑同3seed的30项官方test，直接与已接受其他五法150项合并比较，不重跑它们、不覆盖 `cifar-paper`。不能将验证集指标与该快照的官方test指标混算。此次按用户缩小范围，在候选完整矩阵尚未完成时修订选参口径：取消依赖新增FedAvg/VERT验证的门槛及接近VERT判断，保留配对H84约束——候选与H84全场景健康、逐seed逐Non-IID场景尾10及全攻击期Acc下降≤1pp/ASR升幅≤2pp，IID尾10ASR升幅≤2pp、clean Acc下降≤0.5pp，IID全15项平均Acc提升≥0.5pp。全部120项完整finite及96项攻击前缀/r24配对审计后，在合格者中按IID平均Acc最高、Non-IID最坏ASR增量最小、名称排序。接近/超过VERT及原clean效用标准只在最终同口径报告中评价，不回流选参；不能预先保证达到目标。
+
+Ours论文核心、已声明的恢复/裁剪候选、公共训练和V2攻击均保持。共享准入8GiB连续2次5秒并锁内复核、利用率仅记录、最多6卡且每卡一项，GPU3/GPU6持续隔离；禁止自动重试partial/失败。训练仅限AI Station，本机仅协议测试/归档/绘图。原test和seed已见、验证集也曾用于开发的限制仍明确披露。
+
+```bash
+python run_cifar_ours_only.py --ready
+# 仅旧控制器已正常排空退出，且没有已启动的接续等待器/控制器时执行一次：
+python run_cifar_ours_only.py --batch --max-gpus 6
+```
+
+结束自动产出 `analysis/ours_only_results.json` 与 `analysis/ours_only_execution_audit.json`；执行审计合并范围变更前后事件，只认可120项Ours各一次成功，另列历史两项对照成本，拒绝新派发非Ours或重复尝试。`panel_terminal` 且主进程仍活可能在CPU审计；仅全部worker终态、主入口异常退出时才用新入口 `--finish` 修复派生报告。若首批无合格候选，先完整诊断，再最多另建已声明R4/C150/R2C150共90项验证；不无限扩展，不根据正式测试调整。最终需报告全部失败、同三seed六法图与完整统计，快照保持不变。
+
 ## 已接受快照与独立 Ours 论文参数验证（2026-10-29）
 
 用户确认保留当前六方法数据，已下载为 `outputs/cifar-paper/`。入口 `outputs/cifar-paper/report/report.html`；`accepted_snapshot.json` 标记用户接受并记录逐文件SHA/远端来源，`download_verification.json` 核验3484文件、4788168621字节，当前180科学单元与原文核心VERT导出SHA `2fd0d9cdad96b9cfacb6ed69da0b482dce4bfab537c118e03b9111810714f1a1`保持。原始结果、逐轮指标、模型锚点、审计与105源码快照已保留；211个完整训练断点共167142587720字节超过本机剩余空间，仅保留在AI Station，准确路径和大小列入清单，不能将本地快照称为完整断点备份。新图没有旧Top20记录；历史科学原件仅在raw中溯源。用户接受不等于原比较标准全部通过，后续开发不覆盖此快照。

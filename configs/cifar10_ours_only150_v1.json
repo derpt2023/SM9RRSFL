@@ -1,0 +1,32 @@
+{
+  "protocol": "cifar10_ours_only150_v1",
+  "parent_config": "configs/cifar10_ours_paper_refinement150_v1.json",
+  "parent_config_sha256": "e86b43c32626df827d6f444f4b19baf9fea8c23ab9b9bc4dc9d1720a45835507",
+  "permitted_arms": [
+    "H84",
+    "R2",
+    "C125",
+    "R2C125"
+  ],
+  "selection_rule": {
+    "non_iid_tail_acc_drop_max": 0.01,
+    "non_iid_tail_asr_rise_max": 0.02,
+    "non_iid_attack_period_acc_drop_max": 0.01,
+    "non_iid_attack_period_asr_rise_max": 0.02,
+    "iid_tail_asr_rise_max": 0.02,
+    "iid_clean_acc_drop_max": 0.005,
+    "iid_mean_acc_gain_min": 0.005,
+    "all_seeds_and_scenarios": true,
+    "complete_observed_health_required": true,
+    "ranking_target": null,
+    "selection_metric": "maximum IID tail10 mean accuracy subject to all guardrails",
+    "tie_break": "minimum worst Non-IID tail ASR rise, then candidate name",
+    "interpretation": "Empirical paired validation guardrails, not a statistical guarantee or significance test",
+    "comparison_reference": "paired H84 on validation only; other five methods reused only in final official-test comparison",
+    "scope_change_reason": "User explicitly requested Ours-only execution before any candidate completed the full matrix"
+  },
+  "worker_identity_unchanged": true,
+  "other_methods_retrained": false,
+  "accepted_baseline_sha256": "2fd0d9cdad96b9cfacb6ed69da0b482dce4bfab537c118e03b9111810714f1a1",
+  "scope_dir": "ours_only_scope_v1"
+}
