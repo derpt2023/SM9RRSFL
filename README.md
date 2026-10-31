@@ -1,3 +1,28 @@
+## Ours 首批验证结束与预声明后备阶段（2026-10-31）
+
+首批120项均完成150轮、finite且已观测健康通过，但没有合格候选：IID15场景尾10等权平均增益R2为+0.3696pp、C125为−0.0068pp、R2C125为+0.3565pp，均低于预声明+0.5pp；C125和R2C125另有Non-IID全攻击期ASR越界。原96项攻击前配对95项通过，`R2C125_iid_r40_s2026102803`从r1即与同seed clean轨迹不同，具体训练内部原因未确定；原始失败及首批selected=null永久保留，不重试、不改通过标记。自动报告的`execution_audited=true`表示审计执行完成，不代表所有配对通过。
+
+独立后备入口 `run_cifar_ours_reserve.py`、配置 `configs/cifar10_ours_reserve150_v1.json`，输出 `outputs/cifar_ours_reserve150_v1`。仅运行此前声明的R4（rω=4、cn=1）、C150（rω=1.25、cn=1.5）、R2C150（rω=2、cn=1.5），同seed2026102801/02/03×IID/Dirichlet(.5)×0/20/40/60/80%，新增90项各150轮（至多13500轮），不再扩展候选。H84的原30项只读复用，不重训其他五法。原首批report SHA `616b9e0b7ee215c90d768322498440179edbf32d4c4ea3cdc6447ad205914b0d`、metadata和115来源固定，新阶段独立120来源；不修改首批manifest、旧任务身份或结果。报告同时保留首批失败决策、配对失败和包含两项历史对照的执行成本。
+
+后备选择范围明确为“新90项＋原H84 30项”，必须全部完整finite、候选与H84各30场景健康，96项本阶段攻击前分类前缀/r24模型配对全通过；另要求90个新任务r0–20分类指标与同seed同分布H84 clean精确一致，任何失配阻止入选。这是新增的保守证据检查，不改变训练数值设置，也不解除首批失败。原逐seed逐场景Non-IID尾10及全攻击期Acc降≤1pp/ASR升≤2pp、IID尾10ASR升≤2pp、clean Acc降≤.5pp、IID平均Acc增≥.5pp和排序规则不变。仅7500训练验证/source750选参，正式test不回流；旧test/seed已见及验证曾用于开发的限制继续披露。
+
+实际恢复公式、隔离、冻结参照/范数界、历史/漂移与恢复资格、可靠度上限、绝对系数上限、裁剪后不归一化、撤销和SM9均不改。公共训练、攻击、150轮及数值设置保持，cn也影响历史/恢复资格，不能称纯聚合单因素。后备只是有界验证，不能保证提升或稳定性。
+
+```bash
+# 默认只生成计划；真实训练与CUDA就绪检查仅允许指定AI Station。
+python run_cifar_ours_reserve.py
+# GitHub同步并在Station git pull后，先核对源码/原结果/数据及软件锁：
+python run_cifar_ours_reserve.py --ready
+# 确认没有已启动的后备控制器后，仅启动一次：
+python run_cifar_ours_reserve.py --batch --max-gpus 6
+```
+
+共享准入8GiB连续两次间隔5秒、锁内复核、利用率仅记录、一卡一项最多6，隔离GPU3/GPU6 UUID不变。partial/失败保留且不自动重试；TERM/INT只停派发并排空，不杀其他任务。结束自动写入 `analysis/reserve_results.json`、`analysis/reserve_execution_audit.json`，核验原证据未变、完整身份/环境/初始化、真实攻击views与SGD覆盖、实际权重和机制、前缀及单次执行。仅全部worker终态且控制器已退出才允许 `--finish` 修复派生报告；控制器存活可能仍在CPU审计，禁止重复运行。
+
+后备结束不自动进入正式测试，也不追加搜索。合格后固定全局参数，另建30项Ours官方test，与`cifar-paper`其他五法150项合并；无合格则诚实汇总全部失败和限制。最终六法图表、完整值/健康/排名/均值样本SD及严格/Krum例外说明另行完成。`cifar-paper`永久不覆盖，Station完整checkpoint不等于已全部下载到本机。
+
+本地协议与调度验证：`python -m unittest tests.test_ours_reserve tests.test_ours_only tests.test_weighting -q`（70项）。新入口的本地计划检查不是Station部署、CUDA就绪或真实运行证明。
+
 ## 最新执行范围：只运行 Ours 参数验证（2026-10-29，覆盖下方旧180项安排）
 
 用户要求 AI Station 只调 Ours，其余五法直接复用 `outputs/cifar-paper`。旧控制器已收到 TERM，停止新派发并让已启动任务自然完成。旧180项入口的 `--batch`/`--finish` 不再用于后续全量执行；下方旧安排仅作历史记录。未启动的 FedAvg/VERT 不再运行，已启动两项结果保留为范围变更前的记录，不参与新版选参。
