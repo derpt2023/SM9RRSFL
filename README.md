@@ -1,3 +1,19 @@
+## Ours 后备验证资源调度调整（2026-11-01）
+
+用户要求充分利用服务器资源后，增加独立 `run_cifar_ours_resource_packing.py`。仅接续原90项Ours后备验证中尚未启动的任务，原120项冻结源码、manifest、种子、训练/攻击参数、选择标准和cifar-paper基准不改；其余五法不重训。
+
+新调度最多6个独立worker、每GPU最多3个。每次启动仍要求空闲显存≥8192MiB，连续两次间隔5秒采样并在UUID锁内复核；同卡两次启动至少间隔60秒，避免初始化显存尚未稳定时连续派发。GPU3/GPU6继续按原UUID隔离。每个GPU的协作锁保持到该卡最后一个本批worker退出；共享进程的归属不作推断，不终止其他作业。
+
+```bash
+python3 run_cifar_ours_resource_packing.py  # 只显示调度策略
+# 核验当前原控制器PID后仅执行一次；仅向控制器发TERM，worker自然完成后自动接续：
+python3 -u run_cifar_ours_resource_packing.py --handoff <原控制器PID>
+```
+
+不要重复启动handoff或原入口。异常保留且不自动重试；TERM/INT仅停止新派发并排空活动worker。仅已干净排空且旧进程退出时可使用`--continue`，不得接管仍活动的控制器。原任务文件不重写：已完成任务非checkpoint文件逐SHA保留，完整checkpoint只核大小/inode/mtime，不加载或声称新做了完整内容备份。
+
+独立策略/交接写入原输出的`resource_packing_v1/`。新执行事件位于`scheduler_ours_reserve_v1/*_packed/`并明确标记新策略及SHA，原执行事件和旧单卡策略保留。完成后增加同卡并发/启动间隔审计，再调用原完整身份、配对、实际机制和逐项单次执行审计及原候选选择；不能用资源利用率变化宣称算法效果改善。
+
 ## Ours 首批验证结束与预声明后备阶段（2026-10-31）
 
 首批120项均完成150轮、finite且已观测健康通过，但没有合格候选：IID15场景尾10等权平均增益R2为+0.3696pp、C125为−0.0068pp、R2C125为+0.3565pp，均低于预声明+0.5pp；C125和R2C125另有Non-IID全攻击期ASR越界。原96项攻击前配对95项通过，`R2C125_iid_r40_s2026102803`从r1即与同seed clean轨迹不同，具体训练内部原因未确定；原始失败及首批selected=null永久保留，不重试、不改通过标记。自动报告的`execution_audited=true`表示审计执行完成，不代表所有配对通过。
