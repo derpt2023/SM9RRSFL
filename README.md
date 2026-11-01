@@ -1,3 +1,15 @@
+## 2026-11-01：CIFAR-BEST 数据整合与存储归档
+
+- 本地与 AI Station 的 `outputs/` 顶层现为 `mnist_v7_target_fair_tuning/`、`cifar-best/`、`old/`；历史输出均移入 `old/`，原 `cifar-paper` 内容保持不变。
+- `cifar-best` 合并最新固定 R4 官方 test 30 项与原基准其他五法 150 项；同三 seed、两分布、五比例、150 轮，未重训或重新选参。
+- 参考 MNIST 结构：`final_evaluation/summary.json`、`summary.csv`、`rounds.csv`、`aggregate.csv`、`scenario_audit.csv`；每 seed 的 12 幅 PNG/SVG 图在 `final_evaluation/seed_*/plots/`，总入口 `final_evaluation/report.html`。
+- 汇总 180 项，逐轮表 27,180 行；末轮与尾10分别列出，官方 source5 的 1000 图 ASR 与原辅助128图指标分列。健康、失败、原排名和样本SD均保留。
+- R4 617 文件重新从 Station 下载并逐 SHA 核验；两端合并数据文件一致。来源、原基准、执行审计与清理记录在 `provenance/`、`analysis/`、`raw/`。
+- 已按明确清理授权删除本地 98 个完成断点（6,205,034,394 字节）和 Station 585 个完成断点（318,402,382,904 字节），结果/轨迹 SHA 前后不变；完整续跑断点已删除，结果 pickle 和初始化/r24审计锚点保留。
+- 未完成、失败及缺少完成证据的历史断点保留在 `old/`。完整删除清单和归档映射见 `outputs/old/storage_reorganization_20261101/`；旧文件内部的原路径作为历史来源记录保留。
+- 重新绘图可显式使用 `--source outputs/cifar-best/export/combined_bundle.json --baseline outputs/cifar-best/provenance/accepted_cifar_paper_bundle.json`，不要使用已迁移的旧默认路径。
+- 新导出 SHA256 `7a56eec00bd2ef936f342e1f2a22088b674cff11d86bcff1981176c5bb6a6198`；原基准 SHA256 `2fd0d9cdad96b9cfacb6ed69da0b482dce4bfab537c118e03b9111810714f1a1`。R4 原验证未入选及历史失败结论不变。
+
 ## R4 用户指定官方 test 已完成（2026-11-01）
 
 同三seed2026102801/02/03的30项Ours R4均完成150轮，19:33:55北京panel_terminal、20:20实测主进程已退出；0训练失败/重试，30项finite及健康，24/24攻击前缀/r24模型配对、30/30原H84暖身和完整实际执行/机制审计通过。其他五法150项及曲线逐项复用，`outputs/cifar-paper`未覆盖；不再运行下方历史启动命令。
