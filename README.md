@@ -1,3 +1,23 @@
+## 用户指定 R4 官方 test 补做（2026-11-01，覆盖下方历史停止安排）
+
+用户在已知后备验证结果后明确要求固定R4补做cifar-paper相同三seed的Ours，并每两小时检查，完成后提供六法比较图。这是独立用户指定后续实验：原R4验证增益0.4794pp未过0.5pp、selected=null和首批95/96失败记录不变，不宣称验证自动入选；新test结果不回流改参、重选seed或删场景。
+
+新入口`run_cifar_r4_formal.py`，配置`configs/cifar10_ours_r4_formal150_v1.json`，独立输出`outputs/cifar_ours_r4_formal150_v1`。只运行Ours R4：原公式恢复系数1.25→4、裁剪参数仍为1，其他训练/检测/历史/漂移/恢复资格/隔离/撤销/SM9及数值设置不改。seed2026102801/02/03 × IID/Dirichlet(.5) × 0/20/40/60/80%，30项各150轮，共4500轮，全部fresh；仅AI Station训练。官方test为10000图/source5的1000图，不与训练衍生验证7500/750混算；公共40000训练和2500aux不变。
+
+其他五法150项只读复用cifar-paper accepted bundle（SHA `2fd0d9cdad96b9cfacb6ed69da0b482dce4bfab537c118e03b9111810714f1a1`），绝不重算或覆盖。原120科学来源冻结，新126来源；独立调度最多6任务、每GPU最多3，8GiB连续两次5秒并锁内复核、同卡启动间隔60秒、GPU3/6原UUID继续隔离。失败/partial保留、不自动重试；TERM/INT仅停止新派发并自然排空。
+
+```bash
+python3 run_cifar_r4_formal.py          # 仅计划，不训练
+python3 run_cifar_r4_formal.py --ready  # Station：核数据/软件/旧报告/SHA
+python3 -u run_cifar_r4_formal.py --batch  # 确认无已有本批控制器后只启动一次
+```
+
+结束自动核完整官方test、同seed初始化/数据/目标/恶意身份、实际SGD与攻击views、实际权重/机制、24组攻击前缀及r24模型、30项对原H84暖身、单次执行和资源调度。输出`analysis/r4_results.json`、`analysis/combined_results.json`、`analysis/execution_audit.json`、`r4_packing_v1/execution_audit.json`及`export/combined_bundle.json`。保留全部失败和健康问题，不用平均数掩盖逐场景退化；`panel_terminal`且主进程活可能正在CPU审计，禁止重复finish。异常先只读留证，不自动启动任何重试或旧入口。
+
+完成并核验导出SHA后本地运行`render_cifar_r4_formal.py --source <新combined_bundle.json> --expected-sha256 <核验SHA> --output <新报告目录>`；默认基准是`outputs/cifar-paper/export/combined_bundle.json`。每seed独立MNIST配色的尾10比较、IID/Non-IID完整曲线、实测耗时共12图（PNG+SVG），无旧Top20曲线；完整180原值/健康/原排名、均值/样本SD/n、原严格与Krum例外并列，列30项相对原Ours变化及IID距第一≤1/1.5pp覆盖情况。图须全部目视核验后交付。共享GPU耗时不代表独占算法速度；旧test/seed已见、验证曾用于开发及论文公共安排差异继续披露。
+
+本地验证：`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_r4_formal tests.test_ours_resource_packing tests.test_h84_formal tests.test_weighting tests.test_h84_formal_render -q`，69项通过。以下有界验证终止结论保持为历史真实记录，新官方test授权仅来自上述用户明确指令。
+
 ## Ours 有界参数优化已完成：没有合格候选（2026-11-01）
 
 后备90项均完成150轮，0训练失败、0自动重试；原H84 30项只读复用。完整执行/实际机制审计通过，后备96/96前缀及r24配对、90/90同seed H84暖身检查全通过。资源接续实测峰值6任务、单卡峰值3；控制器已退出，不再运行下面历史启动命令。
