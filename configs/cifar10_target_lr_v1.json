@@ -1,0 +1,36 @@
+{
+  "schema": "cifar_targeted_development_v1",
+  "protocol": "cifar_target_lr_v1",
+  "output_dir": "outputs/cifar10_target_lr_v1",
+  "common": {
+    "num_clients": 100, "rounds": 60, "seed": 2026102201,
+    "partition": "dirichlet", "dirichlet_alpha": 0.5,
+    "malicious_ratio": 0.8, "lr": 0.01, "lr_decay": 0.99,
+    "local_epochs": 1, "batch_size": 50, "sm9_workers": 8,
+    "attack_start_round": 25, "detector_window": 20, "attack_epochs": 1,
+    "attack_distance_weight": 0.0001, "eval_interval": 1, "early_stop": false
+  },
+  "profiles": {
+    "M1": {"id": "M1", "optimizer": "adam", "normal_optimizer": "sgd", "lr": 0.0001, "boost": 20.0, "stealth_steps": 10, "scope": "weights", "target_count": 128},
+    "M3": {"id": "M3", "optimizer": "adam", "normal_optimizer": "sgd", "lr": 0.0003, "boost": 20.0, "stealth_steps": 10, "scope": "weights", "target_count": 128},
+    "S1": {"id": "S1", "optimizer": "adam", "normal_optimizer": "sgd", "lr": 0.0001, "boost": 20.0, "stealth_steps": 10, "scope": "weights", "target_count": 1},
+    "S3": {"id": "S3", "optimizer": "adam", "normal_optimizer": "sgd", "lr": 0.0003, "boost": 20.0, "stealth_steps": 10, "scope": "weights", "target_count": 1}
+  },
+  "tasks": [
+    {"id": "clean_fedavg", "method": "fedavg", "parameters": {"malicious_ratio": 0.0}},
+    {"id": "M1_fedavg", "method": "fedavg", "profile": "M1", "probe": true},
+    {"id": "M3_fedavg", "method": "fedavg", "profile": "M3", "probe": true},
+    {"id": "S1_fedavg", "method": "fedavg", "profile": "S1", "probe": true},
+    {"id": "S3_fedavg", "method": "fedavg", "profile": "S3", "probe": true}
+  ],
+  "probe_clean_task": "clean_fedavg",
+  "attack_selection": {
+    "clean_task": "clean_fedavg", "candidates": ["M1_fedavg", "M3_fedavg", "S1_fedavg", "S3_fedavg"],
+    "window": [51, 60], "min_auxiliary_asr": 0.8, "min_confidence_gain": 0.2,
+    "max_clean_confidence": 0.8, "max_non_source_accuracy_drop": 0.05,
+    "min_transfer_gain": 0.1,
+    "ranking": "Eligible FedAvg transfer ASR, then auxiliary ASR, then auxiliary confidence gain; never defense outcome"
+  },
+  "references": ["outputs/cifar10_c7_alignment_screen_v1/manifest.json", "outputs/cifar10_c7_alignment_screen_v1/selection.json", "outputs/cifar10_c7_alignment_screen_v1/analysis/analysis.json"],
+  "interpretation": "Exploratory development seed already observed. New utility and transfer gates are predeclared engineering criteria, not a paper reproduction claim. No official test or defense ranking used for attack selection."
+}

@@ -1,0 +1,24 @@
+{
+  "version": "GmSSL 3.3.0-dev.1183",
+  "upstream": "https://github.com/guanzhi/GmSSL",
+  "archive_sha256": "6dc97c6b4f7d2f6df9d44f014cca0561a7b4776017efd4486d341e986051fab4",
+  "scope": "Unmodified source/header closure for the SM9 bridge; original license retained",
+  "files": {
+    "LICENSE": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+    "include/gmssl/endian.h": "67623d8c93b49c44e3c08534e314a806332b95404655d6d8f0b0d5eeac15ed7b",
+    "include/gmssl/error.h": "3e8005c0be3c61e2958742bcdf623a343422fd7593e0e34b195774861eba7540",
+    "include/gmssl/mem.h": "743804610c268cdd6468849ef5303a46b4aecf344d23085082c7ca2523abe66b",
+    "include/gmssl/rand.h": "ef475a99accbb7ee2895d00f8dab8ec7e35db9568840a9ebdfa7727b8265f206",
+    "include/gmssl/sm2.h": "5c24c29e0938abc12d9c9a62a3fff328c05649f4af6064ed5577570b59b5a58c",
+    "include/gmssl/sm2_z256.h": "731946259dfb60bde614970bb9f38856aa16ef852ab3f788c7a5a11160c38fb6",
+    "include/gmssl/sm3.h": "94113cbe8b8ecf7441064215590593577f1e8f5fee99e19946484effa60ea526",
+    "include/gmssl/sm9_z256.h": "3a9585a8fcc85dedac87c4070ead767c57d7b8e29cf5b2b9f6c7b73288328c5f",
+    "include/gmssl/version.h": "2673b81285769af107ce7270c69f935d5c037b8281369d0d9d840c3ae4d126c1",
+    "src/debug.c": "d211f96f256d7716da210524e656159acb43f5341939742af24e6629719f785c",
+    "src/rand.c": "d2903b1a264a8a7c1709f0cab698a3cbb5dba92832c65fd778cb13ccd00fb43e",
+    "src/rand_win.c": "02c975d6ea1de66a313809f3dfa4a9b599e52f46a9b76f6be265b9e945499834",
+    "src/sm3.c": "b10d23bf2668b4362fb0fc188d831262300b4b80629926f979ea7b85c88911cc",
+    "src/sm9_z256.c": "d8df5b88039d2f0aea97b9ab999d598ca29848e792d6e800600377290b767b9a",
+    "src/sm9_z256_table.c": "a692c377b2fa68a19e5e715f1c5aa441fe6bb10e2e5edb5bcb9cbae07ab4e018"
+  }
+}

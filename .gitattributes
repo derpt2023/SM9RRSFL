@@ -1,0 +1,2 @@
+# Preserve the pinned upstream GmSSL bytes, including original whitespace.
+third_party/gmssl/** -whitespace
