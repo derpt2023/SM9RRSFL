@@ -1,3 +1,17 @@
+## R4 用户指定官方 test 已完成（2026-11-01）
+
+同三seed2026102801/02/03的30项Ours R4均完成150轮，19:33:55北京panel_terminal、20:20实测主进程已退出；0训练失败/重试，30项finite及健康，24/24攻击前缀/r24模型配对、30/30原H84暖身和完整实际执行/机制审计通过。其他五法150项及曲线逐项复用，`outputs/cifar-paper`未覆盖；不再运行下方历史启动命令。
+
+官方test尾10IID均Acc56.9203%（原56.4872%，+0.4331pp），距六法最高方法均值1.1851pp（原1.6182pp）；逐场景先取第一再平均差1.2028pp。15场景中11个≤1.5pp、5个≤1pp，尚非逐场景全面达标。seed01的40/60%差1.856/2.862pp，seed02的60/80%差1.831/1.680pp；seed03 clean Acc微降0.024pp。IID攻击尾ASR8.3308%（−0.2033pp）。
+
+Non-IID均Acc54.7419%（+0.5452pp）保持六法均值第一，15场景Acc全部提高（最小+0.1830pp）；攻击尾ASR8.4783%（−0.1142pp）。局部仍有ASR退化：seed02攻击尾ASR均值+0.215pp；最坏尾ASR+0.710pp、最坏全攻击期ASR+0.8524pp。全部逐seed逐比例原值和差异保留，不用均值掩盖退化。
+
+报告`outputs/cifar_ours_r4_formal_final_20261101/report.html`及delivery_summary.json，含180原值/健康/失败/原排名、60组跨seed均值样本SD/n、原严格/Krum例外及30个新旧Ours配对。三个seed各有六法尾10比较、IID与Non-IID全程及实测耗时图，共12幅PNG+SVG已全部目视；MNIST配色、无旧Top20曲线。共享GPU用时不是独占速度基准。
+
+独立归档`outputs/cifar_ours_r4_formal_complete_20261101`共617文件695123551字节，远端传输前后及本地逐SHA一致，包含原始实际攻击审计/实际权重/模型锚点/结果及126来源快照。30完整checkpoint约9.68GB仍仅在Station，不称本地完整断点备份。新export SHA `7a56eec00bd2ef936f342e1f2a22088b674cff11d86bcff1981176c5bb6a6198`，原accepted bundle SHA仍`2fd0d9cdad96b9cfacb6ed69da0b482dce4bfab537c118e03b9111810714f1a1`。
+
+本次是用户在看到验证结果后指定R4的独立官方test补做；原验证+0.4794pp未过0.5pp、selected=null及首批95/96失败仍保留，不改写为验证通过。旧test/seed已见及验证曾用于开发如实披露；无test回流改参/筛选/重试。以下为已完成阶段的历史协议和执行记录。
+
 ## 用户指定 R4 官方 test 补做（2026-11-01，覆盖下方历史停止安排）
 
 用户在已知后备验证结果后明确要求固定R4补做cifar-paper相同三seed的Ours，并每两小时检查，完成后提供六法比较图。这是独立用户指定后续实验：原R4验证增益0.4794pp未过0.5pp、selected=null和首批95/96失败记录不变，不宣称验证自动入选；新test结果不回流改参、重选seed或删场景。
