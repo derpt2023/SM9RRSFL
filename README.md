@@ -152,6 +152,8 @@ python -m unittest tests.test_cifar_mnist_timing
 
 最终 `analysis/timing_results.json` 保存全部原值、三 seed 均值和样本 SD、健康问题和单次执行审计。成功任务的临时大型 checkpoint 由公共入口清除，失败现场保留。此次结果只用于耗时比较，诊断 ASR 是辅助目标口径，不替换 `cifar-best` 的官方 Acc/ASR；旧图中的耗时在独立复测完成并核验前仍是旧口径。
 
+2026-11-02 本次首批物理 GPU1 的其他进程在准入后快速占满显存，TAD 首轮 OOM，原控制器按协议排空。用户明确授权仅此异常的接续：`resume_cifar_timing.py --handoff <原controller PID>` 等待原四项正常结束，逐 SHA 复用四项，再在独立 `outputs/old/cifar_mnist_timing150_followup_v1` 补175项未启动和1项 fresh TAD。只用原 GPU2/4/5/7 固定 UUID，原四组保持 GPU 归属和轮换顺序；原191来源不改，新接续器另行冻结。最终披露180成功与1历史OOM共181次尝试。此入口只适用于这次明确授权的4完成/1失败/175待运行状态，拒绝重复启动或扩大重试；普通复现者使用上面的 fresh 入口。
+
 新训练会自动生成 `final_evaluation/summary.csv`、`rounds.csv`、`aggregate.csv` 和 `task_status.json`，也可重新汇总：
 
 ```bash
