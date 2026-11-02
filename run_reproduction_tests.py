@@ -18,7 +18,7 @@ MODULES = (
     'crypto_overhead', 'visualization', 'config_runner', 'config_launcher',
     'cifar_tad_no_prior', 'attack_stability_worker', 'attack_stability_attack',
     'attack_stability_probes', 'r4_formal', 'vert_paper_validation',
-    'cifar_run_observer',
+    'cifar_run_observer', 'cifar_best_visualization',
 )
 
 if __name__ == '__main__':

@@ -17,7 +17,7 @@ configs/reproduction/                 固定参数、数据划分、来源校验
 sm9rrsfl/                             训练、六法、检测、密码协议
 scripts/experiments/cifar10/           CIFAR 攻击和观测依赖
 third_party/gmssl/                    SM9 编译所需固定版源码、许可证、SHA
-render_cifar_r4_formal.py              已接受 CIFAR 数据包的报告重绘
+render_cifar_best.py                  已接受 CIFAR 数据包按 MNIST 格式重绘
 outputs/
   cifar-best/                         新 R4 30 项 + 原其他五法 150 项
   mnist_v7_target_fair_tuning/          MNIST 原始调参及最终 180 项
@@ -26,7 +26,7 @@ outputs/
 
 已有数据包入口：
 
-- [CIFAR 六法报告](outputs/cifar-best/final_evaluation/report.html)，每 seed 独立 PNG/SVG；`summary.csv`、`rounds.csv`、`aggregate.csv` 保留全部原值。
+- [CIFAR 六法可视化](outputs/cifar-best/final_evaluation/visualizations.html)和[完整报告](outputs/cifar-best/final_evaluation/report.html)，每 seed 按 MNIST 格式分别绘制 IID / Non-IID 的准确率、ASR、总耗时、扣除密码学耗时。`summary.csv`、`rounds.csv`、`aggregate.csv` 保留全部原值。
 - MNIST：`outputs/mnist_v7_target_fair_tuning/final_evaluation/summary.csv`、`aggregate.csv`，各 `seed_241/242/243` 的图。
 - `outputs/cifar-best/provenance/task_sources.json` 逐项记录 R4 与五法来源。原 `cifar-paper` 位于 `outputs/old/cifar-paper`。
 
@@ -145,14 +145,17 @@ MNIST 新运行按 seed 生成独立图。CIFAR 的官方口径表格和每 seed
 重绘**现有已接受** CIFAR 六法数据，无需训练：
 
 ```bash
-python render_cifar_r4_formal.py \
-  --source outputs/cifar-best/export/combined_bundle.json \
-  --baseline outputs/cifar-best/provenance/accepted_cifar_paper_bundle.json \
+python render_cifar_best.py \
+  --package outputs/cifar-best \
   --expected-sha256 7a56eec00bd2ef936f342e1f2a22088b674cff11d86bcff1981176c5bb6a6198 \
   --output outputs/old/reproductions/cifar-best-redraw
 ```
 
-该重绘入口要求原始合并数据包，不能把新 worker 的任意 JSON 当作已接受 bundle。尾 10 轮与最终一轮必须分开报告；CIFAR 官方 test 的 10,000/源类 1,000 张与原验证的 7,500/源类 750 张不能混算。
+输出目录必须是新目录。默认生成 30 幅 SVG 和每 seed 的 `visualizations.html`，配色、线型、五比例准确率 / 四比例 ASR 布局与 MNIST 一致；`runtime_visualizations.html` 集中展示各 seed 的两种耗时。需要 PNG 时追加 `--png-browser /path/to/chrome`，macOS 可用 `--png-browser "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`。
+
+`*_runtime_without_crypto.svg` 使用各任务原始总墙钟时间减去四段互不重叠的密码协议墙钟时间；不减并行签名/验签累计时间，不代表关闭密码学重跑或独占速度测试。CIFAR 原峰值内存字段均为占位值 0，对应 `*_memory_overhead.svg` 明示“未记录”，不将其画成实际 0 MB。
+
+该重绘入口要求原始合并数据包及配套 summary，不能把新 worker 的任意 JSON 当作已接受 bundle。尾 10 轮与最终一轮必须分开报告；CIFAR 官方 test 的 10,000/源类 1,000 张与原验证的 7,500/源类 750 张不能混算。原 `render_cifar_r4_formal.py` 作为冻结来源保留。
 
 ## 6. 验证与结果边界
 
