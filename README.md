@@ -36,7 +36,7 @@ outputs/
 
 ## 2. 环境与安装
 
-训练使用 AI Station/Linux + NVIDIA CUDA；macOS 可运行计划、数据校验、测试和绘图。本轮整理没有启动训练。
+训练使用 AI Station/Linux + NVIDIA CUDA；macOS 可运行计划、数据校验、测试和绘图。
 
 原 CIFAR 环境为 Python 3.10.12、PyTorch `2.3.0a0+40ec155e58.nv24.03`、CUDA 12.4、cuDNN 9.0、NumPy 1.24.4、RTX 4090 D。NVIDIA 的 [24.03 发布说明](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-24-03.html)对应这个 PyTorch/CUDA 系列；它是搭建环境的起点，不保证自行编译出的原生二进制 SHA 与历史机器相同。
 
@@ -132,6 +132,25 @@ python reproduce.py mnist_v7_target_fair_tuning --run --gpus 0,1,2 \
 新目录默认拒绝覆盖。仅要继续尚未开始的任务，在**相同命令和参数**后加 `--continue-pending`；已有目录的完成、失败、部分任务均不重跑。若有失败，保留原证据后使用新目录单独处理，不修改原结果。运行中不要编辑来源文件。
 
 ## 5. 汇总与重绘
+
+### CIFAR 耗时复测：与 MNIST 使用同一计时入口
+
+原 CIFAR 保存的是含数据加载、额外取证和断点写入的 worker 总耗时，不能直接当作 MNIST 同边界耗时。用户于 2026-11-02 授权独立重测全部六法 180 项，各 150 轮。入口如下，默认仅展示计划：
+
+```bash
+python run_cifar_timing.py
+python run_cifar_timing.py --ready
+python run_cifar_timing.py --batch --max-gpus 6 \
+  --output outputs/old/cifar_mnist_timing150_v1
+python run_cifar_timing.py --summary --output outputs/old/cifar_mnist_timing150_v1
+python -m unittest tests.test_cifar_mnist_timing
+```
+
+只在 Station 上训练，严格核对原软件、数据和 126 个科学来源；原配置、种子、R4 / PaperVERT / TAD / V2 实现不变。直接调用 MNIST 的 `run_measured_experiment`：数据加载后开始计时，扣除该公共函数实测的 checkpoint I/O；任务结果写入和 CIFAR 额外取证不在计时内。去密码学耗时仍为总耗时减四段互不重叠的协议墙钟时间，包含训练、攻击、检测、聚合和常规评估，不等于只算训练或关闭密码学重跑。
+
+每个 seed、分布和恶意比例组成六法一组，在同一 GPU 上依次测量；30 组轮换方法顺序。最多六卡、每卡一个本研究任务，8 GiB 空闲显存连续两次间隔 5 秒准入，隔离 GPU 3/6 对应的固定 UUID。共享服务器的其他作业仍可能影响墙钟时间，保存 GPU 负载与进程快照，不声称独占测速。已有目录拒绝覆盖，无自动重试或续跑；TERM/INT 停派发并排空。
+
+最终 `analysis/timing_results.json` 保存全部原值、三 seed 均值和样本 SD、健康问题和单次执行审计。成功任务的临时大型 checkpoint 由公共入口清除，失败现场保留。此次结果只用于耗时比较，诊断 ASR 是辅助目标口径，不替换 `cifar-best` 的官方 Acc/ASR；旧图中的耗时在独立复测完成并核验前仍是旧口径。
 
 新训练会自动生成 `final_evaluation/summary.csv`、`rounds.csv`、`aggregate.csv` 和 `task_status.json`，也可重新汇总：
 
