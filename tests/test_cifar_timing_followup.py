@@ -75,6 +75,17 @@ class FollowupTests(unittest.TestCase):
             path.write_text('{}')
             with self.assertRaises(ValueError):f.continuation_plan(old)
 
+    def test_incomplete_report_uses_actual_not_planned_attempt_counts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old,m=original_fixture(root);out=root/'followup'
+            f.prepare(old,out,f.own_sources())
+            with patch.object(t,'final_report',return_value={'execution_audit':{'failures':['incomplete']}}):
+                report=f.finish(out,old,f.own_sources())
+            self.assertEqual(report['continuation']['fresh_followup_attempts'],0)
+            self.assertEqual(report['continuation']['total_attempts_including_original_oom'],5)
+            self.assertEqual(report['continuation']['explicit_fresh_retry_count'],0)
+            self.assertFalse(report['execution_audit']['passed'])
+
     def test_handoff_waits_for_workers_and_normal_final_state(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);old,m=original_fixture(root)

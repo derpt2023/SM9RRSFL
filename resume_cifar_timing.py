@@ -152,11 +152,14 @@ def finish(out, old, own):
     m = t.base.read(out / 'manifest.json')
     assert_sources(m, own)
     report = t.final_report(out)
-    report['continuation'] = dict(original_directory=str(old), original_failure=FAILED_TASK,
-        original_failure_preserved=True, reused_successes=4, fresh_followup_attempts=176,
-        total_attempts_including_original_oom=181, explicit_fresh_retry_count=1,
-        automatic_retry_count=0, own_sources=own)
     events = [json.loads(line) for line in (out / 'events.jsonl').read_text().splitlines()]
+    starts = [e for e in events if e['event']=='start']
+    fresh_count = len(starts) - 4
+    report['continuation'] = dict(original_directory=str(old), original_failure=FAILED_TASK,
+        original_failure_preserved=True, reused_successes=4, planned_fresh_tasks=176,
+        fresh_followup_attempts=fresh_count, total_attempts_including_original_oom=5 + fresh_count,
+        explicit_fresh_retry_count=sum(e['task_id']==FAILED_TASK for e in starts),
+        automatic_retry_count=0, own_sources=own)
     if any(e['uuid'] not in ALLOWED_UUIDS for e in events if e['event']=='start'):
         report['execution_audit']['failures'].append('Followup GPU outside authorized four')
     if sum(e['event']=='start' for e in events) != 180:
