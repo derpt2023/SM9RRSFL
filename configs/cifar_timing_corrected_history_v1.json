@@ -1,0 +1,238 @@
+{
+  "kind": "scientific_invalidation_ledger",
+  "reason": "Measured runner called cached legacy Ding13 with malicious-ratio prior instead of accepted PriorFreeTAD",
+  "source_output": "/3251901002/SM9RRSFL/outputs/old/cifar_mnist_timing150_followup_v1",
+  "source_fingerprint": "50bd998c65c30205cd09b336abc69ae2d6999911d508e5c79002ea9eb91e5efa",
+  "invalid_tasks": [
+    {
+      "task_id": "TAD_iid_clean_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "00b7f6371d1003eda3c6aae712b122bf99192ebce30bb583cfd2849707096490",
+        "result.json": "faa5f84da8de994379bea3e61ccfc35cd70801bee6b488add3601870f0f47882",
+        "result.pickle": "827302a83d3dee122ddee22fb93e42f958e989ee2b7a798eb1db5da07b53e61a",
+        "rounds.json": "ff01110e73f93b646555ace1c54f6a515754e47d2be0c987d01b8c5d597406eb",
+        "task.json": "548d0f92db7ac2476fe79591ee6bb47c6b298c4af015296f660afd78a8a47437",
+        "timing.json": "11306f4998446e2afb5358e31664d32e69e0be5a890410594efe14b6175603d7"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_iid_r20_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "623105d1eadfbe1eee4f6c8b85908a2154b0ba2b360e376c04264bd29f470f29",
+        "result.json": "a41a8e905bebf155b68aeb924d037085bf47a66fe1e2cc71855de042e5d0b44a",
+        "result.pickle": "6bd8ae5352fe5ab6adaec1fa720b18430f8242f518511cb5f7436ebd3007be09",
+        "rounds.json": "f5d25f0153aea5cfa18539757dc1e566d280e3800a17a6e79af8b84c17c17b62",
+        "task.json": "22bbb82c9e661d127c3c3d74a60019a6b17d8881b5416ecbe40c958c995e830d",
+        "timing.json": "33986eb0da9fa5e9614a830078479c06c839335efe92c168a8ebc70d522221a5"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_iid_r40_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "ffed481180df470eaad34744279b28f4dac01bbc5e27c4441b27d95428d31af1",
+        "result.json": "327e44cceada485349510359f8288aebcd3f3d0bc2e23a6a13802d884f8fc1f4",
+        "result.pickle": "e3aaabe0fb3e1e048ddef3f00f08a2ca977feef15f8054f8842327801e31a710",
+        "rounds.json": "8bef3f7da31b2dc3e9c5ec5a7ec14458dc4bc655bc24847bc1c1241ceee98b39",
+        "task.json": "8ffbb4db7419be447a4b6c954a640d518be080307042b1a5dcffa0ed876bec2c",
+        "timing.json": "20ff8d43fd7dfd104e362b9b8d8789f56697759da8a3a06da3c4e2d3e57a7aec"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_iid_r60_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "05856ce1794e1d0fe562e34825063c7593499e697d462233aae652b1eded0881",
+        "result.json": "6acb83fd494071d0ddbc1fc97159f9b2eadd6f46474c58a92706227fcbee33e3",
+        "result.pickle": "068a961b930312fc1512dc6e5ad672e0a397c96488e99eee909494dc72f9db53",
+        "rounds.json": "8010ae31d1c14ce70608dac5aa6377c6738121d31a8ccbf1865476d6a596cc04",
+        "task.json": "e873618bbd3438934612c7bcbe207e8eff45dc079b96243b8ba6632b4eaf4527",
+        "timing.json": "39ef22792c818936d998f170a929941cb5fa3ddb70a3c26731057bc42cb9b9da"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_iid_r80_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "623105d1eadfbe1eee4f6c8b85908a2154b0ba2b360e376c04264bd29f470f29",
+        "result.json": "923cac50dd2c9dd6036f21790d058a7465ff64da2d17b4bcd2ee3cc16568c464",
+        "result.pickle": "2eeb119ee14be82da94d649309ba4944f8a4b078551a63b5878f1a0976ef6ee2",
+        "rounds.json": "f65ef47041392fe442c99f5935db665333858f16272a224ec2475005c9cf6042",
+        "task.json": "e0f2bfb990f26cf1f107d69c40af442a2a4438065a1cc4a7989d7a7ad6e1bfc3",
+        "timing.json": "671c401f5dd18a024c3517c02aa14f65d3ebb8b650c519b78b4e07812d3a1272"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_dirichlet_clean_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "00b7f6371d1003eda3c6aae712b122bf99192ebce30bb583cfd2849707096490",
+        "result.json": "0a9f0d9f843ac34f944abd3635c8809a33a9131b9b60d65ac1f9ce004f1b8c50",
+        "result.pickle": "96b4785d249e125aece42e8238bc87e562a241f01ba9206e6d18ba22c8ec1b7c",
+        "rounds.json": "4673b7906249d185a4036a95f64da6a127d40b0e2f5231122527febeb9e99e4a",
+        "task.json": "bce17f5f1e86d55f7e90f43699d8042bc4d295c5a24e2bb414f166bcddcc4ae6",
+        "timing.json": "473220275f70ebed2862703402fde91fc65aa6cc896c1030bdd71bdf2dc7c27f"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_dirichlet_r20_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "ffed481180df470eaad34744279b28f4dac01bbc5e27c4441b27d95428d31af1",
+        "result.json": "10cc639f56039e115a2894f4c0fdb4abff40be76daf0c0947df3d6aff43e649a",
+        "result.pickle": "78ab129a645cfe9c9551b10a828543f2fc2b388874d5bfd876c4756182472b43",
+        "rounds.json": "95d10844cf70ecf2b3bf07b1df5e8969e6d70013f98c6590c071d492a5f033b3",
+        "task.json": "f36196f81ed5f9aca3f3f4fd5e67e9e0a220f88d295633a0f39e8960589de050",
+        "timing.json": "f0bd0a860f944b8480d6a2dd0bccad897236046c2c04750c46e6acc5820067d5"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_dirichlet_r40_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "05856ce1794e1d0fe562e34825063c7593499e697d462233aae652b1eded0881",
+        "result.json": "254f7697cce2c5876d537d6c229033c8978c52b189770958454428a077e98be3",
+        "result.pickle": "8a98e004b8b63baa1d5237defa57a74fe8ee7c53d1c44d2eb0b4b24aea428217",
+        "rounds.json": "f7482b366dcd62b38abfd1821f629d52a1171b1b5e9cfc84ba2925022b61a180",
+        "task.json": "bdf15411970ed940db292a3a4fa189a28d6c174bc6a40696a9339ff8b3ecfd77",
+        "timing.json": "7b239e564e1c8dda25d6e4690ecd6cd67a4040693d46f14f810ec4bfe5768681"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_dirichlet_r60_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "00b7f6371d1003eda3c6aae712b122bf99192ebce30bb583cfd2849707096490",
+        "result.json": "d88fa12c28929976eff727df44c782d4fa3f7bfdf2320ea1d0dbe198773fd83e",
+        "result.pickle": "bcd5a7039290ad5fc8300b362ed339988d5e295755ad01b318ef605b2faebb24",
+        "rounds.json": "cb6f1dcff3226f01d64377ec689a5fd65684496757b1888d74b259315cecae7e",
+        "task.json": "cf94852a990a9451da054514c681bc604d771adeca72a6e60fd7bf6a7368d968",
+        "timing.json": "f40bcdefde61228bc12f5941f0de339291fc6c9c2012d1a082c919b28620b51a"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_dirichlet_r80_s2026102801",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "623105d1eadfbe1eee4f6c8b85908a2154b0ba2b360e376c04264bd29f470f29",
+        "result.json": "1552a323f634f11ee5917e35580d3057c00b66205429b944a0a99960b2c3629e",
+        "result.pickle": "538e3a5a8b53435e3e5e433a04142df822d8e495860d9d515e954d66c871bb5c",
+        "rounds.json": "ee7f57fcec0fb4513166ab7fb1fda8db351e94894532e18430610f95f1edc25d",
+        "task.json": "cf06130fe78d45ac92757ebea5970d6e17ceab775ae7c48d32b3c665f7f2a188",
+        "timing.json": "8e74263b2b3b04d70aa0cd4786d645bddd85c812f2a28ea5e5a22e44e7b6c958"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_iid_clean_s2026102802",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "05856ce1794e1d0fe562e34825063c7593499e697d462233aae652b1eded0881",
+        "result.json": "f35e9238da2200d8e860edd1fe2fc1a476aaf805aeb0f8638b08dac0434825da",
+        "result.pickle": "a735ee755342998b0e7d0cf09da66cc9e5bc3584d4191e29c1528d06ae064d71",
+        "rounds.json": "53ed4fa31c443ef3105a9d42de872f00a1695c3b76410a241174aaad44e32df6",
+        "task.json": "b7d42b569b17cf7509a923e90a5c3f865e7f4b79eb8d1c844ea4ce94b306e570",
+        "timing.json": "621b4742ccd7d644c0d6ae537bbf537b5fc36387aad4a82c33aa81a1d971ea82"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_iid_r20_s2026102802",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "ffed481180df470eaad34744279b28f4dac01bbc5e27c4441b27d95428d31af1",
+        "result.json": "9195dd57687600f64eb593218b189f3bb75e420b46de62bfe4a99ae38311dfb7",
+        "result.pickle": "023b6bdf0fadc8aad8f15fae9ed9172daaa88303e11f8c3b7f16e7ebb504555e",
+        "rounds.json": "e9b73680be7d22b079cd0ed79bc6adc8c52b8f5fbfbe7f55ce39752908487b4f",
+        "task.json": "93b1381f3b60ac9ed459336690cbe3b529afdb45fcad75946e1731fc36653fcd",
+        "timing.json": "8446beab62f93e603cb3c25eb72b19215e3712cc58788a76ee97c6ca041287a7"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_iid_r40_s2026102802",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "00b7f6371d1003eda3c6aae712b122bf99192ebce30bb583cfd2849707096490",
+        "result.json": "d3975c6d7ad201cf20e88e625e3a8a59f4ea0f9bae698520783de08349940a2b",
+        "result.pickle": "13a21829e725a10737bf949ccade922ebd81fb82dd8a7fb3855922ffba009540",
+        "rounds.json": "d6e1c93f5c7ad746736af067c69d35feec9336634f79ea62794bd4c4bc12ece1",
+        "task.json": "385f1bd7e5d9bf6e5d336a4c59d3d9269cb6eec630d36532c0ecc8751acc67f2",
+        "timing.json": "6ed7e7d3ddf61933a061fd2be8c220bfdc360e4f68cbed1a6797a60b5b531ca4"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_iid_r60_s2026102802",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "623105d1eadfbe1eee4f6c8b85908a2154b0ba2b360e376c04264bd29f470f29",
+        "result.json": "363ceae5b98528e5e5feeb512ce85f37e435429e7ce6e7cc3de9826740ccd204",
+        "result.pickle": "0b515e3c772e5f1295379b4691f7c359f07d84a05c3989878b3dca938186f320",
+        "rounds.json": "7fbccc6afc1758fbe827b3c946633b84c6fbabdcee299187c020fb56c5f13214",
+        "task.json": "1726d347a1a903f756b6d6da0126ca24a87445ba4e76e94785fa8a0f898521d4",
+        "timing.json": "2128e2faf298950c3ce93a529536caeddd5b7cdd9a456c883775d993b0a9fd7a"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_iid_r80_s2026102802",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "05856ce1794e1d0fe562e34825063c7593499e697d462233aae652b1eded0881",
+        "result.json": "37ae1af0de9bfadf0c673bde826aae5772403439180f661cf65219926db7fbba",
+        "result.pickle": "a6db98efb1fc47889b1cb24c9f6188f7ad7f99105e9515ad80ad537e37b2f8f1",
+        "rounds.json": "279b5e73d575826d6b972fb79e685d6479256a94a8a76f3b28f02c0c91fb1b3b",
+        "task.json": "86e1cd07a8afd67c113d255336809ccae8c5b68905986b9e74840624a9763cbc",
+        "timing.json": "e29f05ea6b3a57435a4b21fb450e07bbb624f1d18bfaefcc33510ebb54d6729d"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_dirichlet_clean_s2026102802",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "ffed481180df470eaad34744279b28f4dac01bbc5e27c4441b27d95428d31af1",
+        "result.json": "5a8a086bc3d23ce850af7f274b8874a092d89714085bddd71f3d235ef0866219",
+        "result.pickle": "be17e6088eb3baeb932c412dc8b6baee20b574ff06faf0ce0d172d548deac777",
+        "rounds.json": "9c3fb63ba62978a88de74592e8a4bf68c986054eede91c7c491b1ca8ef9215b7",
+        "task.json": "d9099746b88a4586994bd5e380d9b8f83d63df06be4abaedc4b1d12aa44ec345",
+        "timing.json": "9e9dc984b83d74ca998fb91657acf44978c9620188f3e0b456e3011826490c70"
+      },
+      "eligible_for_final_tad_comparison": false
+    },
+    {
+      "task_id": "TAD_dirichlet_r20_s2026102802",
+      "artifacts": {
+        "dataset_identity.json": "d7b214056d8bf89ad00736840b4f1e90d0f6de93466d6964e47d6e1dfad75ff0",
+        "environment.json": "00b7f6371d1003eda3c6aae712b122bf99192ebce30bb583cfd2849707096490",
+        "result.json": "a7a752da473d9090a1fa6d66038bec1a9b4660f812a6b83d1ce756d6d34c7d2f",
+        "result.pickle": "40d2be65f54e6039a23088683b130eb21e9989d882c3b7ef59e183d60b7093b7",
+        "rounds.json": "b28de31998191bc149b90b3893c41cacb1264fa334f8f4791483af62206ad55e",
+        "task.json": "31f50c33fff595981332ddf9b8fa46353a459772ab31537ad3685489de44526f",
+        "timing.json": "f7701dd506116cf5d8dc3f9f9c7b313661d07119c85c5fb81f3f06275337a1ca"
+      },
+      "eligible_for_final_tad_comparison": false
+    }
+  ],
+  "non_tad_completed_count": 78,
+  "remaining_unstarted": 85,
+  "source_results_modified": false,
+  "source_output_relative": "outputs/old/cifar_mnist_timing150_followup_v1",
+  "report_sha256": "6e01e67b29f7214cc6a2ca1fc32c6b21a0604a5e741f1a8c8d7405917b1d40f1",
+  "authorization": "2026-11-03 修正后完整重测180项。",
+  "historical_actual_attempts": 96,
+  "corrected_fresh_tasks": 180,
+  "reused_results": 0
+}

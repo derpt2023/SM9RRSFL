@@ -135,24 +135,27 @@ python reproduce.py mnist_v7_target_fair_tuning --run --gpus 0,1,2 \
 
 ### CIFAR 耗时复测：与 MNIST 使用同一计时入口
 
-原 CIFAR 保存的是含数据加载、额外取证和断点写入的 worker 总耗时，不能直接当作 MNIST 同边界耗时。用户于 2026-11-02 授权独立重测全部六法 180 项，各 150 轮。入口如下，默认仅展示计划：
+原 CIFAR 保存的 worker 总耗时包含数据加载、额外取证和断点写入，与 MNIST 的计时边界不同。2026-11-03 用户明确授权修正后完整重测六法 180 项，各 150 轮；采用独立目录，不复用上一轮 78 项其他方法结果。默认仅展示计划：
 
 ```bash
-python run_cifar_timing.py
-python run_cifar_timing.py --ready
-python run_cifar_timing.py --batch --max-gpus 6 \
-  --output outputs/old/cifar_mnist_timing150_v1
-python run_cifar_timing.py --summary --output outputs/old/cifar_mnist_timing150_v1
-python -m unittest tests.test_cifar_mnist_timing
+python run_cifar_timing_corrected.py
+python run_cifar_timing_corrected.py --ready
+python run_cifar_timing_corrected.py --batch --gpus 2,4,5,7 --max-gpus 4 \
+  --output outputs/old/cifar_mnist_timing_corrected150_v1
+python run_cifar_timing_corrected.py --summary \
+  --output outputs/old/cifar_mnist_timing_corrected150_v1
+python -m unittest tests.test_cifar_timing_corrected tests.test_cifar_mnist_timing tests.test_cifar_timing_followup
 ```
 
-只在 Station 上训练，严格核对原软件、数据和 126 个科学来源；原配置、种子、R4 / PaperVERT / TAD / V2 实现不变。直接调用 MNIST 的 `run_measured_experiment`：数据加载后开始计时，扣除该公共函数实测的 checkpoint I/O；任务结果写入和 CIFAR 额外取证不在计时内。去密码学耗时仍为总耗时减四段互不重叠的协议墙钟时间，包含训练、攻击、检测、聚合和常规评估，不等于只算训练或关闭密码学重跑。
+这是当前 Station 的独立纠错研究入口，固定上述四卡 UUID，并核验原始失败记录；普通新机器复现固定配置使用第 4 节 `reproduce.py`。`--ready` 检查软件、数据和来源，正式启动还会核对旧研究已退出、历史结果完整、新目录不存在。只在 Station 上训练；原 193 个来源不改，新入口、测试和17项失效清单独立冻结。原 R4 / PaperVERT / 无先验 TAD / V2 参数与三个种子不变。
 
-每个 seed、分布和恶意比例组成六法一组，在同一 GPU 上依次测量；30 组轮换方法顺序。最多六卡、每卡一个本研究任务，8 GiB 空闲显存连续两次间隔 5 秒准入，隔离 GPU 3/6 对应的固定 UUID。共享服务器的其他作业仍可能影响墙钟时间，保存 GPU 负载与进程快照，不声称独占测速。已有目录拒绝覆盖，无自动重试或续跑；TERM/INT 停派发并排空。
+修正后的入口在原科学作用域内，将公共计时函数绑定到当前实际训练函数。每个 checkpoint 在公共函数已扣除的 I/O 时间内核对实际检测器，记录 `training_binding.json`；TAD 必须是 `PriorFreeTAD`，VERT 必须是 `PaperVERT`。本轮不改变 MNIST 的 `run_measured_experiment`：数据加载后开始计时，扣公共 checkpoint I/O；结果保存与额外取证在计时外。去密码学耗时仅减四段互不重叠的协议墙钟时间，不减并行操作累计时间。
 
-最终 `analysis/timing_results.json` 保存全部原值、三 seed 均值和样本 SD、健康问题和单次执行审计。成功任务的临时大型 checkpoint 由公共入口清除，失败现场保留。此次结果只用于耗时比较，诊断 ASR 是辅助目标口径，不替换 `cifar-best` 的官方 Acc/ASR；旧图中的耗时在独立复测完成并核验前仍是旧口径。
+每个 seed、分布和恶意比例组成六法一组，在同一 GPU 上依次测量；30 组轮换方法顺序，各方法在每个位置出现5次。最多四卡、每卡一个本研究任务，8 GiB 空闲显存连续两次间隔5秒、持锁准入；不使用 GPU0/1/3/6。记录共享负载，不声称独占测速。已有目录拒绝覆盖，无自动重试；TERM/INT 停派发并自然排空。
 
-2026-11-02 本次首批物理 GPU1 的其他进程在准入后快速占满显存，TAD 首轮 OOM，原控制器按协议排空。用户明确授权仅此异常的接续：`resume_cifar_timing.py --handoff <原controller PID>` 等待原四项正常结束，逐 SHA 复用四项，再在独立 `outputs/old/cifar_mnist_timing150_followup_v1` 补175项未启动和1项 fresh TAD。只用原 GPU2/4/5/7 固定 UUID，原四组保持 GPU 归属和轮换顺序；原191来源不改，新接续器另行冻结。最终披露180成功与1历史OOM共181次尝试。此入口只适用于这次明确授权的4完成/1失败/175待运行状态，拒绝重复启动或扩大重试；普通复现者使用上面的 fresh 入口。
+历史保留：第一次 GPU1 OOM 曾获得一次接续授权。之后发现旧计时入口缓存训练函数，17项 TAD 实际运行旧 Ding13 检测器及比例先验，不能用于最终耗时比较。该轮已停止，95执行完成中17项TAD无效、78项其他法完成，85项未开始；累计96次实际尝试。`run_cifar_timing.py` 和 `resume_cifar_timing.py` 只保留为冻结依赖和历史证据，不应直接启动。本轮180项全部 fresh，完成后累计276次实际尝试，不删除旧失败或把旧TAD标为有效。
+
+最终 `analysis/timing_results.json` 包含逐seed逐比例原值、均值/样本SD/n、健康问题、实际算法及单次执行审计、完整历史成本。成功临时 checkpoint 由公共入口清除，失败保留。新耗时独立报告，辅助目标ASR仅作诊断，不替换 `cifar-best` 官方Acc/ASR或覆盖原bundle。CIFAR与MNIST的模型、轮数、攻击工作量及SM9 workers仍有差异，计时边界一致不等于工作量相同。
 
 新训练会自动生成 `final_evaluation/summary.csv`、`rounds.csv`、`aggregate.csv` 和 `task_status.json`，也可重新汇总：
 
