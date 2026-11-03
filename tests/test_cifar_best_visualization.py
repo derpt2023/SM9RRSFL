@@ -39,21 +39,25 @@ class CifarBestVisualizationTests(unittest.TestCase):
         for arm in render.ARMS:
             for tag in render.RATIOS:
                 bundle['trajectories'][f'{arm}_iid_{tag}_s1'] = [
-                    dict(round=i, accuracy=i / 300, source_transfer_asr=i / 200,
+                    dict(round=i, accuracy=i / 300, source_transfer_asr=i / (1000 if tag == 'clean' else 200),
                          attack_target_success_rate=.99) for i in range(151)]
         before = copy.deepcopy(bundle)
-        for metric, count in [('accuracy', 30), ('source_transfer_asr', 24)]:
+        for metric, count in [('accuracy', 30), ('source_transfer_asr', 30)]:
             svg = render.curve_plot(bundle, 1, 'iid', metric)
             data = metadata(svg)
             self.assertEqual(len(data['series']), count)
             self.assertEqual(len(ET.fromstring(svg).findall('.//{*}polyline')), count)
             for series in data['series']:
                 self.assertEqual([p[0] for p in series['points']], list(range(151)))
-                self.assertEqual(series['points'][-1][1], .75 if metric == 'source_transfer_asr' else .5)
+                expected = (.15 if series['ratio'] == 0 else .75) if metric == 'source_transfer_asr' else .5
+                self.assertEqual(series['points'][-1][1], expected)
             if metric == 'source_transfer_asr':
                 self.assertNotIn('>测试准确率</text>', svg)
                 self.assertNotIn('data-series="accuracy"', svg)
-                self.assertTrue(all(s['ratio'] > 0 for s in data['series']))
+                self.assertEqual({s['ratio'] for s in data['series']}, {0., .2, .4, .6, .8})
+                self.assertEqual(len([s for s in data['series'] if s['ratio'] == 0]), 6)
+                self.assertIn('>背景转移率</text>', svg)
+                self.assertIn('(a) 0% 恶意节点（背景转移率）', svg)
         self.assertEqual(bundle, before)
 
     def test_both_runtime_charts_have_all_thirty_exact_bars(self):

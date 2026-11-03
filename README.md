@@ -175,7 +175,14 @@ python render_cifar_best.py \
   --output outputs/old/reproductions/cifar-best-redraw
 ```
 
-输出目录必须是新目录。默认生成 30 幅 SVG 和每 seed 的 `visualizations.html`，配色、线型、五比例准确率 / 四比例 ASR 布局与 MNIST 一致；`runtime_visualizations.html` 集中展示各 seed 的两种耗时。需要 PNG 时追加 `--png-browser /path/to/chrome`，macOS 可用 `--png-browser "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`。
+输出目录必须是新目录。默认生成 30 幅 SVG 和每 seed 的 `visualizations.html`，沿用 MNIST 配色、线型与面板布局；准确率和 ASR 均展示 0/20/40/60/80% 五比例，0% ASR 单独标注为无攻击背景转移率。`runtime_visualizations.html` 集中展示各 seed 的两种耗时。需要 PNG 时追加 `--png-browser /path/to/chrome`，macOS 可用 `--png-browser "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`。
+
+现有包的[含 0% ASR 补充图集](outputs/cifar-best/final_evaluation/asr_with_clean/visualizations.html)包含三个 seed 的 IID / Non-IID 六幅五比例图。当前耗时研究锁定旧包清单，因此采用新增目录，原图包和清单保持不变。只重绘这组补充图可运行：
+
+```bash
+python render_cifar_best.py --asr-only --package outputs/cifar-best \
+  --output outputs/old/reproductions/cifar-asr-with-clean
+```
 
 `*_runtime_without_crypto.svg` 使用各任务原始总墙钟时间减去四段互不重叠的密码协议墙钟时间；不减并行签名/验签累计时间，不代表关闭密码学重跑或独占速度测试。CIFAR 原峰值内存字段均为占位值 0，对应 `*_memory_overhead.svg` 明示“未记录”，不将其画成实际 0 MB。
 

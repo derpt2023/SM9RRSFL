@@ -36,8 +36,8 @@ TIMING_NOTE = ('耗时为共享 GPU 上的实测墙钟秒数，包含数据加�
                '不扣除并行操作累计时间，不代表关闭密码学重跑或独占速度测试。')
 SCOPE_NOTE = ('Ours 为固定 R4，其他五法逐项复用 cifar-paper。准确率使用官方 test 10000 张，'
               'ASR 使用其中 source 5 的 1000 张，非辅助目标 ASR。'
-              '曲线保留全部 0–150 轮，未平滑、插值或按健康状态删样本；攻击从第 25 轮开始。'
-              'ASR 图与 MNIST 一样展示四个攻击比例，clean 背景转移率仍保留在原表格中。')
+              '曲线保留全部 0–150 轮，未平滑、插值或按健康状态删样本；有恶意节点时攻击从第 25 轮开始。'
+              'ASR 图包含 0/20/40/60/80% 五个比例；0% 为无攻击背景转移率，不表示攻击效果。')
 SVG_NS = 'http://www.w3.org/2000/svg'
 ET.register_namespace('', SVG_NS)
 
@@ -104,8 +104,6 @@ def curve_plot(bundle, seed, partition, metric):
                                      if is_asr else '：不同恶意节点比例下的模型收敛/准确率对比')
     panels, evidence = [], []
     for tag, ratio in RATIOS.items():
-        if is_asr and ratio == 0:
-            continue
         series = {}
         for arm in ARMS:
             name = f'{arm}_{partition}_{tag}_s{seed}'
@@ -118,6 +116,8 @@ def curve_plot(bundle, seed, partition, metric):
     if is_asr:
         svg = svg.replace('data-series="accuracy"', 'data-series="source_transfer_asr"')
         svg = svg.replace('>测试准确率</text>', '>攻击成功率 (ASR)</text>')
+        svg = svg.replace('>攻击成功率 (ASR)</text>', '>背景转移率</text>', 1)
+        svg = svg.replace('(a) 恶意节点比例 0%', '(a) 0% 恶意节点（背景转移率）')
     svg = re.sub(r'<desc>.*?</desc>', '<desc>' + escape(SCOPE_NOTE) + '</desc>', svg)
     return with_metadata(svg, dict(metric=metric, seed=seed, partition=partition, series=evidence))
 
@@ -287,9 +287,46 @@ def main():
     parser.add_argument('--output', type=Path, required=True, help='New directory; never overwrite accepted data')
     parser.add_argument('--expected-sha256', default=SOURCE_SHA)
     parser.add_argument('--png-browser', type=Path, help='Optional Chrome/Chromium executable for PNG exports')
+    parser.add_argument('--asr-only', action='store_true', help='Six five-ratio ASR figures in a separate supplement')
     args = parser.parse_args()
-    result = render(args.package, args.output, args.expected_sha256, args.png_browser)
+    renderer = render_asr_supplement if args.asr_only else render
+    result = renderer(args.package, args.output, args.expected_sha256, args.png_browser)
     print(json.dumps(dict(output=str(args.output), svg_count=result['svg_count'], png_count=result['png_count'])))
+
+
+def render_asr_supplement(package, output, expected_sha256=SOURCE_SHA, browser=None):
+    """Add complete ASR plots without changing a training-pinned package manifest."""
+    bundle, _, inputs = load_inputs(package, expected_sha256)
+    package_manifest = package / 'provenance/file_manifest.json'
+    inputs[package_manifest] = sha(package_manifest.read_bytes())
+    output.mkdir(parents=True, exist_ok=False)
+    generated = []
+    for seed in accepted.SEEDS:
+        plot_dir = output / f'seed_{seed}' / 'plots'
+        plot_dir.mkdir(parents=True)
+        for part, (slug, label) in PARTITIONS.items():
+            path = plot_dir / f'{slug}_asr_comparison.svg'
+            path.write_text(curve_plot(bundle, seed, part, 'source_transfer_asr'), encoding='utf-8')
+            generated.append((f'seed {seed} · {label} · ASR（含 0% 背景转移率）',
+                              path.relative_to(output).as_posix()))
+    intro = f'<p>{SCOPE_NOTE}</p><p>本页为含 0% 的完整 ASR 补充图集，直接使用已接受数据，不重新训练。</p>'
+    (output / 'visualizations.html').write_text(dashboard('CIFAR-BEST · 五比例 ASR（含 0%）', generated, intro), encoding='utf-8')
+    if browser:
+        png_exports(output, browser)
+    for path, digest in inputs.items():
+        if sha(path.read_bytes()) != digest:
+            raise ValueError('Input changed during rendering: ' + str(path))
+    result = dict(schema='cifar-best-clean-asr-supplement-v1', source_sha256=expected_sha256,
+                  base_package_manifest_sha256=inputs[package_manifest],
+                  renderer_sha256=sha(Path(__file__).read_bytes()),
+                  metric='source_transfer_asr', ratios=list(RATIOS.values()),
+                  clean_interpretation='No-attack background source-to-target transfer rate',
+                  svg_count=6, png_count=len(list(output.rglob('*.png'))),
+                  visual_inspection_pending=True,
+                  outputs={p.relative_to(output).as_posix(): sha(p.read_bytes())
+                           for p in sorted(output.rglob('*')) if p.is_file()})
+    write_json(output / 'render_manifest.json', result)
+    return result
 
 
 if __name__ == '__main__':
