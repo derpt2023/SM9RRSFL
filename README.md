@@ -18,6 +18,7 @@ sm9rrsfl/                             训练、六法、检测、密码协议
 scripts/experiments/cifar10/           CIFAR 攻击和观测依赖
 third_party/gmssl/                    SM9 编译所需固定版源码、许可证、SHA
 render_cifar_best.py                  已接受 CIFAR 数据包按 MNIST 格式重绘
+integrate_cifar_best_timing.py         旧耗时归档、正式耗时整合（默认仅计划）
 outputs/
   cifar-best/                         新 R4 30 项 + 原其他五法 150 项
   mnist_v7_target_fair_tuning/          MNIST 原始调参及最终 180 项
@@ -26,7 +27,7 @@ outputs/
 
 已有数据包入口：
 
-- [CIFAR 六法可视化](outputs/cifar-best/final_evaluation/visualizations.html)和[完整报告](outputs/cifar-best/final_evaluation/report.html)，每 seed 按 MNIST 格式分别绘制 IID / Non-IID 的准确率、ASR、总耗时、扣除密码学耗时。`summary.csv`、`rounds.csv`、`aggregate.csv` 保留全部原值。
+- [CIFAR 六法可视化](outputs/cifar-best/final_evaluation/visualizations.html)和[完整报告](outputs/cifar-best/final_evaluation/report.html)，每 seed 按 MNIST 格式分别绘制 IID / Non-IID 的准确率、ASR、总耗时、扣除密码学耗时。`summary.csv`、`aggregate.csv` 的耗时已更新为同 MNIST 口径的 180 项复测；准确率、官方 ASR 和 `rounds.csv` 均保持原值。
 - MNIST：`outputs/mnist_v7_target_fair_tuning/final_evaluation/summary.csv`、`aggregate.csv`，各 `seed_241/242/243` 的图。
 - `outputs/cifar-best/provenance/task_sources.json` 逐项记录 R4 与五法来源。原 `cifar-paper` 位于 `outputs/old/cifar-paper`。
 
@@ -135,7 +136,7 @@ python reproduce.py mnist_v7_target_fair_tuning --run --gpus 0,1,2 \
 
 ### CIFAR 耗时复测：与 MNIST 使用同一计时入口
 
-**2026-11-04 完成：180/180 fresh，各150轮，0执行失败/重试。** 新[同口径耗时图集](outputs/cifar-best/timing_mnist_boundary/visualizations.html)和[完整报告](outputs/cifar-best/timing_mnist_boundary/report.html)包含三个seed独立图、三seed均值图、全部180原值、60组均值/样本SD/n。原 `final_evaluation` 中的耗时属于旧worker边界；公平计时比较使用此独立新报告。官方Acc/ASR与原bundle不改。3项TAD Non-IID clean健康警告与原基准一致，保留原值。
+**2026-11-04 完成：180/180 fresh，各150轮，0执行失败/重试。** 新[同口径耗时图集](outputs/cifar-best/timing_mnist_boundary/visualizations.html)和[完整报告](outputs/cifar-best/timing_mnist_boundary/report.html)包含三个seed独立图、三seed均值图、全部180原值、60组均值/样本SD/n。新耗时已整合到[主报告](outputs/cifar-best/final_evaluation/report.html#timing-rerun)，主报告的 summary/aggregate/combined_results 与 16 幅耗时图均采用新数据。旧主报告及耗时表、图已归档到 `outputs/old/cifar_best_worker_timing_20261104`。独立复测报告继续保留作审计来源，官方 Acc/ASR、健康资格、排名与原 bundle 不改。3项TAD Non-IID clean健康警告与原基准一致，保留原值。
 
 下载归档 `outputs/old/cifar_timing_corrected_complete_20261104/raw` 共1990文件/224105169字节，逐SHA与Station一致；成功临时checkpoint已清理，这不是完整断点备份。只重绘新耗时（输出须为新目录）：
 
@@ -149,6 +150,18 @@ python -m unittest tests.test_cifar_timing_render
 ```
 
 SVG/HTML默认生成；没有Chrome时省略 `--png-browser`。每seed两分布×两种耗时共12图，另4张三seed均值图。原始计时报告和历史失败记录均保留。
+
+主报告当前文件清单为 `provenance/current_file_manifest.json`，逐项耗时来源为 `provenance/current_timing.json`。原 `export`、`analysis`、`raw` 及 `provenance/file_manifest.json` 保留原性能取证内容与历史清单，其中的历史计时不作为当前耗时来源。整合前原报告完整副本和 SHA 回执位于 `outputs/old/cifar_best_worker_timing_20261104`。
+
+仅在尚未整合的原包上执行一次（默认计划，`--apply` 才归档和替换耗时）：
+
+```bash
+python integrate_cifar_best_timing.py
+python integrate_cifar_best_timing.py --apply
+python -m unittest tests.test_cifar_best_timing_integration tests.test_cifar_timing_render tests.test_cifar_best_visualization
+```
+
+已经整合的包使用下方 `render_cifar_best.py` 重绘；整合入口拒绝重复应用，不触发训练。
 
 原 CIFAR 保存的 worker 总耗时包含数据加载、额外取证和断点写入，与 MNIST 的计时边界不同。2026-11-03 用户明确授权修正后完整重测六法 180 项，各 150 轮；采用独立目录，不复用上一轮 78 项其他方法结果。默认仅展示计划：
 
@@ -170,7 +183,7 @@ python -m unittest tests.test_cifar_timing_corrected tests.test_cifar_mnist_timi
 
 历史保留：第一次 GPU1 OOM 曾获得一次接续授权。之后发现旧计时入口缓存训练函数，17项 TAD 实际运行旧 Ding13 检测器及比例先验，不能用于最终耗时比较。该轮已停止，95执行完成中17项TAD无效、78项其他法完成，85项未开始；累计96次实际尝试。`run_cifar_timing.py` 和 `resume_cifar_timing.py` 只保留为冻结依赖和历史证据，不应直接启动。本轮180项全部 fresh，完成后累计276次实际尝试，不删除旧失败或把旧TAD标为有效。
 
-最终 `analysis/timing_results.json` 包含逐seed逐比例原值、均值/样本SD/n、健康问题、实际算法及单次执行审计、完整历史成本。成功临时 checkpoint 由公共入口清除，失败保留。新耗时独立报告，辅助目标ASR仅作诊断，不替换 `cifar-best` 官方Acc/ASR或覆盖原bundle。CIFAR与MNIST的模型、轮数、攻击工作量及SM9 workers仍有差异，计时边界一致不等于工作量相同。
+最终 `analysis/timing_results.json` 包含逐seed逐比例原值、均值/样本SD/n、健康问题、实际算法及单次执行审计、完整历史成本。成功临时 checkpoint 由公共入口清除，失败保留。新耗时保留独立审计报告并整合入 `cifar-best` 主报告；辅助目标 ASR 仅作诊断，不替换官方 Acc/ASR 或覆盖原 bundle。CIFAR与MNIST的模型、轮数、攻击工作量及SM9 workers仍有差异，计时边界一致不等于工作量相同。
 
 新训练会自动生成 `final_evaluation/summary.csv`、`rounds.csv`、`aggregate.csv` 和 `task_status.json`，也可重新汇总：
 
@@ -190,18 +203,18 @@ python render_cifar_best.py \
   --output outputs/old/reproductions/cifar-best-redraw
 ```
 
-输出目录必须是新目录。默认生成 30 幅 SVG 和每 seed 的 `visualizations.html`，沿用 MNIST 配色、线型与面板布局；准确率和 ASR 均展示 0/20/40/60/80% 五比例，0% ASR 单独标注为无攻击背景转移率。`runtime_visualizations.html` 集中展示各 seed 的两种耗时。需要 PNG 时追加 `--png-browser /path/to/chrome`，macOS 可用 `--png-browser "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`。
+输出目录必须是新目录。整合后的数据包默认生成 34 幅 SVG（含 4 张三 seed 耗时均值图）和每 seed 的 `visualizations.html`，沿用 MNIST 配色、线型与面板布局；准确率和 ASR 均展示 0/20/40/60/80% 五比例，0% ASR 单独标注为无攻击背景转移率。`runtime_visualizations.html` 集中展示各 seed 的两种耗时。需要 PNG 时追加 `--png-browser /path/to/chrome`，macOS 可用 `--png-browser "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`。
 
-现有包的[含 0% ASR 补充图集](outputs/cifar-best/final_evaluation/asr_with_clean/visualizations.html)包含三个 seed 的 IID / Non-IID 六幅五比例图。当前耗时研究锁定旧包清单，因此采用新增目录，原图包和清单保持不变。只重绘这组补充图可运行：
+现有包的[含 0% ASR 补充图集](outputs/cifar-best/final_evaluation/asr_with_clean/visualizations.html)包含三个 seed 的 IID / Non-IID 六幅五比例图。这组补充图保持原样；主报告耗时整合不改变准确率与 ASR 图。只重绘这组补充图可运行：
 
 ```bash
 python render_cifar_best.py --asr-only --package outputs/cifar-best \
   --output outputs/old/reproductions/cifar-asr-with-clean
 ```
 
-`*_runtime_without_crypto.svg` 使用各任务原始总墙钟时间减去四段互不重叠的密码协议墙钟时间；不减并行签名/验签累计时间，不代表关闭密码学重跑或独占速度测试。CIFAR 原峰值内存字段均为占位值 0，对应 `*_memory_overhead.svg` 明示“未记录”，不将其画成实际 0 MB。
+`*_runtime_without_crypto.svg` 使用同 MNIST 边界的总耗时减去四段互不重叠的密码协议墙钟时间；不减并行签名/验签累计时间，不代表关闭密码学重跑或独占速度测试。CIFAR 原峰值内存字段均为占位值 0，对应 `*_memory_overhead.svg` 明示“未记录”，不将其画成实际 0 MB。
 
-该重绘入口要求原始合并数据包及配套 summary，不能把新 worker 的任意 JSON 当作已接受 bundle。尾 10 轮与最终一轮必须分开报告；CIFAR 官方 test 的 10,000/源类 1,000 张与原验证的 7,500/源类 750 张不能混算。原 `render_cifar_r4_formal.py` 作为冻结来源保留。
+该重绘入口要求原始合并数据包及配套 summary；整合包还核验 `provenance/current_timing.json`、整合回执和非耗时字段指纹，不能把任意新 worker JSON 当作已接受 bundle。尾 10 轮与最终一轮必须分开报告；CIFAR 官方 test 的 10,000/源类 1,000 张与原验证的 7,500/源类 750 张不能混算。原 `render_cifar_r4_formal.py` 作为冻结来源保留。
 
 ## 6. 验证与结果边界
 

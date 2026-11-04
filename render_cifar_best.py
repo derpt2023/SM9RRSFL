@@ -73,11 +73,20 @@ def load_inputs(package, expected_sha256):
     files = {p: p.read_bytes() for p in (source, baseline, summary)}
     if expected_sha256 != SOURCE_SHA or sha(files[source]) != expected_sha256:
         raise ValueError('Exact accepted CIFAR-BEST bundle required')
-    if sha(files[summary]) != SUMMARY_SHA:
+    integration = package / 'provenance/main_timing_integration.json'
+    if not integration.exists() and sha(files[summary]) != SUMMARY_SHA:
         raise ValueError('Exact accepted summary required for memory evidence')
     bundle = json.loads(files[source])
     report = accepted.validate(bundle, files[baseline])
     summaries = json.loads(files[summary])
+    if integration.exists():
+        import cifar_best_timing_integration as current
+        payload_path = package / 'provenance/current_timing.json'
+        files[integration], files[payload_path] = integration.read_bytes(), payload_path.read_bytes()
+        marker, payload = json.loads(files[integration]), json.loads(files[payload_path])
+        if sha(files[payload_path]) != marker['timing_payload_sha256'] or current.projection_sha(summaries) != marker['performance_summary_projection_sha256']:
+            raise ValueError('Integrated timing or performance summary identity differs')
+        report = current.overlay(report, payload)
     by_id = {row['task_id']: row for row in summaries}
     if len(summaries) != 180 or set(by_id) != set(report['cells']):
         raise ValueError('Summary coverage differs')
@@ -132,6 +141,9 @@ def time_plot(report, seed, partition, metric, y_max):
     title = PARTITIONS[partition][1] + ('：训练/防御时间开销（扣除密码协议）'
                                      if without else '：端到端时间开销（含密码协议）')
     y_label = '扣除密码协议后的运行时间（秒）' if without else '端到端运行时间（秒）'
+    if 'timing_provenance' in report:
+        title = title.replace('端到端时间开销', '总时间开销（同MNIST计时）')
+        y_label = y_label.replace('端到端运行时间', '总运行时间')
     values, evidence = {}, []
     for tag, ratio in RATIOS.items():
         group = {}
@@ -160,7 +172,7 @@ def time_plot(report, seed, partition, metric, y_max):
         ET.SubElement(el, '{' + SVG_NS + '}title').text = f'{item["method"]}: {item["value"]:.6f} s'
     return with_metadata(ET.tostring(root, encoding='unicode'),
                          dict(metric=metric, unit='seconds', seed=seed, partition=partition,
-                              y_max=y_max, definition=TIMING_NOTE, bars=evidence))
+                              y_max=y_max, definition=report.get('current_timing_note', TIMING_NOTE), bars=evidence))
 
 
 def memory_plot(seed, partition):
@@ -200,6 +212,7 @@ def png_exports(output, browser):
 
 def render(package, output, expected_sha256=SOURCE_SHA, browser=None):
     bundle, report, inputs = load_inputs(package, expected_sha256)
+    timing_note = report.get('current_timing_note', TIMING_NOTE)
     output.mkdir(parents=True, exist_ok=False)
     all_plots, runtime_plots, asr_plots = [], [], []
     nav = []
@@ -214,7 +227,7 @@ def render(package, output, expected_sha256=SOURCE_SHA, browser=None):
                 ('accuracy_comparison', '模型收敛 / 准确率', curve_plot(bundle, seed, partition, 'accuracy')),
                 ('asr_comparison', '攻击成功率（ASR）', curve_plot(bundle, seed, partition, 'source_transfer_asr')),
                 ('runtime_without_crypto', '扣除密码协议的时间开销', time_plot(report, seed, partition, 'runtime_without_crypto_seconds', y_max)),
-                ('runtime_overhead', '端到端时间开销（含密码协议）', time_plot(report, seed, partition, 'runtime_with_crypto_seconds', y_max)),
+                ('runtime_overhead', '总时间开销（含密码协议，同MNIST计时）' if 'timing_provenance' in report else '端到端时间开销（含密码协议）', time_plot(report, seed, partition, 'runtime_with_crypto_seconds', y_max)),
                 ('memory_overhead', '峰值内存（未记录）', memory_plot(seed, partition)),
             ]
             for name, caption, svg in plots:
@@ -228,7 +241,7 @@ def render(package, output, expected_sha256=SOURCE_SHA, browser=None):
                 if name == 'asr_comparison':
                     asr_plots.append(entry)
         intro = (f'<p>seed {seed} · 6 方法 × 2 分布 × 5 比例 · 每项 150 轮。</p>'
-                 f'<p>{SCOPE_NOTE}</p><p>{TIMING_NOTE}</p>'
+                 f'<p>{SCOPE_NOTE}</p><p>{timing_note}</p>'
                  '<p><a href="../visualizations.html">全部 seed</a> · <a href="../report.html">完整原值、健康与排名报告</a></p>')
         (seed_dir / 'visualizations.html').write_text(dashboard(f'CIFAR-BEST · seed {seed}', generated, intro), encoding='utf-8')
         nav.append(f'<li><a href="seed_{seed}/visualizations.html">seed {seed}：准确率 / ASR / 两种耗时 / 内存记录</a></li>')
@@ -236,12 +249,24 @@ def render(package, output, expected_sha256=SOURCE_SHA, browser=None):
                 '<p><a href="runtime_visualizations.html">全部耗时图</a> · '
                 '<a href="asr_visualizations.html">全部 ASR 图</a> · '
                 '<a href="report.html">完整原值、健康与排名报告</a></p>'
-                f'<p>{TIMING_NOTE}</p>')
+                f'<p>{timing_note}</p>')
     fair_plots = [item for item in runtime_plots if item[1].endswith('runtime_without_crypto.svg')]
     for name, title, plots in [('visualizations', 'CIFAR-BEST · MNIST 格式可视化', fair_plots),
                                 ('runtime_visualizations', 'CIFAR-BEST · 耗时可视化', runtime_plots),
                                 ('asr_visualizations', 'CIFAR-BEST · 官方测试 ASR', asr_plots)]:
         (output / f'{name}.html').write_text(dashboard(title, plots, overview), encoding='utf-8')
+    if 'timing_provenance' in report:
+        import cifar_best_timing_integration as current
+        from render_cifar_timing import chart
+        payload = json.loads((package / 'provenance/current_timing.json').read_text())
+        rows = [dict(task_id=name, **item['config'], **item['summary']) for name, item in payload['cells'].items()]
+        mean_dir = output / 'seed_mean/plots'; mean_dir.mkdir(parents=True)
+        for partition, (slug, _) in PARTITIONS.items():
+            ymax = max(r['runtime_seconds'] for r in rows if r['partition'] == partition) * 1.30
+            for metric, suffix in [('runtime_seconds','runtime_overhead'),('runtime_without_crypto_seconds','runtime_without_crypto')]:
+                path = mean_dir / f'{slug}_{suffix}.svg'
+                path.write_text(chart(rows, partition, metric, ymax), encoding='utf-8')
+                all_plots.append(path.relative_to(output).as_posix())
     # Keep the complete historical tables and disclosures, replace only figure blocks.
     accepted.document(report, output, expected_sha256)
     page = (output / 'report.html').read_text()
@@ -258,6 +283,10 @@ def render(package, output, expected_sha256=SOURCE_SHA, browser=None):
                                   f'<figcaption><a href="seed_{seed}/plots/{n}.svg">SVG</a></figcaption></figure>' for n in new_names)
             page = re.sub(r'<figure><img src="' + old_name + '_s' + str(seed) + r'\.png".*?</figure>', replacement, page)
     page = page.replace('<h1>', '<p><a href="visualizations.html">可视化首页</a> · <a href="runtime_visualizations.html">全部耗时图</a></p><h1>', 1)
+    if 'timing_provenance' in report:
+        page = page.replace('<h2>seed ', current.section(payload) + '<h2>seed ', 1)
+        page = page.replace('按用户2026-11-01明确指定，新做Ours R4共30项','准确率与ASR按用户2026-11-01明确指定，新做Ours R4共30项',1)
+        page = page.replace('共享GPU实测总用时及减去crypto区间的用时不等同独占速度测试；减法不是关闭密码学重新运行。', timing_note)
     (output / 'report.html').write_text(page, encoding='utf-8')
     write_json(output / 'combined_results.json', report)
     if browser:
@@ -267,13 +296,14 @@ def render(package, output, expected_sha256=SOURCE_SHA, browser=None):
             raise ValueError('Input changed during rendering: ' + str(path))
     manifest = dict(schema='cifar-best-mnist-layout-v1', created_utc=datetime.now(timezone.utc).isoformat(),
                     source_sha256=expected_sha256, baseline_sha256=accepted.base.BASELINE_SHA,
-                    summary_sha256=SUMMARY_SHA, renderer_sha256=sha(Path(__file__).read_bytes()),
+                    summary_sha256=inputs[package / 'final_evaluation/summary.json'], renderer_sha256=sha(Path(__file__).read_bytes()),
                     frozen_style_sha256=sha(Path(style.__file__).read_bytes()),
                     figures=all_plots, svg_count=len(all_plots), png_count=len(list(output.rglob('*.png'))),
                     curves='raw per-seed rounds 0–150; no smoothing or cross-seed averaging',
-                    timing_definition=TIMING_NOTE, timing_cells_validated=180,
+                    timing_definition=timing_note, timing_cells_validated=180,
                     memory_available=False, all180_cells_validated=True, all30_ours_replaced=True,
-                    other150_values_and_curves_unchanged=True, old_top20_plotted=False,
+                    other150_performance_values_and_curves_unchanged=True,
+                    timing_source='corrected180' if 'timing_provenance' in report else 'original_worker', old_top20_plotted=False,
                     mnist_palette=style.METHOD_COLORS, visual_inspection_pending=True,
                     outputs={p.relative_to(output).as_posix(): sha(p.read_bytes())
                              for p in sorted(output.rglob('*')) if p.is_file()})
