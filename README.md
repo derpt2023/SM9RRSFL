@@ -135,6 +135,21 @@ python reproduce.py mnist_v7_target_fair_tuning --run --gpus 0,1,2 \
 
 ### CIFAR 耗时复测：与 MNIST 使用同一计时入口
 
+**2026-11-04 完成：180/180 fresh，各150轮，0执行失败/重试。** 新[同口径耗时图集](outputs/cifar-best/timing_mnist_boundary/visualizations.html)和[完整报告](outputs/cifar-best/timing_mnist_boundary/report.html)包含三个seed独立图、三seed均值图、全部180原值、60组均值/样本SD/n。原 `final_evaluation` 中的耗时属于旧worker边界；公平计时比较使用此独立新报告。官方Acc/ASR与原bundle不改。3项TAD Non-IID clean健康警告与原基准一致，保留原值。
+
+下载归档 `outputs/old/cifar_timing_corrected_complete_20261104/raw` 共1990文件/224105169字节，逐SHA与Station一致；成功临时checkpoint已清理，这不是完整断点备份。只重绘新耗时（输出须为新目录）：
+
+```bash
+python render_cifar_timing.py \
+  --source outputs/old/cifar_timing_corrected_complete_20261104/raw \
+  --expected-sha256 074ca251f670509e60f2625a1b73fd4a7084b82d98713295ebf80fad09468077 \
+  --output outputs/old/cifar_timing_redraw \
+  --png-browser "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+python -m unittest tests.test_cifar_timing_render
+```
+
+SVG/HTML默认生成；没有Chrome时省略 `--png-browser`。每seed两分布×两种耗时共12图，另4张三seed均值图。原始计时报告和历史失败记录均保留。
+
 原 CIFAR 保存的 worker 总耗时包含数据加载、额外取证和断点写入，与 MNIST 的计时边界不同。2026-11-03 用户明确授权修正后完整重测六法 180 项，各 150 轮；采用独立目录，不复用上一轮 78 项其他方法结果。默认仅展示计划：
 
 ```bash
