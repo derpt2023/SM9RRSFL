@@ -14,7 +14,7 @@ CONFIG = ROOT/'configs/hfcdr_formal_v1.json'
 OUTPUT = ROOT/'outputs/hfcdr_formal_v1'
 OWN = ('hfcdr_formal_protocol.py', 'hfcdr_formal_scheduler.py', 'run_hfcdr_formal.py',
        'audit_hfcdr_formal.py', 'render_hfcdr_formal.py', 'tests/test_hfcdr_formal.py',
-       'HFCDR_FORMAL.txt', 'hfcdr_study_runtime.py', 'hfcdr_study_report.py',
+       'HFCDR_FORMAL.txt', 'hfcdr_health_context.py', 'hfcdr_study_runtime.py', 'hfcdr_study_report.py',
        'hfcdr_study_protocol.py', 'configs/hfcdr_attack_study_v1.json',
        'hfcdr_pilot_report.py', 'hfcdr_confirmation.py', 'run_hfcdr_confirmation.py',
        'configs/hfcdr_confirmation_rules_v1.json', 'configs/hfcdr_validation_confirmation_v1.json',
@@ -30,10 +30,8 @@ def make_policy(manifest, decision):
     if (policy['phase'] != 'confirmation' or not decision['complete'] or not decision['formal_allowed']
             or decision['fingerprint'] != manifest['fingerprint'] or decision['completed'] != 312):
         raise ValueError('Complete qualified confirmation required')
-    if tuple(policy['defense_candidates']) != confirmation.METHODS:
-        # JSON sorted-key serialization changes key order; the set is scientific.
-        if set(policy['defense_candidates']) != set(confirmation.METHODS):
-            raise ValueError('All six confirmed methods required')
+    if set(policy['defense_candidates']) != set(confirmation.METHODS):
+        raise ValueError('All six confirmed methods required')
     policy['defense_candidates'] = {m:policy['defense_candidates'][m] for m in confirmation.METHODS}
     if any(len(cs) != 1 for cs in policy['defense_candidates'].values()):
         raise ValueError('One frozen candidate per method required')

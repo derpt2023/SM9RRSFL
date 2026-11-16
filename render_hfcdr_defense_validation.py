@@ -16,6 +16,7 @@ from matplotlib.patches import Patch
 
 import hfcdr_validation_protocol as p
 from hfcdr_validation_analysis import report
+from hfcdr_health_context import context
 
 COLORS = {'hfcdr': '#4D91BD', 'alignins': '#DC7477', 'vert': '#42A6A1',
           'tad': '#A98EC8', 'krum': '#E3AD63'}
@@ -78,7 +79,7 @@ def draw(payload, folder):
     axes[1, 3].axis('off')
     axes[1, 3].legend(handles=[Patch(facecolor=c, label=m.upper()) for m, c in COLORS.items()],
                       loc='upper left', frameon=False)
-    axes[1, 3].text(.02, .52, 'All candidate outcomes retained.\nMean requires both development seeds.\nError bars: sample SD (n-1).\nHatching: at least one health failure.\nMissing runs are not imputed.\nFixed methods are never retuned.\nFedAvg references: Stage A paired runs.',
+    axes[1, 3].text(.02, .52, 'All candidate outcomes retained.\nMean requires both development seeds.\nError bars: sample SD (n-1).\nHatching: at least one raw health flag.\nSee report for warmup/attack context.\nMissing runs are not imputed.\nFixed methods are never retuned.\nFedAvg references: Stage A paired runs.',
                     transform=axes[1, 3].transAxes, fontsize=10, va='top', linespacing=1.7)
     fig.suptitle(f"{payload['dataset'].upper()} | {payload['partition']} | {ylabel}", fontsize=15)
     fig.tight_layout(rect=(0, 0, 1, .95))
@@ -107,6 +108,9 @@ def render(study, destination, selection=None):
                 figures.append(draw(plot_data(manifest, assessment, dataset, partition, metric), folder))
     p.write(destination/'report.json', assessment)
     p.write(destination/'selection.json', selection)
+    health_context = [context(p.read(study/'tasks'/tid/'result.json'), summary)
+                      for tid,summary in assessment['summaries'].items() if not summary['healthy']]
+    p.write(destination/'health_context.json',health_context)
     rows = []
     for decision in (selection or {}).get('decisions', []):
         for candidate in decision['candidates']:
@@ -121,7 +125,8 @@ def render(study, destination, selection=None):
     page += '<p>HFCDR、AlignIns各最多4组有来源的候选；VERT、TAD、Krum固定，跳过搜索。每候选覆盖相同56个场景；未使用的预算不转移。FedAvg引用攻击筛选阶段的56个配对结果。所有结果来自训练集留出的验证集，未读取官方测试数据。</p>'
     page += '<p>每方法每数据集只选一套参数，跨分布、攻击和恶意比例共用。效用为攻击场景等权平均的0.5×Acc+0.5×(1−ASR)。可调方法须满足健康门槛，且各干净配对相对FedAvg的Acc下降≤3个百分点、背景ASR增加≤5个百分点。并列优先原基线。固定方法的不合格标记保留，不借机更换参数。</p>'
     page += '<p>TAD使用用户确认的PriorFreeTAD解释版本；不宣称原论文歧义已消除。Krum在60%/80%超过其理论保证范围；本阶段只验证0%/40%/80%，20%/60%留待后续完整矩阵。此页不构成正式测试结论。旧46项官方测试探索结果不参与选参。</p>'
-    page += '<p><a href="report.json">全部逐任务指标</a> · <a href="selection.json">全部候选分数、选择及未达标原因</a> · <a href="visualization_audit.json">绘图凭据</a></p></div>'
+    page += '<p>原健康指标按实验开始前指定的客户端身份统计。Krum在攻击启动前连续选择预定恶意身份时，也可能触发权重标记；这不证明攻击已造成失效。另表区分纯暖身、跨启动边界和纯攻击阶段的五轮窗口，原健康标记及选择规则均不更改。误剔除的分母是预先指定的诚实客户端数。</p>'
+    page += '<p><a href="report.json">全部逐任务指标</a> · <a href="selection.json">全部候选分数、选择及未达标原因</a> · <a href="health_context.json">健康标记的发生阶段和解释</a> · <a href="visualization_audit.json">绘图凭据</a></p></div>'
     page += '<div class="card"><table><tr>'+''.join('<th>'+x+'</th>' for x in
         ('数据', '方法', '候选', '策略', '训练数', '效用', '满足门槛', '选定', '问题数'))+'</tr>'+''.join(rows)+'</table></div>'
     for name in figures:
@@ -129,6 +134,7 @@ def render(study, destination, selection=None):
     (destination/'report.html').write_text(page+'</html>', encoding='utf-8')
     audit = dict(fingerprint=manifest['fingerprint'], plots=len(figures), complete_tasks=assessment['completed'],
         expected_seed_count=len(manifest['policy']['seeds']), official_test_used=False,
-        all_outcomes_retained=True, plot_hashes={f.name:p.sha(f) for f in folder.glob('*.plot.json')})
+        all_outcomes_retained=True, plot_hashes={f.name:p.sha(f) for f in folder.glob('*.plot.json')},
+        reader_sources={n:p.sha(p.ROOT/n) for n in ('render_hfcdr_defense_validation.py','hfcdr_health_context.py')})
     p.write(destination/'visualization_audit.json', audit)
     return audit

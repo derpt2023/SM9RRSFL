@@ -19,6 +19,7 @@ from matplotlib.lines import Line2D
 
 import hfcdr_formal_protocol as p
 from hfcdr_study_report import report
+from hfcdr_health_context import context
 
 METHODS=('hfcdr','vert','alignins','tad','krum','fedavg')
 LABELS=dict(zip(METHODS,('HFCDR-FL','VERT','AlignIns','TAD','Krum','FedAvg')))
@@ -164,6 +165,7 @@ def html_dashboard(output,summary,figures,manifest):
     page+='<p>参数已通过训练验证集筛选及独立验证种子确认，每方法每数据集仅用一套，跨攻击、比例、分布共用。正式测试不回流选参。历史46项官方测试探索结果未参与本轮选择或均值；新种子不消除该历史暴露。</p>'
     page+='<p>运行时间为共享 GPU 实测同步墙钟时间，包含本地训练、防御聚合和评估，排除数据/上下文准备与文件写入；原始日志保留并发负载。新增实验未执行密码协议。VERT固定原文history10/epochs5/lr0.01与作者投影维数，TAD为用户确认的固定PriorFreeTAD解释版本；原文歧义仍披露，不能声称是唯一作者复现，也不能与历史MNIST旧配置混合。</p>'
     page+=f'<p>预设门槛检查：{escape(str(dict(comparisons)))}。所有不利结果、健康异常和失败均保留。Krum 的 60/80% 属于理论保证之外的压力测试。</p>'
+    page+='<p>原健康标记按预先指定的客户端身份计算；攻击前的身份权重标记不等于攻击造成失效。<a href="health_context.json">另表列出暖身期、跨边界及攻击期的诊断上下文</a>，不更改原健康判定或选择规则。</p>'
     page+='<p><a href="report.json">完整报告 JSON</a> · <a href="summary.json">逐任务汇总</a> · <a href="aggregate.json">三种子统计</a> · <a href="comparisons.json">逐场景门槛检查</a> · <a href="visualization_audit.json">绘图核验</a></p></div>'
     page+='<div class="controls">'+''.join(controls)+'</div>'+''.join(cards)
     page+='<details><summary>完整汇总表（最后10轮均值 ± 种子间SD）</summary><div class="overflow"><table><thead><tr>'+''.join(f'<th>{v}</th>' for v in ['数据','分布','攻击','λ','恶意比例','方法','n','Acc %','ASR %','运行秒数','健康数'])+'</tr></thead><tbody>'+''.join(table)+'</tbody></table></div></details>'
@@ -188,6 +190,8 @@ def render(study,destination):
     p.write(destination/'report.json',summary)
     p.write(destination/'summary.json',list(summary['summaries'].values()))
     p.write(destination/'aggregate.json',summary['aggregate']);p.write(destination/'comparisons.json',summary['comparisons'])
+    p.write(destination/'health_context.json',[context(p.read(study/'tasks'/tid/'result.json'),s)
+        for tid,s in summary['summaries'].items() if not s['healthy']])
     figures=[]
     for dataset in manifest['policy']['datasets']:
         for part in manifest['policy']['partitions']:
