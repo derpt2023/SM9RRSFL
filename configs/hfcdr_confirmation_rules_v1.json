@@ -1,0 +1,37 @@
+{
+  "automatic_search_expansion": false,
+  "clean_max_accuracy_drop_vs_fedavg": 0.03,
+  "clean_max_asr_increase_vs_fedavg": 0.05,
+  "criteria": {
+    "fedavg_min_excess_asr": 0.15,
+    "min_excess_asr_reduction": 0.8,
+    "ours_max_accuracy_drop": 0.03,
+    "ours_max_accuracy_gap_to_best_peer": 0.015,
+    "ours_max_excess_asr": 0.05
+  },
+  "formal_seeds": [
+    2026111801,
+    2026111802,
+    2026111803
+  ],
+  "official_test_used": false,
+  "ratios": [
+    0.0,
+    0.2,
+    0.4,
+    0.6,
+    0.8
+  ],
+  "reference_ratios": [
+    0.4,
+    0.8
+  ],
+  "schema": "hfcdr_confirmation_rules_v1",
+  "seed": 2026111703,
+  "sources": {
+    "HFCDR_CONFIRMATION.txt": "ecd15dd3888e6ca9735bd7a2fb700c7b5ea76c6a5c0a5396a9b51db7519e458b",
+    "hfcdr_confirmation.py": "7ff93c8b6a8b9a13057f5341ac19eae291426f11c70f003e099efb5d754870cc",
+    "run_hfcdr_confirmation.py": "67765f0aab1af2d9cb80c9b956227dc183d75abb99473f7292bb5d9d14efacb9",
+    "tests/test_hfcdr_confirmation.py": "009090b828bb1d0787072020bee7ef7522b8e635a3003ae6bd1d4d84bf0a3112"
+  }
+}
