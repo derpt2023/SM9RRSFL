@@ -43,6 +43,8 @@ def make_policy(manifest, decision):
             confirmation_decision_sha256=digest(decision), defense_gate=deepcopy(policy['entry_gate']),
             requires_passed_confirmation=True),
         budget_accounting=dict(fresh_runs=936, candidates_per_method=1, additional_search=False))
+    policy['formal_ordering'] = dict(rule='Rotate independently within each dataset/partition; complementary offsets balance all six positions per dataset',
+        offsets=dict(cifar10=dict(iid=0,dirichlet=3),mnist=dict(iid=1,dirichlet=4)))
     return policy
 
 
@@ -72,8 +74,26 @@ def policy():
     return value
 
 
+def task_specs(spec):
+    base_tasks,base_groups = v.task_specs(spec)
+    lookup = {t['task_id']:t for t in base_tasks};counts = Counter();tasks,groups = [],[]
+    methods = spec['methods']
+    for group in base_groups:
+        members = {lookup[tid]['config']['method']:lookup[tid] for tid in group['tasks']}
+        if set(members) != set(methods) or len(group['tasks']) != 6:
+            raise ValueError('Exactly six paired methods required')
+        representative = next(iter(members.values()))['config']
+        key = representative['dataset'],representative['partition']
+        offset = (counts[key]+spec['formal_ordering']['offsets'][key[0]][key[1]]) % 6
+        counts[key] += 1
+        order = methods[offset:]+methods[:offset]
+        tasks.extend(members[m] for m in order)
+        groups.append(dict(group_id=group['group_id'],tasks=[members[m]['task_id'] for m in order]))
+    return tasks,groups
+
+
 def plan():
-    spec = policy(); tasks, groups = v.task_specs(spec); b = baseline()
+    spec = policy(); tasks, groups = task_specs(spec); b = baseline()
     if len(tasks) != 936 or len(groups) != 156:
         raise ValueError('Full 936-run/156-scenario matrix required')
     audit = dict(passed=True,tasks=936,groups=156,seeds=spec['seeds'],
