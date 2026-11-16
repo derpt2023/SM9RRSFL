@@ -1,0 +1,45 @@
+Independent validation-first supplement, 2026-11-16
+
+The old 936-task unscreened run was drained after 46 completed tasks. Its files
+remain evidence, are not selection data, and cannot be resumed by this entry.
+Those test observations already occurred; the new protocol does not claim that
+the historical official test was never accessed. New formal runs use fresh seeds.
+
+Stage A: 104 FedAvg runs = 2 seeds x 2 datasets x 2 partitions x (1 clean +
+4 ratios x 3 attack settings). Full original horizons: CIFAR150/MNIST50.
+Read only original training files. Use the exact original disjoint validation
+split (CIFAR7500/MNIST2500); never open official test files. No auxiliary attack
+data, cryptographic machinery, best-round selection or automatic retry.
+
+Attack source/target5->7, onset25/12, all malicious local source labels flipped,
+scale1(label flip),2,5 fixed in advance. All methods later face the same attack,
+partition, malicious identities, initial model and local-SGD random seeds.
+Stage A gates are fixed before launch: tail10 paired FedAvg excessASR mean>=.15
+and each development seed>=.10 at BOTH40% and80%, in EVERY dataset/partition.
+20%/60% are retained and reported, not filtered. A failed setting is not silently
+strengthened or replaced. Failed gates hold downstream tuning/formal experiments.
+
+Defense fidelity precedes selection. Krum has no invented search parameter;
+its declared Byzantine bound is fixed by the scenario (60/80% outside guarantee).
+TAD uses the existing disclosed PriorFreeTAD interpretation, fixed parameters,
+as explicitly confirmed by the user on2026-11-16. Its ambiguous original text is
+not claimed to have a unique exact reproduction. VERT uses the published
+K-means selection extension, without ground-truth malicious labels or ratios.
+Only justified defense hyperparameters may be searched, maximum4 candidates
+per tunable method, identical scenarios/seeds/objective/budget cap. No unused
+budget transfer to Ours. Candidate sources must be recorded before that phase.
+Attack screening is independent of whether any defense wins.
+
+Commands (default is plan only):
+python run_hfcdr_validation.py --plan
+python run_hfcdr_validation.py --prepare --data-root /path/to/data
+CUDA_VISIBLE_DEVICES=<one GPU> python run_hfcdr_validation.py --ready --data-root /path/to/data
+python run_hfcdr_validation.py --batch --data-root /path/to/data
+python run_hfcdr_validation.py --report
+
+Source/configuration/data/participant fingerprints, per-roundAcc/ASR/sourceAcc,
+confusion matrices, exposure/defense audits, synchronized runtime components,
+GPU and host peak memory, final model and failure artifacts are retained.
+Up to8 workers, max2 perGPU,8GiB free in two checks5s apart,60s start spacing.
+Shared-load wall times are not exclusive-hardware benchmark measurements.
+Stages never advance merely because a previous process exited successfully.

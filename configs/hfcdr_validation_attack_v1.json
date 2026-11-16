@@ -1,0 +1,40 @@
+{
+  "schema": "hfcdr_validation_v1",
+  "phase": "attack_screen",
+  "seeds": [2026111701, 2026111702],
+  "confirmation_seeds": [2026111703],
+  "formal_seeds": [2026111801, 2026111802, 2026111803],
+  "datasets": ["cifar10", "mnist"],
+  "partitions": ["iid", "dirichlet"],
+  "ratios": [0.0, 0.2, 0.4, 0.6, 0.8],
+  "attacks": [
+    {"name": "label_flip", "attack": "label_flip", "scale": 1.0},
+    {"name": "scale2", "attack": "scaled_label_flip", "scale": 2.0},
+    {"name": "scale5", "attack": "scaled_label_flip", "scale": 5.0}
+  ],
+  "defense_candidates": {"fedavg": [{"id": "fixed", "overrides": {}}]},
+  "candidate_budget_upper_bound": 4,
+  "evaluation": "training_validation_all_source5",
+  "official_test_used": false,
+  "attack_auxiliary_used": false,
+  "cryptography": "absent",
+  "automatic_retry": false,
+  "screening": {
+    "primary_window": "last_10_rounds_fixed",
+    "reference_ratios": [0.4, 0.8],
+    "mean_min_excess_asr": 0.15,
+    "each_seed_min_excess_asr": 0.10,
+    "rule": "Each attack must pass both reference ratios in every dataset/partition. Excess ASR is paired attacked-minus-clean FedAvg ASR. All 20/40/60/80% results are retained. No best-round selection or post-hoc change of source/target/onset/scales.",
+    "on_failure": "Report all failed cells and hold defense tuning/formal comparison for that attack. Do not expand the attack search automatically."
+  },
+  "scheduler": {
+    "max_workers": 8,
+    "max_workers_per_gpu": 2,
+    "minimum_free_mib": 8192,
+    "admission_delay_seconds": 5,
+    "same_gpu_start_spacing_seconds": 60,
+    "group_policy": "All candidate/method tasks of a matched scenario sequential on one GPU, cyclic order.",
+    "timing_caveat": "Shared GPU wall time with load and concurrency recorded; not an exclusive hardware speed benchmark."
+  },
+  "prior_test_exposure": "The stopped unscreened study completed 46 official-test tasks. Those results are exploratory, excluded from this selection and from new formal aggregates. New seeds do not erase that prior exposure."
+}
