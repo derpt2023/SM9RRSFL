@@ -125,4 +125,3 @@ def report(output,manifest):
         missing=missing,failed_or_incomplete=failures,summaries=summaries,**gates,
         official_test_used=False,all_outcomes_retained=True,
         timing_caveat=manifest['policy']['scheduler']['timing_caveat'])
-
