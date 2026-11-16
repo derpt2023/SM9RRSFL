@@ -264,11 +264,18 @@
       "choice": "Existing disclosed PriorFreeTAD interpretation, fixed, explicitly confirmed by user2026-11-16; not a unique exact author reproduction."
     },
     "krum": {
-      "paper": "https://papers.nips.cc/paper/2017/hash/f4b9ec30ad9f68f89b29639786cb62efb-Abstract.html",
+      "paper": "https://proceedings.neurips.cc/paper/2017/hash/f4b9ec30ad9f68f89b29639786cb62ef-Abstract.html",
       "choice": "Single Krum; count bound fixed by scenario, no tuning. Majority-Byzantine settings outside resilience condition."
     },
     "hfcdr": {
       "choice": "Only existing clipping and reliability-recovery parameters; 2x2 bounded grid per dataset. CIFAR native1/1.5 clip and2/4 recovery; MNIST native1.5/3 clip and1.25/1.5 recovery. Detection rule, features, history and removal equations unchanged. Not claimed that these four combinations are printed verbatim in the manuscript."
     }
+  },
+  "selection_sources": {
+    "hfcdr_validation_selection.py": "0175448425ff5ce9e015ff6d184e17b02d7857f64c42c49eca14f477f1998b6a",
+    "run_hfcdr_defense_selection.py": "191bec116a75b46c4e4a246eee067a1fe489ea911b57a76d4836491f5eadcf8f",
+    "tests/test_hfcdr_validation_selection.py": "2d4ba8b413ea55d4fdf77fec09f1eadbe88b546a2dacda732075207282bec5a4",
+    "HFCDR_FIDELITY.txt": "a319b92e34787d863585457c760b10c9ef1bff2221fb10499e7cbba0ac01a45f",
+    "audit_hfcdr_validation.py": "8a75fbb6172032c3926c135b6098d4260db7f991946444b37f54c6c9a110d170"
   }
 }
