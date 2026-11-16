@@ -1,0 +1,34 @@
+{
+  "schema": "hfcdr_attack_study_v1",
+  "seeds": [2026111601, 2026111602, 2026111603],
+  "datasets": ["cifar10", "mnist"],
+  "partitions": ["iid", "dirichlet"],
+  "methods": ["hfcdr", "vert", "alignins", "tad", "krum", "fedavg"],
+  "ratios": [0.0, 0.2, 0.4, 0.6, 0.8],
+  "attacks": [
+    {"name": "label_flip", "attack": "label_flip", "scale": 1.0},
+    {"name": "scale2", "attack": "scaled_label_flip", "scale": 2.0},
+    {"name": "scale5", "attack": "scaled_label_flip", "scale": 5.0}
+  ],
+  "evaluation": "official_test_all_source5",
+  "official_test_used_for_selection": false,
+  "attack_auxiliary_used": false,
+  "cryptography": "absent",
+  "automatic_retry": false,
+  "scheduler": {
+    "max_workers": 8,
+    "max_workers_per_gpu": 2,
+    "minimum_free_mib": 8192,
+    "admission_delay_seconds": 5,
+    "same_gpu_start_spacing_seconds": 60,
+    "group_policy": "six methods sequential on the same GPU, cyclically rotated order",
+    "timing_caveat": "Shared GPU wall time, with recorded load and concurrency; not an exclusive hardware speed benchmark."
+  },
+  "interpretation": {
+    "scaling": "Multiply the entire label-flipped local delta by lambda=2 or 5 after SGD. Not global-model scaling or an adaptive evasion attack.",
+    "zero_percent": "One clean run per dataset/partition/seed/method, referenced by all three attack panels; never counted as independent replicates.",
+    "baselines": "Frozen dataset-specific public and method parameters; PaperVERT and PriorFreeTAD on both datasets. These two implementations differ from historical MNIST VERT/Ding13, and receive no malicious identities or ratio.",
+    "krum": "Receives the declared Byzantine count bound only; 60/80 percent are outside the usual Krum resilience condition.",
+    "selection": "No tuning, best-round selection, early stopping, filtering failed outcomes, or automatic retry. Gates are descriptive on held-out test, not permission to retune."
+  }
+}

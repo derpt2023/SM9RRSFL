@@ -1,0 +1,33 @@
+{
+  "schema": "hfcdr_attack_pilot_v1",
+  "baseline": "configs/reproduction/cifar-best.json",
+  "baseline_sha256": "ea9b2562ab698fef561bda111c43799132585cfaac59c7c7986a51933637147c",
+  "seed": 2026111601,
+  "reserved_confirmation_seed": 2026111602,
+  "partitions": ["iid", "dirichlet"],
+  "methods": ["hfcdr", "fedavg", "krum", "vert", "alignins", "tad"],
+  "conditions": [
+    {"name": "clean", "attack": "none", "malicious_ratio": 0.0, "scale": 1.0},
+    {"name": "label_flip", "attack": "label_flip", "malicious_ratio": 0.4, "scale": 1.0},
+    {"name": "scale2", "attack": "scaled_label_flip", "malicious_ratio": 0.4, "scale": 2.0},
+    {"name": "scale5", "attack": "scaled_label_flip", "malicious_ratio": 0.4, "scale": 5.0}
+  ],
+  "cryptography": "absent",
+  "evaluation": "training_validation_all_source5",
+  "official_test_used": false,
+  "attack_auxiliary_used": false,
+  "label_flip_fraction_of_local_source_class": 1.0,
+  "automatic_retry": false,
+  "criteria": {
+    "primary_window": [141, 150],
+    "secondary_window": [25, 150],
+    "fedavg_min_excess_asr": 0.15,
+    "ours_max_accuracy_drop": 0.03,
+    "ours_max_accuracy_gap_to_best_peer": 0.015,
+    "ours_max_excess_asr": 0.05,
+    "min_excess_asr_reduction": 0.8,
+    "max_honest_false_removal_rate": 0.1,
+    "starvation_honest_weight_loss": 0.99,
+    "starvation_consecutive_rounds": 5
+  }
+}

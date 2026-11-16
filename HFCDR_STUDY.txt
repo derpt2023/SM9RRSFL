@@ -1,0 +1,47 @@
+HFCDR-FL 无密码学补充攻击完整实验
+
+固定范围：六法 × CIFAR-10/MNIST × IID/Dirichlet(alpha=0.5) × 三种子
+2026111601/02/03。每组有 clean + 4比例标签翻转 + 4比例缩放lambda=2 +
+4比例缩放lambda=5，即936项独立训练。0%只跑一次，三类图共用同一结果。
+
+标签翻转：恶意客户端从攻击起始轮将本地所有类别5标签改为7，其他标签不改。
+缩放：对同样标签翻转训练后的整个模型增量乘2或5。它是定向模型更新缩放，
+不是全局参数缩放，也不声称自适应绕过阈值。没有源类别样本的客户端仍保留。
+
+CIFAR沿用cifar-best的40k训练划分、150轮、batch50、攻击25轮起、R4参数。
+MNIST沿用45k训练划分、50轮、batch32、攻击12轮起、sm9rrs-012数值参数。
+其他训练/方法超参数按各自固定configs/reproduction配置取值，不做搜索。
+两套数据均使用当前CIFAR的PaperVERT、PriorFreeTAD核心实现，无比例先验。
+因此MNIST的VERT/TAD实现与历史结果不同；本次六法均重新运行，不混用旧结果。
+Krum单独获得声明的恶意数量上界，60/80%视为其保证条件外压力测试。
+客户端身份仅为client-0..99；无SM9、签名、证书、凭据或密码学模块导入。
+服务端按检测结果直接剔除客户端，原数值检测/权重/本地SGD代码不改。
+
+评估：官方test共10000张；ASR是全部真实类别5被预测为7的比例。
+0% ASR为背景转移率。测试数据不参与攻击、本地训练、防御参数选择或重调。
+保存0..R逐轮准确率、ASR、源类准确率、混淆矩阵、损失、参与/剔除、权重、
+攻击暴露、同步墙钟耗时、实测CUDA峰值与主机RSS、最后模型、实际类绑定。
+主指标预先固定最后10轮平均，另保留最后一轮和攻击期平均，三seed均值与样本SD。
+沿用预实验描述性门槛：FedAvg超额ASR>=15pp、Ours准确率损失<=3pp、距最佳其他法
+<=1.5pp、超额ASR<=5pp、超额ASR降低>=80%，并检查误剔除/聚合饥饿。
+这些门槛用于完整报告，不能保证优势，不能据此回调测试参数或丢弃不利结果。
+
+调度：最多8 worker，每卡最多2；同场景六法在同GPU顺序执行，顺序轮换。
+每次启动须两次至少8192MiB空闲检查，间隔至少5秒；同卡启动间隔至少60秒。
+记录共享负载、GPU UUID和并发，时间不解释为独占GPU速度。不会结束他人进程。
+科学崩溃保留轨迹并继续独立项；执行/环境异常停止派发并排空，绝不自动重试。
+默认plan不训练。--prepare验证数据并创建全新输出。--ready检查CUDA且不训练。
+--batch显式启动一次；存在controller或tasks时拒绝重复启动，无自动续跑。
+输出固定为新的outputs/hfcdr_attack_study_v1；cifar-best及MNIST旧结果均只读。
+
+命令（在项目目录，CUDA只对ready/单worker显式指定；batch自行选择GPU）：
+  python run_hfcdr_attack_study.py --plan
+  python run_hfcdr_attack_study.py --prepare
+  CUDA_VISIBLE_DEVICES=0 python run_hfcdr_attack_study.py --ready
+  python -m unittest discover -s tests -p 'test_hfcdr_attack_study.py' -v
+  python run_hfcdr_attack_study.py --batch
+  python run_hfcdr_attack_study.py --check
+  python run_hfcdr_attack_study.py --report
+
+保持原126科学来源及旧实验包SHA不变；新增入口冻结独立源码清单与数据身份。
+不把预实验48项和完整研究936项混算，既有预实验仅准备、未启动。
