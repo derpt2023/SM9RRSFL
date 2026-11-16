@@ -30,7 +30,14 @@ def summarize(result):
     empty = [r['round'] for r in actual if r['accepted_updates'] == 0]
     starved, streak = [], 0
     for r in actual:
-        streak = streak+1 if r['honest_weight_loss'] >= .99 else 0
+        low_support = r['honest_weight_loss'] >= .99
+        # Krum intentionally selects exactly one update. With 100 honest clients,
+        # the nominal per-client loss is .99 even when that update has full mass.
+        # Preserve the raw diagnostic, but do not call this healthy clean design
+        # starvation. A selected malicious-only update still has zero honest mass.
+        if c['method'] == 'krum' and r.get('malicious_weight_mass', 1.) < 1.:
+            low_support = False
+        streak = streak+1 if low_support else 0
         if streak >= 5:
             starved.append(r['round'])
     if high_fp: reasons.append('honest_false_removal_above_10pct')

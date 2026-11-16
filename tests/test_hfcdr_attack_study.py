@@ -260,6 +260,15 @@ class ReportTests(unittest.TestCase):
         result=self.result();result['records'][-1]['false_positive_removals']=7
         self.assertIn('honest_false_removal_above_10pct',reporting.summarize(result)['health_reasons'])
 
+    def test_krum_single_honest_update_is_not_false_starvation(self):
+        result=self.result();result['config']['method']='krum'
+        for row in result['records']:
+            row.update(accepted_updates=1,honest_weight_loss=.99,malicious_weight_mass=0.)
+        self.assertTrue(reporting.summarize(result)['healthy'])
+        for row in result['records'][-5:]:
+            row.update(honest_weight_loss=1.,malicious_weight_mass=1.)
+        self.assertIn('persistent_honest_weight_starvation',reporting.summarize(result)['health_reasons'])
+
     def test_empty_full_report_keeps_every_cell_missing(self):
         with tempfile.TemporaryDirectory() as temp:
             report=reporting.report(Path(temp),p.plan())
