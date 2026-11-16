@@ -14,6 +14,9 @@ from time import perf_counter
 for name in ('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS'):
     os.environ.setdefault(name,'1')
 os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG',':4096:8')
+# Match the existing reproduction launcher: NVIDIA Torch's optional ONNX import
+# contains old generated protobuf descriptors. No ONNX computation is performed.
+os.environ.setdefault('PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION','python')
 
 import hfcdr_study_protocol as p
 from hfcdr_study_scheduler import now
@@ -39,6 +42,9 @@ def run_task(output, data_root, task_id):
         from hfcdr_pilot_data import participant_record
         from hfcdr_study_runtime import configure_cuda,run_loop,assert_no_cryptography
         environment=configure_cuda(manifest)
+        environment['process_environment']={k:os.environ.get(k) for k in
+            ('CUDA_VISIBLE_DEVICES','CUBLAS_WORKSPACE_CONFIG','OMP_NUM_THREADS',
+             'MKL_NUM_THREADS','OPENBLAS_NUM_THREADS','PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION')}
         p.write(folder/'environment.json',environment)
         data_start=perf_counter()
         dataset,data_identity=p.load_dataset(task['config']['dataset'],data_root)

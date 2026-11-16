@@ -161,6 +161,9 @@ class LoopTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_optional_onnx_import_compatibility_matches_original_launcher(self):
+        self.assertEqual(os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'],'python')
+
     def test_worker_preflight_failure_recorded_once_and_retry_refused(self):
         manifest=p.plan();t=manifest['tasks'][0]
         with tempfile.TemporaryDirectory() as temp:

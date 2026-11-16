@@ -10,6 +10,7 @@ from pathlib import Path
 for key in ('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS'):
     os.environ.setdefault(key,'1')
 os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG',':4096:8')
+os.environ.setdefault('PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION','python')
 
 
 def main():

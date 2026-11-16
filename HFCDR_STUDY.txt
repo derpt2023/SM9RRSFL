@@ -33,6 +33,8 @@ Krum单独获得声明的恶意数量上界，60/80%视为其保证条件外压�
 默认plan不训练。--prepare验证数据并创建全新输出。--ready检查CUDA且不训练。
 --batch显式启动一次；存在controller或tasks时拒绝重复启动，无自动续跑。
 输出固定为新的outputs/hfcdr_attack_study_v1；cifar-best及MNIST旧结果均只读。
+入口继承旧复现入口的PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python兼容设置，
+用于NVIDIA PyTorch的可选ONNX导入；不更换系统依赖、不参与训练数值计算。
 
 命令（在项目目录，CUDA只对ready/单worker显式指定；batch自行选择GPU）：
   python run_hfcdr_attack_study.py --plan
