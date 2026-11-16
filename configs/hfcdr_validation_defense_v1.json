@@ -1,0 +1,274 @@
+{
+  "schema": "hfcdr_validation_v1",
+  "phase": "defense_search",
+  "seeds": [
+    2026111701,
+    2026111702
+  ],
+  "confirmation_seeds": [
+    2026111703
+  ],
+  "formal_seeds": [
+    2026111801,
+    2026111802,
+    2026111803
+  ],
+  "datasets": [
+    "cifar10",
+    "mnist"
+  ],
+  "partitions": [
+    "iid",
+    "dirichlet"
+  ],
+  "ratios": [
+    0.0,
+    0.4,
+    0.8
+  ],
+  "attacks": [
+    {
+      "name": "label_flip",
+      "attack": "label_flip",
+      "scale": 1.0
+    },
+    {
+      "name": "scale2",
+      "attack": "scaled_label_flip",
+      "scale": 2.0
+    },
+    {
+      "name": "scale5",
+      "attack": "scaled_label_flip",
+      "scale": 5.0
+    }
+  ],
+  "defense_candidates": {
+    "hfcdr": [
+      {
+        "id": "baseline",
+        "overrides": {
+          "cifar10": {
+            "detector_clip_factor": 1.0,
+            "suspicion_recovery_factor": 4.0
+          },
+          "mnist": {
+            "detector_clip_factor": 3.0,
+            "suspicion_recovery_factor": 1.25
+          }
+        }
+      },
+      {
+        "id": "recovery",
+        "overrides": {
+          "cifar10": {
+            "detector_clip_factor": 1.0,
+            "suspicion_recovery_factor": 2.0
+          },
+          "mnist": {
+            "detector_clip_factor": 3.0,
+            "suspicion_recovery_factor": 1.5
+          }
+        }
+      },
+      {
+        "id": "clip",
+        "overrides": {
+          "cifar10": {
+            "detector_clip_factor": 1.5,
+            "suspicion_recovery_factor": 4.0
+          },
+          "mnist": {
+            "detector_clip_factor": 1.5,
+            "suspicion_recovery_factor": 1.25
+          }
+        }
+      },
+      {
+        "id": "both",
+        "overrides": {
+          "cifar10": {
+            "detector_clip_factor": 1.5,
+            "suspicion_recovery_factor": 2.0
+          },
+          "mnist": {
+            "detector_clip_factor": 1.5,
+            "suspicion_recovery_factor": 1.5
+          }
+        }
+      }
+    ],
+    "vert": [
+      {
+        "id": "paper",
+        "overrides": {
+          "cifar10": {
+            "vert_history_window": 10,
+            "vert_projection_dim": 256,
+            "vert_predict_epochs": 5,
+            "vert_predict_lr": 0.01
+          },
+          "mnist": {
+            "vert_history_window": 10,
+            "vert_projection_dim": 128,
+            "vert_predict_epochs": 5,
+            "vert_predict_lr": 0.01
+          }
+        }
+      }
+    ],
+    "alignins": [
+      {
+        "id": "paper",
+        "overrides": {
+          "cifar10": {
+            "alignins_sparsity": 0.3,
+            "alignins_tda_radius": 1.0,
+            "alignins_mpsa_radius": 1.0
+          },
+          "mnist": {
+            "alignins_sparsity": 0.3,
+            "alignins_tda_radius": 1.0,
+            "alignins_mpsa_radius": 1.0
+          }
+        }
+      },
+      {
+        "id": "tight",
+        "overrides": {
+          "cifar10": {
+            "alignins_sparsity": 0.3,
+            "alignins_tda_radius": 0.5,
+            "alignins_mpsa_radius": 0.5
+          },
+          "mnist": {
+            "alignins_sparsity": 0.3,
+            "alignins_tda_radius": 0.5,
+            "alignins_mpsa_radius": 0.5
+          }
+        }
+      },
+      {
+        "id": "tight_sign",
+        "overrides": {
+          "cifar10": {
+            "alignins_sparsity": 0.3,
+            "alignins_tda_radius": 1.0,
+            "alignins_mpsa_radius": 0.5
+          },
+          "mnist": {
+            "alignins_sparsity": 0.3,
+            "alignins_tda_radius": 1.0,
+            "alignins_mpsa_radius": 0.5
+          }
+        }
+      },
+      {
+        "id": "wide",
+        "overrides": {
+          "cifar10": {
+            "alignins_sparsity": 0.3,
+            "alignins_tda_radius": 2.0,
+            "alignins_mpsa_radius": 2.0
+          },
+          "mnist": {
+            "alignins_sparsity": 0.3,
+            "alignins_tda_radius": 2.0,
+            "alignins_mpsa_radius": 2.0
+          }
+        }
+      }
+    ],
+    "tad": [
+      {
+        "id": "fixed",
+        "overrides": {}
+      }
+    ],
+    "krum": [
+      {
+        "id": "fixed",
+        "overrides": {}
+      }
+    ]
+  },
+  "candidate_budget_upper_bound": 4,
+  "evaluation": "training_validation_all_source5",
+  "official_test_used": false,
+  "attack_auxiliary_used": false,
+  "cryptography": "absent",
+  "automatic_retry": false,
+  "screening": {
+    "primary_window": "last_10_rounds_fixed",
+    "reference_ratios": [
+      0.4,
+      0.8
+    ],
+    "mean_min_excess_asr": 0.15,
+    "each_seed_min_excess_asr": 0.1,
+    "rule": "Each attack must pass both reference ratios in every dataset/partition. Excess ASR is paired attacked-minus-clean FedAvg ASR. All 20/40/60/80% results are retained. No best-round selection or post-hoc change of source/target/onset/scales.",
+    "on_failure": "Report all failed cells and hold defense tuning/formal comparison for that attack. Do not expand the attack search automatically."
+  },
+  "scheduler": {
+    "max_workers": 8,
+    "max_workers_per_gpu": 2,
+    "minimum_free_mib": 8192,
+    "admission_delay_seconds": 5,
+    "same_gpu_start_spacing_seconds": 60,
+    "group_policy": "All candidate/method tasks of a matched scenario sequential on one GPU, cyclic order.",
+    "timing_caveat": "Shared GPU wall time with load and concurrency recorded; not an exclusive hardware speed benchmark."
+  },
+  "prior_test_exposure": "The stopped unscreened study completed 46 official-test tasks. Those results are exploratory, excluded from this selection and from new formal aggregates. New seeds do not erase that prior exposure.",
+  "entry_gate": {
+    "requires_complete_attack_screen": true,
+    "requires_all_attack_settings_pass": true,
+    "attack_manifest_fingerprint": "351293894aabe8797c995b77b5d5896fc3ec764554fb6024815f55ff9debc4cb",
+    "no_automatic_expansion": true
+  },
+  "selection": {
+    "per": "one configuration per method per dataset, shared across partitions/attacks/ratios",
+    "objective": "mean of .5*tail10_accuracy + .5*(1-tail10_asr), equal weight over the 24 attacked cells per dataset",
+    "clean_max_accuracy_drop_vs_paired_fedavg": 0.03,
+    "clean_max_asr_increase_vs_paired_fedavg": 0.05,
+    "maximum_honest_false_removal_rate": 0.1,
+    "require_all_tunable_candidate_cells_healthy": true,
+    "tie_break": "candidate order, preferring the first (baseline/paper) candidate",
+    "fixed_method_failure": "retain fixed method and all failure/health flags, do not silently remove or tune",
+    "no_feasible_tunable_candidate": "selected=null, report and hold confirmation/formal; no expanded search"
+  },
+  "budget_accounting": {
+    "per_full_candidate_runs": 56,
+    "maximum_full_candidates_per_tunable_method": 4,
+    "hfcdr": 224,
+    "alignins": 224,
+    "vert": 56,
+    "tad": 56,
+    "krum": 56,
+    "total_fresh_runs": 616,
+    "fedavg": "56 matching tasks reused read-only from Stage A; not new independent replicates",
+    "unused_budget_transfer": false
+  },
+  "fidelity_sources": {
+    "vert": {
+      "paper": "https://doi.org/10.1109/TDSC.2025.3630175",
+      "author_code": "https://github.com/mylab426/VERT/tree/cc71a9dff95085219cdc2d6c033c10c13ed3e6e7",
+      "fixed": "history10, Adam lr.01, epochs5, projection128 MNIST/256 CIFAR; published Kmeans selection extension VI-C3. No unsupported search range invented."
+    },
+    "alignins": {
+      "paper": "https://arxiv.org/html/2503.07978v2#S11",
+      "author_code": "https://github.com/JiiahaoXU/AlignIns/tree/49b7d3208444101bc7efa7ce425f21be81d45a4a",
+      "fixed": "masking fraction .3. Four candidates are rows of Table10: (lambda_c,lambda_s)=(1,1),(.5,.5),(1,.5),(2,2). Equal maximum budget4 prevents adding the fifth row for any method."
+    },
+    "tad": {
+      "paper": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11366002/",
+      "choice": "Existing disclosed PriorFreeTAD interpretation, fixed, explicitly confirmed by user2026-11-16; not a unique exact author reproduction."
+    },
+    "krum": {
+      "paper": "https://papers.nips.cc/paper/2017/hash/f4b9ec30ad9f68f89b29639786cb62efb-Abstract.html",
+      "choice": "Single Krum; count bound fixed by scenario, no tuning. Majority-Byzantine settings outside resilience condition."
+    },
+    "hfcdr": {
+      "choice": "Only existing clipping and reliability-recovery parameters; 2x2 bounded grid per dataset. CIFAR native1/1.5 clip and2/4 recovery; MNIST native1.5/3 clip and1.25/1.5 recovery. Detection rule, features, history and removal equations unchanged. Not claimed that these four combinations are printed verbatim in the manuscript."
+    }
+  }
+}
